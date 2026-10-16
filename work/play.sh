@@ -65,7 +65,7 @@ watch_stall() {
             same=$((same + 5))
         fi
         off=$size
-        if [ "$same" -eq 30 ]; then
+        if [ "$same" -eq 30 ] && kill -0 "$gpid" 2>/dev/null; then
             local out="${LOG%.log}.stall-$(date +%H%M%S).stacks"
             eu-stack -p "$gpid" -n 40 > "$out" 2>&1
             echo "[play.sh] no frame for 30 s -- thread stacks in $out" >&2

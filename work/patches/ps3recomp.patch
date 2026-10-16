@@ -698,7 +698,7 @@ index 8be6664..34c4e1b 100644
          if (s_sockets[s].p2p && n > 0) {
              uint32_t un = (uint32_t)n;
 diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
-index 688ff04..13dcf22 100644
+index 688ff04..1a21ef6 100644
 --- a/libs/spurs/cellSpurs.c
 +++ b/libs/spurs/cellSpurs.c
 @@ -14,11 +14,15 @@
@@ -2329,7 +2329,7 @@ index 688ff04..13dcf22 100644
              printf("[cellSpurs]   job[%d]: implausible binary (ea=0x%08X size=%u) -- skipped\n",
                     idx, ea_bin, size_bin);
 -        return;
-+        return 0;
++        return 3;   /* nothing ran and nothing to report: no synthetic completion */
      }
      /* A jobchain job is NOT a SPURS task: Sony's jm2 stages the whole working
       * set in local store and enters the job's CRT with r3 = CellSpursJobContext2*
@@ -2472,24 +2472,36 @@ index 688ff04..13dcf22 100644
      return CELL_OK;
  }
  
-@@ -2478,7 +2538,15 @@ static int jg_wait(u32 ea)
+@@ -2474,11 +2534,26 @@ s32 cellSpursJobGuardReset(u64 guard_ea)
+  * chain then gives up this pass rather than spinning the walker thread
+  * forever). An unknown guard opens immediately -- a chain guarded by something
+  * we never saw initialised must not deadlock the walker. */
+-static int jg_wait(u32 ea)
++/* Blocks until the guard opens, or until the chain is shut down (slot's
++ * `running` cleared; cellSpursShutdownJobChain wakes the wait). A guard that
++ * stays closed is waited on for as long as the chain runs: giving up used to
++ * end the walk with a synthetic completion, which inFAMOUS 2's WWS handlers
++ * read as a message and called through a NULL pointer. */
++static int jg_wait(u32 ea, int slot)
  {
      int i = jg_find(ea);
      if (i < 0) return 1;
 -    for (int spin = 0; spin < 20000; spin++) {     /* ~20 s at 1 ms */
++    int said = 0;
 +#ifndef _WIN32
 +    struct timespec deadline;
 +    clock_gettime(CLOCK_REALTIME, &deadline);
-+    deadline.tv_sec += 20;                          /* then the chain gives up */
++    deadline.tv_sec += 20;                          /* then say so once */
 +#else
-+    const ULONGLONG deadline = GetTickCount64() + 20000;
++    ULONGLONG deadline = GetTickCount64() + 20000;
 +#endif
 +    JG_LOCK();
 +    for (;;) {
++        if (slot >= 0 && !s_jobchains[slot].running) break;   /* shut down */
          if (s_jobguards[i].pending >= s_jobguards[i].reset) {
              /* Consume exactly one release worth of credits, so notifies that
               * arrived during the previous lap still count. */
-@@ -2486,14 +2554,24 @@ static int jg_wait(u32 ea)
+@@ -2486,15 +2561,31 @@ static int jg_wait(u32 ea)
              if (!s_jobguards[i].auto_reset) s_jobguards[i].reset = 0;
              s_jobguards[i].count = s_jobguards[i].reset;
              vm_write32(ea, s_jobguards[i].count);
@@ -2501,23 +2513,31 @@ index 688ff04..13dcf22 100644
          }
 -#ifdef _WIN32
 -        Sleep(1);
++        int timed_out = 0;
 +#ifndef _WIN32
-+        if (pthread_cond_timedwait(&s_jg_cond, &s_jg_lock, &deadline) == ETIMEDOUT &&
-+            s_jobguards[i].pending < s_jobguards[i].reset) break;
++        timed_out = pthread_cond_timedwait(&s_jg_cond, &s_jg_lock, &deadline) == ETIMEDOUT &&
++                    s_jobguards[i].pending < s_jobguards[i].reset;
++        if (timed_out) deadline.tv_sec += 20;
  #else
 -        usleep(1000);
 +        const ULONGLONG now = GetTickCount64();
 +        if (now >= deadline ||
-+            !SleepConditionVariableSRW(&s_jg_cond, &s_jg_lock, (DWORD)(deadline - now), 0)) {
-+            if (GetTickCount64() >= deadline) break;
-+        }
++            !SleepConditionVariableSRW(&s_jg_cond, &s_jg_lock, (DWORD)(deadline - now), 0))
++            timed_out = GetTickCount64() >= deadline;
++        if (timed_out) deadline = GetTickCount64() + 20000;
  #endif
++        if (timed_out && !said) {
++            said = 1;
++            printf("[cellSpurs] guard 0x%08X still closed after 20 s -- still waiting\n", ea);
++        }
      }
+-    printf("[cellSpurs] guard 0x%08X still closed after 20 s -- chain gives up\n", ea);
 +    JG_UNLOCK();
-     printf("[cellSpurs] guard 0x%08X still closed after 20 s -- chain gives up\n", ea);
++    printf("[cellSpurs] guard 0x%08X: chain shut down while waiting\n", ea);
      return 0;
  }
-@@ -2574,7 +2652,7 @@ static void jc_signal_done(u32 jc_ea, int job_index)
+ 
+@@ -2574,7 +2665,7 @@ static void jc_signal_done(u32 jc_ea, int job_index)
                                                  ? spurs_event_data3_probe()
                                                  : (answers_a_count ? mbox : 0));
          static int n = 0;
@@ -2526,7 +2546,7 @@ index 688ff04..13dcf22 100644
              printf("[cellSpurs] chain 0x%08X job %d done -> event queue %u "
                     "(data2=%llu rc=%d)\n",
                     jc_ea, job_index, s_spurs_event_queue[i],
-@@ -2582,10 +2660,46 @@ static void jc_signal_done(u32 jc_ea, int job_index)
+@@ -2582,10 +2673,48 @@ static void jc_signal_done(u32 jc_ea, int job_index)
      }
  }
  
@@ -2572,10 +2592,12 @@ index 688ff04..13dcf22 100644
      u32 pc = entry_ea, ret_pc = 0;
 -    int jobs = 0;
 +    int jobs = 0, synth = 0;
++    int slot = -1;
++    for (int c = 0; c < MAX_JOBCHAINS; c++) if (s_jobchains[c].jc_ea == jc_ea) slot = c;
      /* Bound IDLE steps, not total steps. A SPURS job chain is frequently a
       * SERVICE LOOP -- guard, job, sync, next, repeat -- and is meant to run for
       * the lifetime of the subsystem. A flat cap on total commands therefore
-@@ -2603,14 +2717,16 @@ static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
+@@ -2603,14 +2732,20 @@ static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
          if (cmd != 0 && op == 0) {                    /* JOB */
              { extern u32 g_spurs_job_ls_handle; g_spurs_job_ls_handle = jc_ea; }
              int idx = jobs++;
@@ -2590,12 +2612,16 @@ index 688ff04..13dcf22 100644
 -            jc_signal_done(jc_ea, idx);
 +             * completions that, from its point of view, never arrive.
 +             * Only for a job that did not run for real; see above. */
++            /* ran == 3: an empty or garbage slot, skipped -- a completion for
++             * it would be a message the title never sent (inFAMOUS 2's WWS
++             * handlers called through NULL on one). */
++            if (ran == 3) { pc += 8; continue; }
 +            if (ran != 2) { synth = 1; jc_signal_done(jc_ea, idx); }
 +            else g_spurs_job_mbox_valid = 0;   /* its reply is not for the next synthetic one */
              pc += 8; continue;
          }
          if (op == 1) { pc = (u32)(cmd & ~7ull); continue; }   /* RESET_PC */
-@@ -2619,22 +2735,29 @@ static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
+@@ -2619,22 +2754,29 @@ static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
          if (op == 7) {
              if (ext == (7 | (15 << 3))) {                     /* END */
                  printf("[cellSpurs] chain 0x%08X: END after %d job(s)\n", jc_ea, jobs);
@@ -2620,7 +2646,7 @@ index 688ff04..13dcf22 100644
 -            if (!jg_wait(g_ea)) return;                  /* still closed */
 -            pc += 8; continue;
 +            jc_lap_timing(jc_ea, jobs, 0);
-+            if (!jg_wait(g_ea)) goto out;                /* still closed */
++            if (!jg_wait(g_ea, slot)) goto out;          /* shut down */
 +            jc_lap_timing(jc_ea, jobs, 1);
 +            pc += 8;
 +            { u32 grab = 0;
@@ -2631,7 +2657,7 @@ index 688ff04..13dcf22 100644
          }
          /* NOP(0) / SYNC+LWSYNC(2, one virtual SPU: nothing to wait for) /
           * FLUSH(5) / JOBLIST(6, nested arrays TODO) / SET_LABEL */
-@@ -2643,6 +2766,8 @@ static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
+@@ -2643,6 +2785,8 @@ static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
      printf("[cellSpurs] chain 0x%08X: 4096 commands with no job run after %d "
             "job(s) -- malformed?\n",
             jc_ea, jobs);
@@ -2640,7 +2666,7 @@ index 688ff04..13dcf22 100644
  }
  
  static DWORD WINAPI jc_thread(LPVOID p)
-@@ -2655,12 +2780,12 @@ static DWORD WINAPI jc_thread(LPVOID p)
+@@ -2655,12 +2799,12 @@ static DWORD WINAPI jc_thread(LPVOID p)
       * Confirms timing-vs-never before committing to the async rewrite. */
      { const char* d = getenv("SPURS_JC_DELAY");
        if (d && *d) Sleep((unsigned)atoi(d)); }
@@ -2656,7 +2682,7 @@ index 688ff04..13dcf22 100644
      return 0;
  }
  
-@@ -2724,7 +2849,7 @@ s32 cellSpursRunJobChain(u64 jc_ea)
+@@ -2724,10 +2868,11 @@ s32 cellSpursRunJobChain(u64 jc_ea)
  s32 cellSpursShutdownJobChain(u64 jc_ea)
  {
      static int _n = 0;
@@ -2665,7 +2691,11 @@ index 688ff04..13dcf22 100644
      for (int i = 0; i < MAX_JOBCHAINS; i++) {
          if (s_jobchains[i].jc_ea == (u32)jc_ea) {
              s_jobchains[i].running = 0;   /* stop the walker; Join can now succeed */
-@@ -2739,7 +2864,7 @@ s32 cellSpursShutdownJobChain(u64 jc_ea)
++            JG_LOCK(); JG_BROADCAST(); JG_UNLOCK();   /* a walker parked at its guard sees it */
+             return CELL_OK;
+         }
+     }
+@@ -2739,7 +2884,7 @@ s32 cellSpursShutdownJobChain(u64 jc_ea)
  s32 cellSpursJoinJobChain(u64 jc_ea)
  {
      static int _n = 0;
@@ -2674,7 +2704,7 @@ index 688ff04..13dcf22 100644
      /* Run/Kick walk the chain on a host thread, so Join has to wait for it.
       * Returning at once told the title its jobs were done while they were
       * still running. The Simpsons Arcade Game runs and joins a chain every
-@@ -2764,7 +2889,7 @@ s32 cellSpursJoinJobChain(u64 jc_ea)
+@@ -2764,7 +2909,7 @@ s32 cellSpursJoinJobChain(u64 jc_ea)
  s32 cellSpursJobChainGetError(u64 jc_ea, u64 cause_out_ea)
  {
      static int _n = 0;
@@ -2683,7 +2713,7 @@ index 688ff04..13dcf22 100644
      if (cause_out_ea) vm_write32((u32)cause_out_ea, 0);
      return CELL_OK;
  }
-@@ -2827,7 +2952,7 @@ s32 _cellSpursQueueInitialize(u64 spurs_ea, u64 taskset_ea, u64 queue_ea,
+@@ -2827,7 +2972,7 @@ s32 _cellSpursQueueInitialize(u64 spurs_ea, u64 taskset_ea, u64 queue_ea,
      memset(vm_base + (uint32_t)buffer_ea, 0, (size_t)size * depth);
  
      static int _n = 0;
@@ -2692,7 +2722,7 @@ index 688ff04..13dcf22 100644
          printf("[cellSpurs] _QueueInitialize(taskset=0x%08X q=0x%08X buf=0x%08X size=%u depth=%u dir=%u) -> BE line written\n",
                 (u32)taskset_ea, (u32)queue_ea, (u32)buffer_ea, size, depth, direction);
      return CELL_OK;
-@@ -2836,7 +2961,7 @@ s32 _cellSpursQueueInitialize(u64 spurs_ea, u64 taskset_ea, u64 queue_ea,
+@@ -2836,7 +2981,7 @@ s32 _cellSpursQueueInitialize(u64 spurs_ea, u64 taskset_ea, u64 queue_ea,
  s32 cellSpursQueueClear(u64 queue_ea)
  {
      static int _n = 0;
@@ -2701,7 +2731,7 @@ index 688ff04..13dcf22 100644
      return CELL_OK;
  }
  
-@@ -2941,7 +3066,7 @@ s32 cellSpursQueuePushBody(u64 queue_ea, u64 data_ea, u32 isBlocking)
+@@ -2941,7 +3086,7 @@ s32 cellSpursQueuePushBody(u64 queue_ea, u64 data_ea, u32 isBlocking)
          spu_taskset_signal_task(tsp, (uint32_t)woke);
      }
  
@@ -2710,7 +2740,7 @@ index 688ff04..13dcf22 100644
          printf("[cellSpurs] QueuePush#%d q=0x%08X slot=%u (cur=%u->%u) buf=0x%08X+0x%X "
                 "size=%u depth=%u waiters=%u woke=%d sync=%d/%d tail=%d->%d taskset=0x%08X\n",
                 _n, q, slot, cur, nxt, buf, slot * sz, sz, dep, waiters, woke, sync, nsync, tail, ntail, tsp);
-@@ -2952,83 +3077,143 @@ s32 cellSpursQueuePushBody(u64 queue_ea, u64 data_ea, u32 isBlocking)
+@@ -2952,83 +3097,143 @@ s32 cellSpursQueuePushBody(u64 queue_ea, u64 data_ea, u32 isBlocking)
   * Misc SPURS surface the title links (logged CELL_OK stubs).
   * =====================================================================*/
  
@@ -2900,7 +2930,7 @@ index 688ff04..13dcf22 100644
      return CELL_OK;
  }
  
-@@ -3119,7 +3304,7 @@ s32 cellSpursTaskGetReadOnlyAreaPattern(u64 pattern_ea, u64 elf_ea)
+@@ -3119,7 +3324,7 @@ s32 cellSpursTaskGetReadOnlyAreaPattern(u64 pattern_ea, u64 elf_ea)
      vm_write64((uint32_t)pattern_ea + 8, word[1]);
  
      static int _n = 0;
@@ -2909,7 +2939,7 @@ index 688ff04..13dcf22 100644
          printf("[cellSpurs] TaskGetReadOnlyAreaPattern(elf=0x%08X) -> %016llX %016llX\n",
                 (u32)elf_ea, (unsigned long long)word[0], (unsigned long long)word[1]);
      return CELL_OK;
-@@ -3146,7 +3331,7 @@ s32 cellSpursTaskGetContextSaveAreaSize(u64 size_out_ea, u64 pattern_ea)
+@@ -3146,7 +3351,7 @@ s32 cellSpursTaskGetContextSaveAreaSize(u64 size_out_ea, u64 pattern_ea)
      vm_write32((uint32_t)size_out_ea, size);
  
      static int _n = 0;
@@ -2918,7 +2948,7 @@ index 688ff04..13dcf22 100644
          printf("[cellSpurs] TaskGetContextSaveAreaSize(ls=%016llX %016llX, %u blocks) -> %u (0x%X)\n",
                 (unsigned long long)hi, (unsigned long long)lo, blocks, size, size);
      return CELL_OK;
-@@ -3159,7 +3344,7 @@ s32 cellSpursTasksetAttributeSetTasksetSize(CellSpursTasksetAttribute* attr, u32
+@@ -3159,7 +3364,7 @@ s32 cellSpursTasksetAttributeSetTasksetSize(CellSpursTasksetAttribute* attr, u32
  {
      if (!attr) return CELL_SPURS_TASK_ERROR_NULL_POINTER;
      static int _n = 0;
@@ -2927,7 +2957,7 @@ index 688ff04..13dcf22 100644
      return CELL_OK;
  }
  
-@@ -3169,42 +3354,61 @@ s32 cellSpursTasksetAttributeSetTasksetSize(CellSpursTasksetAttribute* attr, u32
+@@ -3169,42 +3374,61 @@ s32 cellSpursTasksetAttributeSetTasksetSize(CellSpursTasksetAttribute* attr, u32
  s32 cellSpursQueueAttachLv2EventQueue(u64 queue_ea)
  {
      static int _n = 0;
@@ -3019,7 +3049,7 @@ index 688ff04..13dcf22 100644
  s32 _cellSpursLFQueueInitialize(u64 owner_ea, u64 queue_ea, u64 buffer_ea,
                                  u32 size, u32 depth, u32 direction)
  {
-@@ -3213,30 +3417,17 @@ s32 _cellSpursLFQueueInitialize(u64 owner_ea, u64 queue_ea, u64 buffer_ea,
+@@ -3213,30 +3437,17 @@ s32 _cellSpursLFQueueInitialize(u64 owner_ea, u64 queue_ea, u64 buffer_ea,
  
      uint32_t q = (uint32_t)queue_ea;
      for (uint32_t o = 0; o < 128; o += 4) vm_write32(q + o, 0);
@@ -3057,7 +3087,7 @@ index 688ff04..13dcf22 100644
                 (u32)owner_ea, (u32)queue_ea, (u32)buffer_ea, size, depth, direction);
      return CELL_OK;
  }
-@@ -3244,6 +3435,135 @@ s32 _cellSpursLFQueueInitialize(u64 owner_ea, u64 queue_ea, u64 buffer_ea,
+@@ -3244,6 +3455,135 @@ s32 _cellSpursLFQueueInitialize(u64 owner_ea, u64 queue_ea, u64 buffer_ea,
  s32 cellSpursLFQueueAttachLv2EventQueue(u64 queue_ea)
  {
      static int _n = 0;
