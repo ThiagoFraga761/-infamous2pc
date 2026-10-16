@@ -443,11 +443,48 @@ The one engine-side change is WPOS: the GPU hands the fragment program image
 pixels, so `fp_alpha.w` carries 1/N.
 
 At 2x the pier, the tutorial and the cutscene render with the same light,
-particles and exposure as 1x, and nothing falls back to the SPU. It costs:
-the pier walk at ~63 fps and the tutorial at ~89, against ~123. The RSX thread
-waits for the GPU at the end of every frame (46% of its time at 2x, 18-22% at
-1x), so GPU time adds to the frame instead of overlapping it -- the case for
-frame pipelining (`rpi/frame-pipelining/`).
+particles and exposure as 1x, and nothing falls back to the SPU. At first it
+cost a lot: the pier walk at ~63 fps and the tutorial at ~89, against ~123.
+The RSX thread waited for the GPU at the end of every frame (46% of its time
+at 2x, 18-22% at 1x), so GPU time added to the frame instead of overlapping
+it. With frame pipelining (below) the pier walk runs at ~114 fps at 2x
+(2560x1440), and the 3D menu at ~65 fps at 3x (3840x2160), where the GPU
+becomes the limit.
+
+## Frame pipelining (`PS3RECOMP_VK_PIPELINE`)
+
+A present used to submit the frame and wait for the GPU to finish it. Now it
+submits and goes on: the next frame records into a second set of everything
+a batch holds while the GPU renders the first, and a set is waited on only
+before it is recorded into again (two frames in flight). The set is:
+
+- the command-buffer chain and its fence;
+- the window blit's command buffer and acquire semaphore;
+- the vertex, uniform, staging and readback rings;
+- the dead buffers;
+- the four descriptor pools;
+- the ZPASS queries and reports;
+- the deferred readbacks.
+
+`vk_slot_swap` exchanges the two sets, so nothing that uses the globals
+changed. `vk_flush` keeps its meaning: it submits what is open and waits for
+both. Two things had to change with it:
+
+- **ZPASS.** A report recorded before any CLEAR in its batch also counts what
+  the batches before it counted since the clear. That count is only known
+  once they have completed, so it travels as a carry from batch to batch.
+- **The small-target writeback** (the 20x11 luminance the CPU reads) is now
+  recorded into the frame's own batch before the present, and the rows reach
+  guest memory when that batch completes (`readback_deferred`). Before, it
+  forced a wait right after every present.
+
+The parked frame is also polled (`vkGetFenceStatus`, every 64 operations) and
+completed as soon as the GPU is done with it, so the reports and the
+luminance arrive about a frame later, which is when the game reads them.
+
+Effect: the RSX thread's time at present went from 21-33% to 0-4% at 1x, the
+2x pier walk from ~63 to ~114 fps, and the 3D menu at 1x from ~117 to
+~120-125. `PS3RECOMP_VK_PIPELINE=0` restores the wait.
 
 Not scaled yet: lines and points (1 pixel), NV3089 copies (CPU copies of a
 downsampled readback, so water and blur sources stay at 720p).
@@ -524,6 +561,7 @@ and the audio chain froze the game with it.
 | `PS3RECOMP_VK_SPLIT=<n>` | operations per command buffer before it goes to the GPU (0: one per frame) |
 | `PS3RECOMP_ENG_HASHSTATS=1` | texture bytes hashed per frame, by memory and span size |
 | `PS3RECOMP_ENG_DRAWTRACE_PX=<fx>,<fy>` | with `PS3RECOMP_ENG_DRAWTRACE`: every draw that changes the pixel at that place (fractions of the target) |
+| `PS3RECOMP_VK_PIPELINE=0` | wait for the GPU at every present instead of keeping a frame in flight |
 | `PS3RECOMP_RES_SCALE=<n>` | render targets n times the guest's size each way (1-4); see "Resolution scale" |
 | `PS3RECOMP_VK_PRESENT=mailbox\|fifo\|immediate` | presentation mode (mailbox by default: no tearing, no stall while the window is hidden) |
 | `PS3_VERBOSE=1` | log every SPU job dispatch and every wait (on by default when stderr is not a terminal; costs ~15% at the pier) |

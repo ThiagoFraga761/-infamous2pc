@@ -81,3 +81,16 @@ that was just submitted, and nothing overlaps.
 - The suite, 8/8.
 - `vk-stats`, `PS3_CLOCK_STATS` present %, and fps over the same 200 s run.
 - code-reviewer in a separate context after Phase 1 and after Phase 2.
+
+## Status (2026-10-16)
+
+Phases 1 and 2 are in, with these differences from the plan:
+
+- **The second set is swapped into the globals** (`vk_slot_swap`) instead of
+  indexing every use by slot.
+- **ZPASS.** Each set has its own pool, and a carry links the batches.
+- **The parked frame is polled** (`vkGetFenceStatus`) and completed early.
+
+Measured: at present, the RSX thread spends 0-4% of its time (was 21-33%), and
+the 2x pier walk runs at ~114 fps (was ~63). See docs/NOTES.md, "Frame
+pipelining".

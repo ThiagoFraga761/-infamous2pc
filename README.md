@@ -34,8 +34,8 @@ The largest gains come from the following changes:
   accesses inlined and guest registers kept in host registers across them.
 
 Rendering above 720p: `PS3RECOMP_RES_SCALE=2 work/play.sh` draws at
-2560x1440 (3 for 3840x2160). It works, but costs a lot for now (the pier at
-~63-89 fps at 2x): the GPU's time is not yet overlapped with the next frame.
+2560x1440 (the pier at ~114 fps), `3` at 3840x2160 (the 3D menu at ~65 fps,
+GPU-bound). `PS3RECOMP_VK_FULLSCREEN=1` for a fullscreen window.
 
 See [docs/NOTES.md](docs/NOTES.md). `work/play.sh` documents the switches.
 

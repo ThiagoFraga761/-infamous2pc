@@ -19,8 +19,7 @@ export PS3RECOMP_VK_GUEST_PROGRAMS=1
 export PS3RECOMP_VK_WINDOW=1
 # Mailbox presentation by default: no tearing, no wait on the display, and no
 # stall while the window is hidden. PS3RECOMP_VK_PRESENT=fifo is vsync.
-# PS3RECOMP_RES_SCALE=2 (or 3) renders at that multiple of 1280x720 (slower:
-# the GPU's time is not yet overlapped with the next frame).
+# PS3RECOMP_RES_SCALE=2 (or 3) renders at that multiple of 1280x720.
 # PS3RECOMP_VK_FULLSCREEN=1 opens the window fullscreen.
 export SDL_NO_SIGNAL_HANDLERS=1
 # Every 10 s, "[rsx fps] N fps ..." in this terminal.
