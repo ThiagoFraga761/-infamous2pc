@@ -8,7 +8,7 @@
 ppu=0
 for a in "$@"; do
     case "$a" in
-        */src/recomp/ppu_recomp_*.cpp) ppu=1 ;;
+        */src/recomp*/ppu_recomp_*.cpp) ppu=1 ;;
     esac
 done
 if [ "$ppu" = 1 ] && [ -z "${PORT_PPU_GCC:-}" ]; then

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Regenerate work/patches/ps3recomp.patch from a working ps3recomp tree: every
 # change against the upstream base commit, minus build trees, firmware the
-# toolkit can lift locally (fw_spu/), save data and local tool configuration.
+# toolkit can lift locally (fw_spu/), save data, local tool configuration and
+# the conformance driver tools/test_ppu_lift.py regenerates on every run.
 #
 #   scripts/make_patch.sh [toolkit dir]   (default: $PS3RECOMP_DIR, else ./ps3recomp)
 set -euo pipefail
@@ -16,7 +17,8 @@ git clone -q --no-checkout "$UPSTREAM" "$tmp/up"
 git -C "$tmp/up" checkout -q "$BASE"
 rsync -a --delete --exclude .git --exclude fw_spu --exclude gamedata --exclude build \
     --exclude 'build-*' --exclude __pycache__ --exclude .ruff_cache --exclude '.mcp.json' \
-    --exclude 'mcp.json' --exclude '.env' --exclude '.env.*' "$SRC/" "$tmp/up/"
+    --exclude 'mcp.json' --exclude '.env' --exclude '.env.*' \
+    --exclude '/scratch/ppu_conformance*' "$SRC/" "$tmp/up/"
 git -C "$tmp/up" add -A
 git -C "$tmp/up" diff --cached > "$ROOT/work/patches/ps3recomp.patch"
 git -C "$tmp/up" diff --cached --stat | tail -1

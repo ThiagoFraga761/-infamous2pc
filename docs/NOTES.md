@@ -117,6 +117,27 @@ clang also builds a lifted unit in about 70 s and 2 GB, where GCC takes about
 these changes the pier runs at about 119 fps and the tutorial at 122. The
 main thread is still about 95% busy.
 
+A second round, measured on the idle 3D main menu (the steadiest scene the
+title has; the main PPU thread is ~99% busy there), three boots of each build
+alternating: 109.9 against 105.6 fps, ahead in every pair.
+
+- **Stack accesses skip the checks.** The lifter sends a load or store whose
+  address comes from r1 (prologues, epilogues, spills: ~40% of the guest's
+  memory operations) to accessors that test nothing but the diagnostic switch;
+  stores keep the SPU-reservation check. `PPU_LIFT_STACK=0` lifts without.
+- **Indirect calls.** With no call diagnostic armed, a call to a lifted
+  function goes straight from the hash lookup to the call; the full dispatcher
+  read a dozen variables per call (~3% of the thread).
+- **The profiler breadcrumb** every syscall and HLE call leaves is the host
+  return address; it is turned into a guest function (a binary search) only
+  when something reads it.
+- **Short usleeps spin with PAUSE**, not a `sched_yield` syscall per turn.
+- **More VMX float ops in SIMD:** vmaxfp, vminfp, vrefp, vrsqrtefp, vcfsx,
+  vctsxs, and the int/float conversions scale by a power of two built from
+  its bits instead of calling `ldexpf`. `runtime/ppu/tests/test_vmx_simd.c`
+  checks them against the scalar loops bit for bit (and the conversions
+  against the old `ldexpf` spelling).
+
 Logging cost more than expected. `work/play.sh` pipes the game through `tee`,
 and with stderr not a terminal the runtime logs every SPU job and every wait:
 thousands of lines a second, all through one lock. That gave 84 fps at the
@@ -186,6 +207,25 @@ the title was still writing for its next frame, sometimes only half written.
 - **Each job reads its descriptor once.** It used to read it twice: once to
   pick the lift, again to stage. In between, the title could swap the
   binary.
+
+**Falling behind under load.** The audio thread queues work two submissions
+deep (two descriptor banks, alternating) and notifies in bursts, a few
+submissions within a millisecond. At the pier a lap takes ~0.5 ms and the
+walker always waits at the guard when the notify comes (`SPURS_JC_TRACE`:
+notify to open under 100 us, no descriptor or command rewritten during a
+lap). In the Beast fight, laps reached 8-10 ms; the thread refilled a bank
+the walker had not finished, and the walker read one slot zeroed. Two
+things then made a skipped job fatal, and both are gone:
+
+- the walker sent a synthetic "job done" for the job it skipped, to every
+  queue attached to the chain; the WWS job-manager threads never get an
+  event from this chain, read it as a message and called through NULL;
+- a guard closed for 20 s ended the walk with another synthetic event.
+
+A garbage slot is now skipped with no event, and a guard is waited on for as
+long as its chain runs. The heaviest jobs are Wwise DSP binaries at
+0x008AE400 (~0.7 ms), 0x008A7080 and 0x00898880 (~0.35 ms each); a lap that
+runs many of them is where the time goes.
 
 **Diagnostics.**
 
