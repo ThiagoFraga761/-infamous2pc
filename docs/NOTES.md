@@ -153,6 +153,69 @@ thousands of lines a second, all through one lock. That gave 84 fps at the
 pier against 98 without it. `play.sh` and the benchmark now set
 `PS3_VERBOSE=0`.
 
+### The main thread waiting on the SPUs
+
+After the compiler work, a profile of the pier walk put a quarter of the main
+thread's samples in `sys_timer_usleep`. `PS3_POLLTOP=10` names the loop:
+`func_00371000` calls `func_00504D90`, which takes the minimum of seven
+per-SPU progress counters, with `usleep(1)` between tries, about 220,000
+times a second. The main thread waits for SPU work for about a fifth of the
+frame, while each SPU thread is busy about 80% of the time. Two things in the
+SPU runtime made that wait longer than the work itself:
+
+- **Idle SPUs slept through new work.** An idle SPURS kernel sleeps until
+  the PPU library wakes it, or for 1 ms. inFAMOUS 2 also hands work over
+  without a library call: readyCount is changed by its own atomics and by
+  the WWS policy module's PUTLLC. `SPURS_IDLE_STATS=1` counted about 100
+  sleeps a second that ran to the timeout and then found work. An idle SPU
+  now polls for 200 us before it sleeps (`SPURS_IDLE_SPIN_US`, set by
+  `main.cpp`). On the idle 3D menu, three alternating pairs went from 110.1
+  to 114.3 fps. 50 us and 1000 us did no better.
+- **WWS job modules always took the slow branch resolver.** Every indirect
+  branch made while a job-module overlay (id 200 and up) was resident went
+  through `spu_indirect_branch_slow`, for the sake of LBP-era job hooks that
+  are all diagnostics. Those modules do most of the SPU work here. The fast
+  path now takes them when no diagnostic is on.
+
+With those two in, the pier walk ran at ~122 fps, and the main thread still
+spent about 30% of its time in that loop. Sampled together, the SPU threads
+were busy 91% of the milliseconds the main thread waited and 88% of the rest:
+the wait is SPU throughput now, not latency. Two cuts to what each SPU pays
+per DMA:
+
+- **Fences.** Every MFC command went through four full fences: two in the
+  lock-line path, which every `MFC_Cmd` write enters first, and two around
+  the DMA itself. On x86, which only lets a load pass an earlier store, the
+  lock-line pair is now kept to lock-line commands, and a GET (loads only)
+  skips the fence after it. About 70% of `spu_wrch`'s samples sat on those
+  fences.
+- **A channel read built its 128-bit result as a 4-byte store under an
+  8-byte reload**, which the CPU cannot forward: three quarters of
+  `spu_rdch`. It is now written as two 64-bit halves.
+
+The Wwise chain still falls behind under load (see "Falling behind under
+load"): a job then runs a descriptor the title has already refilled, loops
+past its step budget, loops on the interpreter as well, and the chain used to
+report it with a synthetic completion. The WWS handlers took that for a
+message and called through NULL, as with the empty slots before. With
+`SPURS_JC_NO_SYNTH=1` (set by `main.cpp`) such a job is dropped silently too.
+
+**Profile-guided optimisation: tried, no gain.** Two attempts on the lifted
+code, which both run through clang:
+
+- **Instrumented** (`-fprofile-instr-generate`). The five SPU threads bump
+  the same counters, and the game ran at 2-7 fps: no profile of anything
+  real.
+- **Sampled** (AutoFDO). `perf record -b` on the Zen 5's LbrExtV2 during
+  the tutorial and the walk, `llvm-profgen` to a 10 MB profile, then
+  `-fprofile-sample-use`. In two alternating pairs of pier benchmarks against
+  the same build without the profile, gameplay ran at 121.5 and 123.0 fps
+  against 123.1 and 123.4, and the cutscene at 82.8 and 82.4 against 83.4
+  and 83.1.
+
+The plumbing was removed. `bench_pier.sh` keeps `BENCH_PERF_AT=tutorial` and
+`BENCH_PERF_ARGS` from it.
+
 ### Local memory write tracking (`PS3RECOMP_WTRACK`)
 
 A gameplay profile had the RSX thread 97% busy, and most of that time went to
@@ -353,6 +416,42 @@ the colour export width), and the downsampled buffer matches the scene.
 `PS3RECOMP_ENG_DRAWTRACE_PX=<fx>,<fy>` names the draws that change one pixel,
 which is how the pass was found.
 
+## Resolution scale (`PS3RECOMP_RES_SCALE`)
+
+`PS3RECOMP_RES_SCALE=2` (or 3, 4) draws every colour and depth target that
+many times the guest's size each way; textures stay at the guest's size. The
+engine still deals in guest pixels everywhere -- target sizes, viewports,
+scissors, readback rectangles, snapshot extents -- and the Vulkan backend
+converts at the edge, so every size the engine compares (the texture/surface
+match, the writeback pitch check, the small-target writeback, the G-buffer
+copy checks of the native passes) stays guest against guest. What the
+backend does:
+
+- the viewport and scissor x N, and the depth-bias slope x N (a scaled pixel
+  sees 1/N of the slope);
+- a readback, which is how the CPU sees a target (auto-exposure, NV3089
+  copies), filtered down to guest pixels: colour through a linear blit,
+  depth and stencil by taking the middle texel of each N x N block;
+- a colour target seeded from guest memory goes up through a nearest blit;
+- ZPASS counts divided by N^2;
+- the native lighting's image size words rewritten for the scaled images
+  (SSAO already scales with its image);
+- the window gets the full-size frame; `s_vk.color` stays the guest-size one
+  the dumps read.
+
+The one engine-side change is WPOS: the GPU hands the fragment program image
+pixels, so `fp_alpha.w` carries 1/N.
+
+At 2x the pier, the tutorial and the cutscene render with the same light,
+particles and exposure as 1x, and nothing falls back to the SPU. It costs:
+the pier walk at ~63 fps and the tutorial at ~89, against ~123. The RSX thread
+waits for the GPU at the end of every frame (46% of its time at 2x, 18-22% at
+1x), so GPU time adds to the frame instead of overlapping it -- the case for
+frame pipelining (`rpi/frame-pipelining/`).
+
+Not scaled yet: lines and points (1 pixel), NV3089 copies (CPU copies of a
+downsampled readback, so water and blur sources stay at 720p).
+
 ## Saves
 
 The game loads its save icon once, at boot, through the raw `sys_fs`
@@ -425,9 +524,13 @@ and the audio chain froze the game with it.
 | `PS3RECOMP_VK_SPLIT=<n>` | operations per command buffer before it goes to the GPU (0: one per frame) |
 | `PS3RECOMP_ENG_HASHSTATS=1` | texture bytes hashed per frame, by memory and span size |
 | `PS3RECOMP_ENG_DRAWTRACE_PX=<fx>,<fy>` | with `PS3RECOMP_ENG_DRAWTRACE`: every draw that changes the pixel at that place (fractions of the target) |
+| `PS3RECOMP_RES_SCALE=<n>` | render targets n times the guest's size each way (1-4); see "Resolution scale" |
 | `PS3RECOMP_VK_PRESENT=mailbox\|fifo\|immediate` | presentation mode (mailbox by default: no tearing, no stall while the window is hidden) |
 | `PS3_VERBOSE=1` | log every SPU job dispatch and every wait (on by default when stderr is not a terminal; costs ~15% at the pier) |
 | `BENCH_PERF=<s>` | `work/tests/bench_pier.sh`: also a `perf` profile of the walk; threads are named (`spurs0`..`spurs4`, `rsx`, `p:<guest name>`) |
+| `PLAY_PROFILE=0`, `PLAY_PROFILE_BELOW=<fps>` | `work/play.sh` records 20 s of `perf` after 30 s of 3D frames under 70 fps (at most three a session); off, or another threshold |
+| `SPURS_IDLE_STATS=1` | what ends each idle SPU's wait (a notify, a timeout onto work, its spin), every 10 s |
+| `SPURS_IDLE_SPIN_US=<us>` | how long an idle SPU polls for work before it sleeps (200 in the port) |
 
 ## Lessons
 

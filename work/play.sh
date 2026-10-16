@@ -19,6 +19,9 @@ export PS3RECOMP_VK_GUEST_PROGRAMS=1
 export PS3RECOMP_VK_WINDOW=1
 # Mailbox presentation by default: no tearing, no wait on the display, and no
 # stall while the window is hidden. PS3RECOMP_VK_PRESENT=fifo is vsync.
+# PS3RECOMP_RES_SCALE=2 (or 3) renders at that multiple of 1280x720 (slower:
+# the GPU's time is not yet overlapped with the next frame).
+# PS3RECOMP_VK_FULLSCREEN=1 opens the window fullscreen.
 export SDL_NO_SIGNAL_HANDLERS=1
 # Every 10 s, "[rsx fps] N fps ..." in this terminal.
 export PS3RECOMP_ENG_FPSLOG=1
@@ -47,25 +50,47 @@ echo "log: $LOG"
 # A hang leaves the thread stacks behind: when no "[rsx fps]" line has come
 # for 30 s, eu-stack (elfutils) writes every thread's stack -- lifted guest
 # functions included, as func_<address> -- next to the log, once.
+# A slow stretch leaves a profile behind: after three fps lines in a row under
+# PLAY_PROFILE_BELOW (70), counting only windows that are mostly 3D frames
+# (not the videos and menus), `perf record` samples the game for 20 s into
+# <log>.perf-<time>.data -- at most three a session, two minutes apart.
+# PLAY_PROFILE=0 turns it off; PERF=<binary> when perf is not on PATH.
+PERF="${PERF:-$(command -v perf || true)}" PERF_LIBS="${LD_LIBRARY_PATH:-}"
+if [ -z "$PERF" ] && [ -x "$HOME/tools/perf-rpm/root/usr/bin/perf" ]; then   # unpacked from the rpm
+    PERF="$HOME/tools/perf-rpm/root/usr/bin/perf"
+    PERF_LIBS="$HOME/tools/perf-rpm/root/usr/lib64${PERF_LIBS:+:$PERF_LIBS}"
+fi
 watch_stall() {
     set +e                             # a failing probe must not end the watcher
-    local gpid="" off=0 same=0 seen=0 size
+    local gpid="" off=0 same=0 seen=0 size chunk fps slow=0 profiles=0 last_prof=0
     for _ in $(seq 1 100); do
         gpid=$(pgrep -P $$ -x MyGameRecomp | head -1); [ -n "$gpid" ] && break; sleep 0.2
     done
-    [ -n "$gpid" ] && command -v eu-stack > /dev/null || return 0
+    [ -n "$gpid" ] || return 0
     while kill -0 "$gpid" 2>/dev/null; do
         sleep 5
         # Only what was logged since the last look.
         size=$(stat -c %s "$LOG" 2>/dev/null || echo 0)
         if [ "$size" -lt "$off" ]; then off=0; fi
-        if tail -c +$((off + 1)) "$LOG" 2>/dev/null | head -c $((size - off)) | grep -aq "rsx fps\] [0-9]"; then
+        chunk=$(tail -c +$((off + 1)) "$LOG" 2>/dev/null | head -c $((size - off)) | grep -a "rsx fps\] [0-9]")
+        if [ -n "$chunk" ]; then
             same=0; seen=1
+            # "[rsx fps] F fps (N frames in 10s: W world, L light)": F, or 999 when W < 80% of N.
+            for fps in $(echo "$chunk" | awk '{w = $9 + 0; n = substr($5, 2) + 0; print (n && w * 5 >= n * 4) ? int($3) : 999}'); do
+                if [ "$fps" -lt "${PLAY_PROFILE_BELOW:-70}" ]; then slow=$((slow + 1)); else slow=0; fi
+            done
         elif [ "$seen" = 1 ]; then
             same=$((same + 5))
         fi
         off=$size
-        if [ "$same" -eq 30 ] && kill -0 "$gpid" 2>/dev/null; then
+        if [ "${PLAY_PROFILE:-1}" != 0 ] && [ -n "$PERF" ] && [ "$slow" -ge 3 ] && [ "$profiles" -lt 3 ] &&
+           [ $(( $(date +%s) - last_prof )) -ge 120 ]; then
+            local prof="${LOG%.log}.perf-$(date +%H%M%S).data"
+            LD_LIBRARY_PATH="$PERF_LIBS" "$PERF" record -q -F 499 -p "$gpid" -o "$prof" -- sleep 20 > /dev/null 2>&1 &
+            profiles=$((profiles + 1)); last_prof=$(date +%s); slow=0
+            echo "[play.sh] fps under ${PLAY_PROFILE_BELOW:-70} for 30 s -- profiling 20 s into $prof" >&2
+        fi
+        if [ "$same" -eq 30 ] && kill -0 "$gpid" 2>/dev/null && command -v eu-stack > /dev/null; then
             local out="${LOG%.log}.stall-$(date +%H%M%S).stacks"
             eu-stack -p "$gpid" -n 40 > "$out" 2>&1
             echo "[play.sh] no frame for 30 s -- thread stacks in $out" >&2

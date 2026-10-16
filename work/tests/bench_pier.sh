@@ -6,7 +6,10 @@
 # Usage: work/tests/bench_pier.sh [build dir, default build-vk]
 # BENCH_PERF=<seconds>: also record a perf profile (user space) of that long
 # from the start of the walk, to <out>/perf.data. PERF=<perf binary> when perf
-# is not on PATH (LD_LIBRARY_PATH as it needs).
+# is not on PATH (LD_LIBRARY_PATH as it needs). BENCH_PERF_AT=tutorial starts
+# it in the tutorial instead (~270 s, once the opening cutscene has ended), and
+# BENCH_PERF_ARGS replaces the sampling options (default -F 999), e.g.
+# "-b -c 20000003" for scripts/pgo.sh.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WORK="$(cd "$HERE/.." && pwd)"
@@ -21,26 +24,31 @@ PAD_FILE="$PAD" PAD_SCRIPT="45:0x4000,55:0x4000,65:0x4000,75:0x4000,85:0x4000,12
     timeout -k 5 560 "$BIN" "$ELF" > "$OUT/game.log" 2>&1 &
 TPID=$!
 send() { echo "$1" > "$PAD"; }
+PERF_PID=
+start_perf() {
+    [ -n "${BENCH_PERF:-}" ] || return 0
+    local gpid
+    gpid=$(pgrep -P "$TPID" -x MyGameRecomp | head -1)
+    if [ -n "$gpid" ]; then
+        # shellcheck disable=SC2086
+        "${PERF:-perf}" record -q ${BENCH_PERF_ARGS:--F 999} -p "$gpid" -o "$OUT/perf.data" \
+            -- sleep "$BENCH_PERF" > "$OUT/perf.log" 2>&1 &
+        PERF_PID=$!
+    else
+        echo "BENCH_PERF: no game process to record" >&2
+    fi
+}
 sleep 200
 # The tutorial asks for the right stick up, then left; asking during the
 # cutscene does nothing.
 for i in $(seq 1 30); do
+    [ "$i" = 10 ] && [ "${BENCH_PERF_AT:-}" = tutorial ] && start_perf
     send "s 128 128 128 0 60"; sleep 4
     send "s 128 128 0 128 60"; sleep 4
 done
 # Free roam: walk forward for the measured minute.
 T0=$(date +%s)
-PERF_PID=
-if [ -n "${BENCH_PERF:-}" ]; then
-    GPID=$(pgrep -P "$TPID" -x MyGameRecomp | head -1)
-    if [ -n "$GPID" ]; then
-        "${PERF:-perf}" record -q -F 999 -p "$GPID" -o "$OUT/perf.data" -- sleep "$BENCH_PERF" \
-            > "$OUT/perf.log" 2>&1 &
-        PERF_PID=$!
-    else
-        echo "BENCH_PERF: no game process to record" >&2
-    fi
-fi
+[ "${BENCH_PERF_AT:-}" = tutorial ] || start_perf
 while [ $(( $(date +%s) - T0 )) -lt 75 ]; do send "s 128 0 128 128 400"; sleep 5; done
 kill -0 "$TPID" 2>/dev/null && kill "$(pgrep -P "$TPID" | head -1)" 2>/dev/null
 wait "$TPID" 2>/dev/null

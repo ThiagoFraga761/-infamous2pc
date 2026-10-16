@@ -430,6 +430,14 @@ int main(int argc, char** argv)
      * notify on an open guard must be lost, as on hardware, or the chain runs
      * laps over descriptors the title is still writing (libs/spurs/cellSpurs.c). */
     setenv("SPURS_GUARD_CAP", "1", 0);
+    /* An idle SPU polls for work 200 us before it sleeps: the title hands
+     * work over with its own atomics, which wake nobody, and a sleeping SPU
+     * saw them only at its 1 ms timeout (libs/spurs/spurs_kernel.c). */
+    setenv("SPURS_IDLE_SPIN_US", "200", 0);
+    /* A Wwise job that ran and did not finish (the title had already refilled
+     * its descriptor) gets no synthetic completion either: the WWS handlers
+     * read one as a message and call through NULL. */
+    setenv("SPURS_JC_NO_SYNTH", "1", 0);
 #endif
     /* Its frames are built on the SPU: the FIFO parks at the end of what is
      * ready and the title patches the park with the rest. Wait at a park the
