@@ -205,6 +205,7 @@ static void present_guest_frame(void)
 
 static DWORD WINAPI frame_clock(LPVOID)
 {
+    SetThreadDescription(GetCurrentThread(), L"rsx");
     const char* title = getenv("PS3_TITLE");
     if (!title || !*title) title = "ps3recomp";
 

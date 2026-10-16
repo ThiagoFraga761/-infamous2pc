@@ -18,8 +18,8 @@ Radeon RX 9070 XT (native 1280x720):
 | Scene | Before this work | Now |
 |---|---|---|
 | 3D main menu | ~27 fps | ~115 fps |
-| Opening 3D cutscene | 9-13 fps | 44-80 fps (by shot) |
-| First gameplay area | -- | 50-90 fps |
+| Opening 3D cutscene | 9-13 fps | 47-112 fps (by shot) |
+| First gameplay area (the pier, walking) | -- | ~119 fps |
 
 The largest gains come from the following changes:
 
@@ -30,7 +30,8 @@ The largest gains come from the following changes:
   are not hashed or decoded again.
 - **Less waiting on the GPU:** the frame goes to it in pieces while it is
   being recorded.
-- **Lifted PPU code built for x86-64-v3.**
+- **Lifted PPU code built by clang for x86-64-v3,** with guest memory
+  accesses inlined and guest registers kept in host registers across them.
 
 See [docs/NOTES.md](docs/NOTES.md). `work/play.sh` documents the switches.
 

@@ -36,6 +36,10 @@ export SPU_DUMP_STUCK="${SPU_DUMP_STUCK:-$HERE/runs/spujob-stuck}"
 # Every 200 laps of a job chain: how long a lap runs and how long it waits at
 # its guard (the audio chain has to keep up with the title's ~10 ms frames).
 export SPURS_JC_TIMING="${SPURS_JC_TIMING:-1}"
+# The tee below makes stderr a pipe, and with stderr not a terminal the
+# runtime logs every SPU job and wait (thousands of lines a second, through
+# one lock): quiet unless asked for.
+export PS3_VERBOSE="${PS3_VERBOSE:-0}"
 LOG="$HERE/runs/play-$(date +%Y%m%d-%H%M%S).log"
 echo "log: $LOG"
 cd "$ROOT"

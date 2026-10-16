@@ -28,6 +28,7 @@
 !/work/port/tools/
 /work/port/tools/*
 !/work/port/tools/spu_cc.sh
+!/work/port/tools/ppu_cxx.sh
 
 /work/tools/*
 !/work/tools/lift_spu.py

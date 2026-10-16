@@ -315,6 +315,10 @@ endif()
 #     SSE4.1; the baseline runs them a lane at a time through libm's fmaf.
 #     Both give the same bits. port_cpu_check.c stops a build on a CPU below
 #     the level with a message.
+#   - scripts/build.sh sets CMAKE_CXX_COMPILER_LAUNCHER to tools/ppu_cxx.sh,
+#     which hands these units to clang++: with the lifter's __restrict context
+#     it keeps guest registers in host registers across guest memory accesses
+#     (see docs/NOTES.md). PORT_PPU_GCC=1 in the environment keeps GCC.
 set(PORT_PPU_MARCH "x86-64-v3" CACHE STRING
     "-march for the lifted PPU sources on x86-64 (empty: compiler default)")
 if(MSVC)

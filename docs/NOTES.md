@@ -83,6 +83,46 @@ Together they added about 8% to the frames rendered over the cutscene. The
 host is shared (a browser and Steam ran during the measurements), so single
 runs differ by about ±5%.
 
+### The main PPU thread and the compiler
+
+With the geometry cache in, walking on the pier ran at 98 fps and the main
+PPU thread was the limit: 96% busy in a `perf` profile, against 32% for the
+RSX thread and 72% for each SPU thread. Its time went 57% to game code, 25% to
+the guest memory accessors and 7% to the VMX float helpers. The accessors are
+`static inline`, but GCC stops inlining once a translation unit has grown 40%,
+and every lifted unit does.
+
+- **Accessors inlined.** `ppu_recomp.h` marks them `always_inline`, and their
+  guard is one compare against `g_vm_inl_lim` (0 while a memory diagnostic is
+  armed, otherwise the mapped range less 16 bytes) plus the gcm control word.
+  The four SIMD float ops in `ppu_vmx.h` are forced inline too.
+- **Lifted PPU code compiled by clang++** (`work/port/tools/ppu_cxx.sh`).
+  Every lifted function takes its context pointer `__restrict`, so a guest
+  load or store through `vm_base` cannot alias a guest register. On x86 the
+  inline store and its reservation re-check are volatile accesses instead of
+  being separated by a compiler barrier. The barrier made every guest
+  register reload from the context after every store. clang then keeps
+  registers in host registers across guest memory accesses and across the
+  stores' cold out-of-line calls, as long as the context has not been passed
+  to a call yet. LLVM gives up on that question past 32 basic blocks, so the
+  launcher raises the limit to 1000. GCC does not use `__restrict` across
+  calls at all.
+- **`reserve_addr` is volatile.** Another thread breaks a reservation by
+  writing it, and `ppu_stwcx32` reads it through `g_active_ctx`. With a
+  restrict-qualified context, the store `lwarx` makes could otherwise be
+  dropped as dead.
+
+clang also builds a lifted unit in about 70 s and 2 GB, where GCC takes about
+4 minutes and 5 GB, so a full build at `-j 4` takes about 8 minutes. With
+these changes the pier runs at about 119 fps and the tutorial at 122. The
+main thread is still about 95% busy.
+
+Logging cost more than expected. `work/play.sh` pipes the game through `tee`,
+and with stderr not a terminal the runtime logs every SPU job and every wait:
+thousands of lines a second, all through one lock. That gave 84 fps at the
+pier against 98 without it. `play.sh` and the benchmark now set
+`PS3_VERBOSE=0`.
+
 ### Local memory write tracking (`PS3RECOMP_WTRACK`)
 
 A gameplay profile had the RSX thread 97% busy, and most of that time went to
@@ -280,6 +320,8 @@ and the audio chain froze the game with it.
 | `PS3_POLLTOP=<s>` | the guest's busiest `usleep` poll sites, per thread |
 | `PS3RECOMP_VK_SPLIT=<n>` | operations per command buffer before it goes to the GPU (0: one per frame) |
 | `PS3RECOMP_ENG_HASHSTATS=1` | texture bytes hashed per frame, by memory and span size |
+| `PS3_VERBOSE=1` | log every SPU job dispatch and every wait (on by default when stderr is not a terminal; costs ~15% at the pier) |
+| `BENCH_PERF=<s>` | `work/tests/bench_pier.sh`: also a `perf` profile of the walk; threads are named (`spurs0`..`spurs4`, `rsx`, `p:<guest name>`) |
 
 ## Lessons
 
@@ -288,5 +330,6 @@ and the audio chain froze the game with it.
   targets up to 1024 px are written back to guest memory every frame.
 - **SPU float:** truncating, no denormals, extended range. AVX-512's `{rz-sae}`
   reproduces it bit-exactly. Set DAZ in MXCSR but not FTZ: FTZ hangs the game.
-- **Parallel builds:** each chunk of the lifted PPU code takes about 4 GB to
-  compile.
+- **Parallel builds:** each chunk of the lifted PPU code takes about 2 GB to
+  compile with clang (5 GB with GCC). Build in a memory-capped scope without
+  swap: a build that filled zram froze the desktop.
