@@ -138,6 +138,15 @@ alternating: 109.9 against 105.6 fps, ahead in every pair.
   checks them against the scalar loops bit for bit (and the conversions
   against the old `ldexpf` spelling).
 
+Then (not yet measured on its own): vperm as two byte shuffles and a blend,
+vsldoi as one `palignr` (they were a 16-step byte loop and a round trip
+through a 32-byte stack buffer; ~10,000 and ~28,000 sites in the lift), the
+float compares and the four roundings in SIMD, and lvebx/lvehx/lvewx as the
+quadword load the Cell makes. That last one also helps the vspltw that
+usually follows: it read 16 bytes over a narrow store at a variable offset,
+which the CPU cannot forward. About half of the main thread's guest time is
+in functions that use VMX.
+
 Logging cost more than expected. `work/play.sh` pipes the game through `tee`,
 and with stderr not a terminal the runtime logs every SPU job and every wait:
 thousands of lines a second, all through one lock. That gave 84 fps at the
@@ -343,6 +352,41 @@ the colour export width), and the downsampled buffer matches the scene.
 
 `PS3RECOMP_ENG_DRAWTRACE_PX=<fx>,<fy>` names the draws that change one pixel,
 which is how the pass was found.
+
+## Saves
+
+The game loads its save icon once, at boot, through the raw `sys_fs`
+syscalls, as the relative path `./USRDIR/ui/xmb/savedata/icon.png`. That
+layer translates paths on its own and defaulted to the working directory,
+which `play.sh` puts one level above the disc tree, so the open missed. The
+game then handed `cellSaveData` an ICON0 write with no buffer, which the
+library refuses (as the firmware does), and every save stopped after
+`PARAM.SFO`: a save directory existed with its subtitle ("(Autosave) 2.
+Breaking into New Marais") and no data. The game showed "There was an error
+while saving." (the dialog is answered on the console, not drawn) and retried
+`ListSave2` for the rest of the session, thousands of times.
+
+`main.cpp` now points `sys_fs` at the same root as `cellFs`, and reads the
+title id from `PARAM.SFO` (cellGame had been reporting the placeholder
+`BLES00000`).
+
+## Long sessions
+
+Twenty minutes into the game, past the opening, showed what a short benchmark
+never fills:
+
+- **Pipeline lookup.** The draw engine found a draw's pipeline with a linear
+  scan over every pipeline built so far, up to 8192, on every draw. It is
+  now a hash index, with the last hit tried first.
+- **Samplers.** The Vulkan backend cached 64 sampler states. Past that every
+  new state got the default sampler, so later areas sampled with the wrong
+  filtering, wrap modes and LOD range. The cache now holds 4096, capped by
+  the device's `maxSamplerAllocationCount`, and is hash-indexed.
+- **Framebuffers.** 64 cached, then all dropped after a flush; now 512,
+  indexed.
+- **Logs.** Several "log the first N, then go quiet" counters were
+  incremented unconditionally. After 2^31 events they wrapped negative and
+  logging started again; one session wrote a 2.3 GB log. They saturate now.
 
 ## Stuck SPURS jobs
 

@@ -698,7 +698,7 @@ index 8be6664..34c4e1b 100644
          if (s_sockets[s].p2p && n > 0) {
              uint32_t un = (uint32_t)n;
 diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
-index 688ff04..b697872 100644
+index 688ff04..2081f67 100644
 --- a/libs/spurs/cellSpurs.c
 +++ b/libs/spurs/cellSpurs.c
 @@ -14,11 +14,15 @@
@@ -1700,7 +1700,7 @@ index 688ff04..b697872 100644
  s32 cellSpursWorkloadAttributeInitialize(CellSpursWorkloadAttribute* attr,
                                           u32 revision, u32 sdkVersion,
                                           const void* pm, u32 sizePm,
-@@ -1443,306 +1594,26 @@ s32 cellSpursWorkloadAttributeInitialize(CellSpursWorkloadAttribute* attr,
+@@ -1443,325 +1594,66 @@ s32 cellSpursWorkloadAttributeInitialize(CellSpursWorkloadAttribute* attr,
                                           u32 minContention,
                                           u32 maxContention)
  {
@@ -2022,9 +2022,10 @@ index 688ff04..b697872 100644
      {   static int _n = 0;
          if (_n < 32)
              printf("[cellSpurs] ReadyCountStore(wid=%u, value=%u)\n", wid, value);
-@@ -1750,18 +1621,39 @@ s32 cellSpursReadyCountStore(CellSpurs* spurs, CellSpursWorkloadId wid,
+         else if (_n == 32)
              printf("[cellSpurs] ReadyCountStore further logs suppressed\n");
-         _n++;
+-        _n++;
++        if (_n <= 32) _n++;
      }
 +    spurs_kernel_notify(ea);
 +    return CELL_OK;
@@ -2220,6 +2221,15 @@ index 688ff04..b697872 100644
          fprintf(stderr, "[cellSpurs] EventFlagWait WAKE tid=%lu flagEA=0x%08X "
                  "pattern=0x%04X got=0x%04X (waits=%u)\n",
                  (unsigned long)GetCurrentThreadId(), ea, pattern, current, waits); }
+@@ -2252,7 +2169,7 @@ s32 cellSpursCreateJobChainWithAttribute(u64 spurs_ea, u64 jc_ea, u64 attr_ea)
+         } else if (_n == 3) {
+             printf("[cellSpurs] CreateJobChainWA raw dumps suppressed from here\n");
+         }
+-        _n++;
++        if (_n <= 3) _n++;
+     }
+     printf("[cellSpurs] CreateJobChainWithAttribute(jc=0x%08X entry=0x%08X sizeDesc=%u maxGrab=%u name=\"%s\")\n",
+            (u32)jc_ea, entry, sd_mg >> 16, sd_mg & 0xFFFFu,
 @@ -2285,7 +2202,7 @@ s32 cellSpursCreateJobChain(u64 spurs_ea, u64 jc_ea, u64 entry_ea,
      if (!jc_ea) return CELL_SPURS_TASK_ERROR_NULL_POINTER;
  
@@ -2320,7 +2330,12 @@ index 688ff04..b697872 100644
  
      { static int _n = 0;
        if (_n < 8) {
-@@ -2343,10 +2334,10 @@ static void jc_run_one_job(u32 job_ea, int idx, u32 size_desc)
+@@ -2339,14 +2330,14 @@ static void jc_run_one_job(u32 job_ea, int idx, u32 size_desc)
+           }
+           printf("\n");
+       }
+-      _n++; }
++      if (_n < 8) _n++; }   /* stops at the cap: once per job, it would wrap */
  
      if (!ea_bin || !size_bin || ea_bin >= 0x10000000u) {
          static int _b = 0;
@@ -2778,6 +2793,15 @@ index 688ff04..b697872 100644
 +    if (__atomic_load_n(&_n, __ATOMIC_RELAXED) < 8 && __atomic_fetch_add(&_n, 1, __ATOMIC_RELAXED) < 8) printf("[cellSpurs] QueueClear(q=0x%08X)\n", (u32)queue_ea);
      return CELL_OK;
  }
+ 
+@@ -2867,7 +3060,7 @@ s32 cellSpursQueuePushBody(u64 queue_ea, u64 data_ea, u32 isBlocking)
+                    (u32)queue_ea, (u32)data_ea, isBlocking);
+         else if (_n == 8)
+             printf("[cellSpurs] QueuePushBody further logs suppressed\n");
+-        _n++;
++        if (_n <= 8) _n++;
+         return CELL_OK;
+     }
  
 @@ -2941,7 +3134,7 @@ s32 cellSpursQueuePushBody(u64 queue_ea, u64 data_ea, u32 isBlocking)
          spu_taskset_signal_task(tsp, (uint32_t)woke);
@@ -6300,7 +6324,7 @@ index dab4380..176efc4 100644
  
  /* ---- lifecycle -------------------------------------------------------- */
 diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
-index 5c50e4a..45efafd 100644
+index 5c50e4a..f7d757a 100644
 --- a/libs/video/rsx_draw_engine.c
 +++ b/libs/video/rsx_draw_engine.c
 @@ -1,3 +1,9 @@
@@ -7086,7 +7110,7 @@ index 5c50e4a..45efafd 100644
 +            ds_memo_hit[0]++;
 +            return m;
 +        }
-     }
++    }
 +    ds_memo_miss[0]++;
 +    const u32 instrs = rsx_vp_program_size_instrs(uc, (RSX_DSP_VP_INSTR - start) * 16u);
 +    if (!instrs) return NULL;
@@ -7109,7 +7133,7 @@ index 5c50e4a..45efafd 100644
 +        m->vpc_full = 0;
 +        m->vpc_lo = cu.lo <= cu.hi ? cu.lo : 0;
 +        m->vpc_n = cu.lo <= cu.hi ? cu.hi - cu.lo + 1u : 0;
-+    }
+     }
 +    return m;
 +}
  
@@ -7207,7 +7231,7 @@ index 5c50e4a..45efafd 100644
      }
      rsx_vertex_layout_plan_init(layout, mask);
  }
-@@ -1006,6 +1476,12 @@ static const char* const kEngFixedPS =
+@@ -1006,45 +1476,119 @@ static const char* const kEngFixedPS =
  "};\n"
  "float4 main(PSInput input) : SV_TARGET { return input.col0; }\n";
  
@@ -7220,7 +7244,35 @@ index 5c50e4a..45efafd 100644
  /* The pipeline for this draw, built once per distinct key. A negative result
   * is cached too (handle 0), so a program pair that will not translate is not
   * retried on every draw of every frame. */
-@@ -1014,37 +1490,78 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
++/* Open-addressed index over g.pipelines by key (index + 1; 0 empty). It
++ * follows the table: entries are only ever appended, and the whole table is
++ * cleared together (shutdown), so catching up from the last count indexed is
++ * enough. */
++#define ENG_PIPE_INDEX 16384u            /* power of two, twice ENG_MAX_PIPELINES */
++static u16 s_pipe_index[ENG_PIPE_INDEX];
++_Static_assert(ENG_PIPE_INDEX >= 2 * ENG_MAX_PIPELINES && ENG_MAX_PIPELINES < 65535,
++               "pipeline index: u16 entries, load at most one half");
++static u32 s_pipe_indexed;
++static u32 eng_pipe_slot(u64 key)
++{
++    key ^= key >> 31; key *= 0x9E3779B97F4A7C15ull;
++    return (u32)(key >> 40) & (ENG_PIPE_INDEX - 1);
++}
++static void eng_pipe_index_sync(void)
++{
++    if (s_pipe_indexed > g.n_pipelines) {          /* the table was cleared */
++        memset(s_pipe_index, 0, sizeof s_pipe_index);
++        s_pipe_indexed = 0;
++    }
++    for (; s_pipe_indexed < g.n_pipelines; s_pipe_indexed++) {
++        u32 h = eng_pipe_slot(g.pipelines[s_pipe_indexed].key);
++        while (s_pipe_index[h]) h = (h + 1) & (ENG_PIPE_INDEX - 1);
++        s_pipe_index[h] = (u16)(s_pipe_indexed + 1);
++    }
++}
++
+ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+                             const rsx_be_render_state* rs,
                              rsx_be_format rt_fmt, u32 rt_count, int* out_fixed)
  {
      *out_fixed = 1;
@@ -7311,13 +7363,15 @@ index 5c50e4a..45efafd 100644
      }
      key = eng_fnv1a(&layout->mask, sizeof layout->mask, key);
      key = eng_fnv1a(&layout->stride, sizeof layout->stride, key);
-@@ -1053,12 +1570,31 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -1053,12 +1597,38 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
       * a host API matches the two against each other. */
      key = eng_fnv1a(&rt_count, sizeof rt_count, key);
      key = rsx_draw_engine_hash_render_state(rs, key);
 -
 -    for (u32 i = 0; i < g.n_pipelines; i++)
 -        if (g.pipelines[i].key == key) {
+-            *out_fixed = g.pipelines[i].fixed;
+-            return g.pipelines[i].handle;
 +    kmemo.valid = 1; kmemo.fixed = fixed; kmemo.vp_hash = in_vp; kmemo.fp_struct = in_fp;
 +    kmemo.fp_ctrl_key = fp_ctrl_key; kmemo.cube_mask = cube_mask; kmemo.vtex_mask = vtex_mask;
 +    memcpy(kmemo.tex_ops, tex_ops, sizeof tex_ops);
@@ -7327,26 +7381,33 @@ index 5c50e4a..45efafd 100644
 +key_done:;
 +
 +    const u64 pk2 = pk0 ? eng_ds_now() : 0;
-+    /* Consecutive draws mostly share a pipeline: try the last hit first. */
++    /* Consecutive draws mostly share a pipeline: try the last hit first, then
++     * the hash index. This was a linear scan of every pipeline built so far:
++     * after an hour of play, thousands of them per draw, and the RSX thread
++     * slowed down the further the player got. */
 +    static u32 last_hit;
-+    for (u32 n = 0; n <= g.n_pipelines; n++) {   /* n = 0 is last_hit, then 0.. */
-+        const u32 i = n ? n - 1u : last_hit;
-+        if (n && i == last_hit) continue;
-+        if (i < g.n_pipelines && g.pipelines[i].key == key) {
-+            last_hit = i;
-             *out_fixed = g.pipelines[i].fixed;
-+            if (pk0) {
-+                const u64 pk3 = eng_ds_now();
-+                ds_pk_ns[0] += pk1 - pk0; ds_pk_ns[1] += pk2 - pk1; ds_pk_ns[2] += pk3 - pk2;
-+                ds_pk_scanned += n + 1;
-+            }
-             return g.pipelines[i].handle;
++    u32 found = ENG_INVALID, probes = 1;
++    if (last_hit < g.n_pipelines && g.pipelines[last_hit].key == key) {
++        found = last_hit;
++    } else {
++        eng_pipe_index_sync();
++        for (u32 h = eng_pipe_slot(key); s_pipe_index[h]; h = (h + 1) & (ENG_PIPE_INDEX - 1), probes++)
++            if (g.pipelines[s_pipe_index[h] - 1u].key == key) { found = s_pipe_index[h] - 1u; break; }
++    }
++    if (found != ENG_INVALID) {
++        last_hit = found;
++        *out_fixed = g.pipelines[found].fixed;
++        if (pk0) {
++            const u64 pk3 = eng_ds_now();
++            ds_pk_ns[0] += pk1 - pk0; ds_pk_ns[1] += pk2 - pk1; ds_pk_ns[2] += pk3 - pk2;
++            ds_pk_scanned += probes;
          }
++        return g.pipelines[found].handle;
 +    }
      if (g.n_pipelines >= ENG_MAX_PIPELINES) return 0;
  
      u32 handle = 0;
-@@ -1071,9 +1607,12 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -1071,9 +1641,12 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
          vi = rsx_vp_decompile_compact_ex(vp_uc, vp_instrs * 16u, vtex_mask,
                                           layout->mask, s_vs_hlsl,
                                           sizeof s_vs_hlsl);
@@ -7362,7 +7423,7 @@ index 5c50e4a..45efafd 100644
          if (fi > 0 && rs->alpha_test_enable &&
              rsx_fp_apply_alpha_test_buffered(s_ps_hlsl, sizeof s_ps_hlsl,
                                               rs->alpha_func) < 0)
-@@ -1082,7 +1621,16 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -1082,7 +1655,16 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
      if (vi > 0 && fi > 0)
          handle = g.be->pipeline_create(g.be->user, s_vs_hlsl, s_ps_hlsl, rs,
                                         layout, layout->stride, rt_fmt, rt_count);
@@ -7380,7 +7441,12 @@ index 5c50e4a..45efafd 100644
          fprintf(stderr, "[rsx engine] pipeline %016llx: %s vp %d, fp %d,"
                          " %u constants -> %s\n",
                  (unsigned long long)key, fixed ? "built-in" : "guest",
-@@ -1096,6 +1644,47 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -1092,10 +1674,52 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+     g.pipelines[g.n_pipelines].handle = handle;
+     g.pipelines[g.n_pipelines].fixed = (u8)fixed;
+     g.n_pipelines++;
++    eng_pipe_index_sync();
+     *out_fixed = fixed;
      return handle;
  }
  
@@ -7428,7 +7494,7 @@ index 5c50e4a..45efafd 100644
  /* ---- draw accumulation --------------------------------------------------- */
  
  static void dc_reset(void)
-@@ -1106,18 +1695,28 @@ static void dc_reset(void)
+@@ -1106,18 +1730,28 @@ static void dc_reset(void)
      dc.fetch_ok = 1;
      dc.inl = NULL;
      dc.inl_bytes = 0;
@@ -7465,7 +7531,7 @@ index 5c50e4a..45efafd 100644
      dc.refs[dc.n_refs].vertex_id = vertex_id;
      dc.refs[dc.n_refs].base_index = base_index;
      dc.n_refs++;
-@@ -1148,12 +1747,140 @@ static int dc_reserve_indices(u32 count)
+@@ -1148,12 +1782,140 @@ static int dc_reserve_indices(u32 count)
      return 1;
  }
  
@@ -7606,7 +7672,7 @@ index 5c50e4a..45efafd 100644
      for (u32 b = 0; b < dc.n_arr && dc.fetch_ok; b++)
          for (u32 i = 0; i < dc.arr[b].count && dc.fetch_ok; i++)
              if (!dc_push_ref(dc.arr[b].first + i, 0)) dc.fetch_ok = 0;
-@@ -1168,6 +1895,19 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+@@ -1168,6 +1930,19 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
          /* The index array's location field is a DMA selector, not the
           * rsx_dsp location enum: 0 selects local memory. */
          const u32 ia_loc = ia.location ? RSX_LOCATION_MAIN : RSX_LOCATION_LOCAL;
@@ -7626,7 +7692,7 @@ index 5c50e4a..45efafd 100644
  
          for (u32 b = 0; b < dc.n_idx && dc.fetch_ok; b++) {
              const u32 first = dc.idx[b].first, count = dc.idx[b].count;
-@@ -1177,6 +1917,16 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+@@ -1177,6 +1952,16 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
              if (count && start <= 0xFFFFFFFFull && bytes <= 0xFFFFFFFFull &&
                  start + bytes <= 0x100000000ull)
                  run = eng_guest_ptr(NULL, ia_loc, (u32)start, (u32)bytes);
@@ -7643,7 +7709,7 @@ index 5c50e4a..45efafd 100644
              for (u32 i = 0; i < count && dc.fetch_ok; i++) {
                  const u8* p = run ? run + (size_t)i * esz
                      : eng_guest_ptr(NULL, ia_loc, ia.offset + (first + i) * esz, esz);
-@@ -1197,43 +1947,551 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+@@ -1197,43 +1982,551 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
      if (!dc.fetch_ok) return;
  
      dc.n_source_refs = dc.n_refs;
@@ -8204,7 +8270,7 @@ index 5c50e4a..45efafd 100644
  static void sink_draw_arrays(void* user, const rsx_dispatch* r, u32 first, u32 count)
  {
      (void)user; (void)r;
-@@ -1252,7 +2510,12 @@ static void sink_inline_array(void* user, const rsx_dispatch* r,
+@@ -1252,7 +2545,12 @@ static void sink_inline_array(void* user, const rsx_dispatch* r,
  {
      (void)user;
      const u32 stride = rsx_vertex_inline_layout(r, NULL);
@@ -8218,7 +8284,7 @@ index 5c50e4a..45efafd 100644
      dc.inl = data;
      dc.inl_bytes = bytes;
      dc.n_packets++;
-@@ -1262,6 +2525,8 @@ static void sink_inline_array(void* user, const rsx_dispatch* r,
+@@ -1262,6 +2560,8 @@ static void sink_inline_array(void* user, const rsx_dispatch* r,
      dc.n_arr++;
  }
  
@@ -8227,7 +8293,7 @@ index 5c50e4a..45efafd 100644
  static void sink_draw_index(void* user, const rsx_dispatch* r, u32 first, u32 count)
  {
      (void)user; (void)r;
-@@ -1278,6 +2543,685 @@ static void sink_draw_index(void* user, const rsx_dispatch* r, u32 first, u32 co
+@@ -1278,6 +2578,685 @@ static void sink_draw_index(void* user, const rsx_dispatch* r, u32 first, u32 co
   * render-to-texture read back through a texture unit), a unit naming a
   * tracked zeta in DEPTH24_D8 samples its snapshot, and everything else is a
   * guest upload (rsx_live_draw.c:5986-6062). */
@@ -8913,7 +8979,7 @@ index 5c50e4a..45efafd 100644
  static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
                                u32 current_zslot,
                                u32 textures[RSX_BE_MAX_TEXTURES],
-@@ -1290,44 +3234,181 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
+@@ -1290,44 +3269,181 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
          if (!t.enabled) continue;
          mask |= 1u << u;
          eng_decode_sampler(t.filter, t.wrap, t.control0, &samplers[u]);
@@ -9109,7 +9175,7 @@ index 5c50e4a..45efafd 100644
      return mask;
  }
  
-@@ -1350,12 +3431,33 @@ static u32 sink_bind_vertex_textures(
+@@ -1350,12 +3466,33 @@ static u32 sink_bind_vertex_textures(
      return bound;
  }
  
@@ -9145,7 +9211,7 @@ index 5c50e4a..45efafd 100644
      /* Everything that becomes triangles -- lists, strips, fans, quads, quad
       * strips and polygons -- is REBUILT into one triangle list through an
       * index buffer. A host strip topology cannot express a restart cut, which
-@@ -1368,33 +3470,126 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1368,33 +3505,126 @@ static void sink_end(void* user, const rsx_dispatch* r)
      int scratch = 0;
      const int rebuild = eng_topology_rebuild(prim, 0, &scratch) != 0;
      if (!rebuild) {
@@ -9286,7 +9352,7 @@ index 5c50e4a..45efafd 100644
      const u32 target = targets[0];
  
      rsx_dsp_surface sf;
-@@ -1403,6 +3598,11 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1403,6 +3633,11 @@ static void sink_end(void* user, const rsx_dispatch* r)
      rsx_dsp_get_viewport(&g.rsx, &vp);
      const u32 zslot = eng_zdepth_get(sf.zeta_location, sf.zeta_offset,
                                       sf.clip_w, sf.clip_h);
@@ -9298,7 +9364,7 @@ index 5c50e4a..45efafd 100644
  
      /* Textures before any pipeline or target binding: a cache refresh can
       * replace a resource, and the backend is free to submit while doing it. */
-@@ -1414,6 +3614,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1414,6 +3649,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
      memset(samplers, 0, sizeof samplers);
      memset(vtextures, 0, sizeof vtextures);
      memset(vsamplers, 0, sizeof vsamplers);
@@ -9306,7 +9372,7 @@ index 5c50e4a..45efafd 100644
      const u32 tex_mask = sink_bind_textures(targets, n_targets, zslot,
                                              textures, samplers);
      const u32 vtex_mask = sink_bind_vertex_textures(eng_vtex_mask(), vtextures,
-@@ -1423,19 +3624,42 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1423,19 +3659,42 @@ static void sink_end(void* user, const rsx_dispatch* r)
       * is dropped, as the reference engine drops it. Substituting the built-in
       * program would draw the geometry in the wrong colours, which is harder to
       * see than a missing object and hides the translation failure. */
@@ -9358,7 +9424,7 @@ index 5c50e4a..45efafd 100644
  
      /* The transform constant block, then the viewport epilogue the vertex
       * program's tail multiplies by: RSX window coordinates mapped into the
-@@ -1444,6 +3668,9 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1444,6 +3703,9 @@ static void sink_end(void* user, const rsx_dispatch* r)
      const float H = sf.clip_h ? (float)sf.clip_h : (float)g.height;
      float xf[8] = { 1, 1, 1, 0, 0, 0, 0, 0 };
      if (vp.scale[0] != 0.0f || vp.translate[0] != 0.0f) {
@@ -9368,7 +9434,7 @@ index 5c50e4a..45efafd 100644
          xf[0] = vp.scale[0] / (W * 0.5f);
          xf[1] = -(vp.scale[1] / (H * 0.5f));
          xf[2] = vp.scale[2];
-@@ -1451,25 +3678,57 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1451,25 +3713,57 @@ static void sink_end(void* user, const rsx_dispatch* r)
          xf[5] = -((vp.translate[1] - H * 0.5f) / (H * 0.5f));
          xf[6] = vp.translate[2];
      }
@@ -9434,7 +9500,7 @@ index 5c50e4a..45efafd 100644
  
      /* The depth attachment is cleared the first time it is bound, so a title
       * that never clears its shadow zeta still tests against something. */
-@@ -1486,8 +3745,21 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1486,8 +3780,21 @@ static void sink_end(void* user, const rsx_dispatch* r)
      for (u32 i = 0; i < n_targets; i++) handles[i] = g.surfaces[targets[i]].handle;
      g.be->bind_targets(g.be->user, handles, n_targets, depth_handle);
      g.be->bind_pipeline(g.be->user, pipeline);
@@ -9457,7 +9523,7 @@ index 5c50e4a..45efafd 100644
      g.be->bind_textures(g.be->user, textures, samplers, tex_mask);
      g.be->bind_vertex_textures(g.be->user, vtextures, vsamplers, vtex_mask);
      g.be->set_viewport(g.be->user, 0.0f, 0.0f, W, H);
-@@ -1515,19 +3787,89 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1515,19 +3822,89 @@ static void sink_end(void* user, const rsx_dispatch* r)
          g.be->set_scissor(g.be->user, sx, sy, sw, sh);
      }
      /* Dynamic, and deliberately outside the pipeline key. */
@@ -9550,7 +9616,7 @@ index 5c50e4a..45efafd 100644
  }
  
  static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
-@@ -1559,22 +3901,28 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+@@ -1559,22 +3936,28 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
          const u32 zslot = eng_zdepth_get(sf.zeta_location, sf.zeta_offset,
                                           sf.clip_w, sf.clip_h);
          if (zslot == ENG_INVALID) return;
@@ -9581,7 +9647,7 @@ index 5c50e4a..45efafd 100644
          }
      }
  }
-@@ -1587,14 +3935,112 @@ static u32 eng_present_surface(u32 buffer_id)
+@@ -1587,14 +3970,112 @@ static u32 eng_present_surface(u32 buffer_id)
  {
      if (buffer_id < 8 && g.display_buffers[buffer_id].valid) {
          const eng_display_buffer* d = &g.display_buffers[buffer_id];
@@ -9696,7 +9762,7 @@ index 5c50e4a..45efafd 100644
  static void eng_present(u32 buffer_id)
  {
      if (!g.ready) return;
-@@ -1610,8 +4056,197 @@ static void eng_present(u32 buffer_id)
+@@ -1610,8 +4091,197 @@ static void eng_present(u32 buffer_id)
                      g.surfaces[i].w, g.surfaces[i].h, g.surfaces[i].handle);
      }
      g.last_present_surface = target;
@@ -9895,7 +9961,7 @@ index 5c50e4a..45efafd 100644
      g.last_guest_draws = g.guest_draws;
      g.guest_draws = 0;
  }
-@@ -1695,6 +4330,19 @@ void rsx_draw_engine_shutdown(void)
+@@ -1695,6 +4365,19 @@ void rsx_draw_engine_shutdown(void)
      for (u32 i = 0; i < g.n_zdepths; i++)
          if (g.zdepths[i].handle) g.be->depth_target_release(g.be->user, g.zdepths[i].handle);
      if (g.ready && g.be->shutdown) g.be->shutdown(g.be->user);
@@ -9915,7 +9981,7 @@ index 5c50e4a..45efafd 100644
  
      rsx_draw_engine_set_guest_memory(NULL, NULL);
      free(dc.refs); free(dc.cuts); free(dc.verts);
-@@ -1704,6 +4352,7 @@ void rsx_draw_engine_shutdown(void)
+@@ -1704,6 +4387,7 @@ void rsx_draw_engine_shutdown(void)
      const rsx_draw_backend* be = g.be;
      memset(&g, 0, sizeof g);
      g.be = be;
@@ -9923,7 +9989,7 @@ index 5c50e4a..45efafd 100644
  }
  
  void rsx_draw_engine_method(u32 method, u32 arg)
-@@ -1717,6 +4366,266 @@ void rsx_draw_engine_method(u32 method, u32 arg)
+@@ -1717,6 +4401,266 @@ void rsx_draw_engine_method(u32 method, u32 arg)
       * preserve them with the wider mask. */
      u32 m = (method >= 0xE000u) ? (method & 0xFFFCu) : (method & 0x1FFCu);
      rsx_dispatch_method(&g.rsx, m, arg);
@@ -10190,7 +10256,7 @@ index 5c50e4a..45efafd 100644
  }
  
  void rsx_draw_engine_set_display_buffer(u32 buffer_id, u32 location, u32 offset,
-@@ -1746,13 +4655,17 @@ void rsx_draw_engine_present(void)
+@@ -1746,13 +4690,17 @@ void rsx_draw_engine_present(void)
       * re-present a double-buffered title's OTHER scanout. Presenting twice is
       * harmless either way -- the engine never clears the surface, so a second
       * present just blits the same image again. */
@@ -13079,7 +13145,7 @@ index ecc53fc..5752611 100644
   * program start). Branch targets are absolute slots; this makes them relative
   * to the ucode pointer handed in. Defaults to 0. */
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index e2687b7..24e850f 100644
+index e2687b7..194bfbe 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
 @@ -64,6 +64,9 @@
@@ -15608,7 +15674,7 @@ index e2687b7..24e850f 100644
      return rc ? 0 : snap;
  }
  /* ---- E2: pipelines and draws ---------------------------------------------
-@@ -2364,7 +4220,11 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
+@@ -2364,9 +4220,14 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
   * samplers s0..s3 would alias the pixel samplers' binding), FP16 and other
   * non-RGBA8 colour targets, depth-only passes, and stencil (the depth format
   * has no stencil aspect yet, so the test is inert). */
@@ -15619,9 +15685,13 @@ index e2687b7..24e850f 100644
 + * were dropped from the frame. */
 +#define VK_ENG_MAX_PIPE   8192
  #define VK_ENG_TOPOLOGIES 5
- #define VK_ENG_FB_CACHE   64
+-#define VK_ENG_FB_CACHE   64
++#define VK_ENG_FB_CACHE   512        /* full: everything is dropped, after a flush */
++#define VK_ENG_FB_INDEX   1024
  
-@@ -2393,16 +4253,104 @@ static struct {
+ typedef struct vk_eng_pipe {
+     int                 used;
+@@ -2393,19 +4254,136 @@ static struct {
      u32          sc[4];
      int          have_vp, have_sc;
      u32          stencil_ref;
@@ -15652,6 +15722,7 @@ index e2687b7..24e850f 100644
 +    u32                   ps_range;
  } s_e2;
  
+-#define VK_ENG_SAMP_CACHE 64
 +#define VK_ENG_DSETS 4096u
 +
 +/* Called by every flush: the rings start over and the sets go back. */
@@ -15716,9 +15787,36 @@ index e2687b7..24e850f 100644
 +    return 0;
 +}
 +
- #define VK_ENG_SAMP_CACHE 64
++/* Samplers by state. 64 used to be the cap, and past it every new state got
++ * the default sampler: later areas, with more materials, sampled with the
++ * wrong filters, wrap modes and LOD range. Indexed by key (index + 1). */
++#define VK_ENG_SAMP_CACHE 4096
++#define VK_ENG_SAMP_INDEX (VK_ENG_SAMP_CACHE * 2)
  static struct { u64 key; VkSampler s; } s_esamp[VK_ENG_SAMP_CACHE];
  static u32 s_esamp_count;
++/* maxSamplerAllocationCount counts every live sampler, and some drivers stop
++ * at 4000; the default sampler, the vtable path's and the native passes' take
++ * a few of those. Set at device creation. */
++static u32 s_esamp_cap = 64;
++_Static_assert(VK_ENG_SAMP_INDEX >= 2 * VK_ENG_SAMP_CACHE && VK_ENG_SAMP_CACHE < 65535,
++               "sampler index: u16 entries, load at most one half");
++_Static_assert(VK_ENG_FB_INDEX >= 2 * VK_ENG_FB_CACHE && VK_ENG_FB_CACHE < 65535,
++               "framebuffer index: u16 entries, load at most one half");
++static u16 s_esamp_index[VK_ENG_SAMP_INDEX];
++static u32 vk_samp_slot(u64 key)
++{
++    key ^= key >> 29; key *= 0xBF58476D1CE4E5B9ull; key ^= key >> 32;
++    return (u32)key & (VK_ENG_SAMP_INDEX - 1);
++}
++
++static u16 s_efb_index[VK_ENG_FB_INDEX];   /* s_e2.fb by key, index + 1 */
++static u32 s_efb_last;                     /* the entry the last lookup found, + 1 */
++static u32 vk_fb_slot(const u32* key)
++{
++    u64 h = 0x9E3779B97F4A7C15ull;
++    for (u32 i = 0; i <= RSX_BE_MAX_COLOR_TARGETS; i++) { h ^= key[i]; h *= 0xFF51AFD7ED558CCDull; h ^= h >> 29; }
++    return (u32)h & (VK_ENG_FB_INDEX - 1);
++}
  
  static void vk_eng_drop_framebuffers(void)
  {
@@ -15726,7 +15824,12 @@ index e2687b7..24e850f 100644
      for (u32 i = 0; i < s_e2.fb_count; i++)
          if (s_e2.fb[i].fb) pvkDestroyFramebuffer(s_vk.device, s_e2.fb[i].fb, NULL);
      s_e2.fb_count = 0;
-@@ -2421,8 +4369,8 @@ static VkRenderPass vk_eng_render_pass(u32 n)
++    memset(s_efb_index, 0, sizeof s_efb_index);
++    s_efb_last = 0;
+ }
+ 
+ /* The render pass for `n` RGBA8 colour attachments plus depth, LOAD/STORE in
+@@ -2421,8 +4399,8 @@ static VkRenderPass vk_eng_render_pass(u32 n)
              .format = (i < n) ? VK_FORMAT_R8G8B8A8_UNORM : s_vk.depth_format,
              .samples = VK_SAMPLE_COUNT_1_BIT,
              .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -15737,7 +15840,7 @@ index e2687b7..24e850f 100644
              .initialLayout = VK_IMAGE_LAYOUT_GENERAL, .finalLayout = VK_IMAGE_LAYOUT_GENERAL };
          if (i < n) cref[i] = (VkAttachmentReference){ i, VK_IMAGE_LAYOUT_GENERAL };
      }
-@@ -2495,19 +4443,88 @@ static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 z
+@@ -2495,19 +4473,88 @@ static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 z
      return s;
  }
  
@@ -15830,7 +15933,7 @@ index e2687b7..24e850f 100644
  static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* ps_hlsl,
                                    const rsx_be_render_state* rs, const rsx_vertex_layout_plan* layout,
                                    u32 vertex_stride, rsx_be_format rt_fmt, u32 rt_count)
-@@ -2519,16 +4536,28 @@ static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* p
+@@ -2519,16 +4566,28 @@ static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* p
          if (!(s_e2.warned & 1u)) { VK_LOG("engine: colour format %d not supported yet\n", (int)rt_fmt); s_e2.warned |= 1u; }
          return 0;
      }
@@ -15863,7 +15966,7 @@ index e2687b7..24e850f 100644
      }
      P->rs = *rs;
      P->nslots = layout->count;
-@@ -2542,6 +4571,7 @@ static void vk_eng_pipeline_release(void* user, u32 pipeline)
+@@ -2542,6 +4601,7 @@ static void vk_eng_pipeline_release(void* user, u32 pipeline)
  {
      (void)user;
      if (!pipeline || pipeline > VK_ENG_MAX_PIPE || !s_epipe[pipeline - 1].used) return;
@@ -15871,7 +15974,7 @@ index e2687b7..24e850f 100644
      vk_eng_pipe* P = &s_epipe[pipeline - 1];
      for (u32 t = 0; t < VK_ENG_TOPOLOGIES; t++)
          if (P->variant[t]) pvkDestroyPipeline(s_vk.device, P->variant[t], NULL);
-@@ -2593,6 +4623,8 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+@@ -2593,6 +4653,8 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
                                                                             : VK_CULL_MODE_BACK_BIT,
          .frontFace = (rs->front_face == 0x0901u) ? VK_FRONT_FACE_COUNTER_CLOCKWISE
                                                   : VK_FRONT_FACE_CLOCKWISE,
@@ -15880,7 +15983,7 @@ index e2687b7..24e850f 100644
          .lineWidth = 1.0f };
      VkPipelineMultisampleStateCreateInfo ms = {
          .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-@@ -2609,7 +4641,8 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+@@ -2609,7 +4671,8 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
          .depthWriteEnable = (rs->depth_test && rs->depth_write) ? VK_TRUE : VK_FALSE,
          .depthCompareOp = vk_gcm_compare(rs->depth_func),
          .stencilTestEnable = rs->stencil_enable ? VK_TRUE : VK_FALSE,
@@ -15890,7 +15993,7 @@ index e2687b7..24e850f 100644
      /* nv40 COLOR_MASK: B [0:7], G [8:15], R [16:23], A [24:31], any bit set.
       * Every attachment takes target A's blend and mask (see rsx_draw_engine.h). */
      VkColorComponentFlags wm = 0;
-@@ -2617,36 +4650,53 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+@@ -2617,36 +4680,53 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
      if ((rs->color_mask >>  8) & 0xFFu) wm |= VK_COLOR_COMPONENT_G_BIT;
      if ((rs->color_mask >>  0) & 0xFFu) wm |= VK_COLOR_COMPONENT_B_BIT;
      if ((rs->color_mask >> 24) & 0xFFu) wm |= VK_COLOR_COMPONENT_A_BIT;
@@ -15951,7 +16054,7 @@ index e2687b7..24e850f 100644
      return P->variant[topo_idx];
  }
  
-@@ -2654,35 +4704,44 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
+@@ -2654,35 +4734,46 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
  
  static void vk_eng2_shutdown(void* user)
  {
@@ -15973,8 +16076,10 @@ index e2687b7..24e850f 100644
 +    vk_destroy_buffer(&s_vring.b); vk_destroy_buffer(&s_uring.b); vk_destroy_buffer(&s_sring.b);
 +    s_vring.off = s_uring.off = s_sring.off = 0;
      memset(&s_e2, 0, sizeof s_e2);
++    memset(s_efb_index, 0, sizeof s_efb_index); s_efb_last = 0;
      for (u32 i = 0; i < s_esamp_count; i++) pvkDestroySampler(s_vk.device, s_esamp[i].s, NULL);
      s_esamp_count = 0;
++    memset(s_esamp_index, 0, sizeof s_esamp_index);
  }
  
 -/* Constants go straight into the shared UBO: vertex at 0, pixel at ps_off.
@@ -16006,7 +16111,7 @@ index e2687b7..24e850f 100644
      s_e2.ps_bytes = bytes;
  }
  static void vk_eng_bind_textures(void* user, const u32* textures,
-@@ -2713,6 +4772,14 @@ static void vk_eng_set_scissor(void* user, u32 x, u32 y, u32 w, u32 h)
+@@ -2713,6 +4804,14 @@ static void vk_eng_set_scissor(void* user, u32 x, u32 y, u32 w, u32 h)
      s_e2.sc[0] = x; s_e2.sc[1] = y; s_e2.sc[2] = w; s_e2.sc[3] = h; s_e2.have_sc = 1;
  }
  static void vk_eng_set_stencil_ref(void* user, u32 ref) { (void)user; s_e2.stencil_ref = ref; }
@@ -16021,7 +16126,39 @@ index e2687b7..24e850f 100644
  
  static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, VkImageView dview,
                                          u32 dkey, u32 w, u32 h)
-@@ -2743,16 +4810,17 @@ static VkImageView vk_eng_scratch_depth(u32 w, u32 h)
+@@ -2720,9 +4819,19 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
+     u32 key[RSX_BE_MAX_COLOR_TARGETS + 1] = { 0 };
+     for (u32 i = 0; i < n; i++) key[i] = rt[i];
+     key[RSX_BE_MAX_COLOR_TARGETS] = dkey;
+-    for (u32 i = 0; i < s_e2.fb_count; i++)
+-        if (!memcmp(s_e2.fb[i].key, key, sizeof key)) return s_e2.fb[i].fb;
+-    if (s_e2.fb_count >= VK_ENG_FB_CACHE) vk_eng_drop_framebuffers();
++    /* Most draws reuse the last framebuffer; then the index. */
++    if (s_efb_last && s_efb_last <= s_e2.fb_count && !memcmp(s_e2.fb[s_efb_last - 1].key, key, sizeof key))
++        return s_e2.fb[s_efb_last - 1].fb;
++    u32 hf = vk_fb_slot(key);
++    for (; s_efb_index[hf]; hf = (hf + 1) & (VK_ENG_FB_INDEX - 1))
++        if (!memcmp(s_e2.fb[s_efb_index[hf] - 1].key, key, sizeof key)) {
++            s_efb_last = s_efb_index[hf];
++            return s_e2.fb[s_efb_index[hf] - 1].fb;
++        }
++    if (s_e2.fb_count >= VK_ENG_FB_CACHE) {
++        vk_eng_drop_framebuffers();
++        hf = vk_fb_slot(key);                    /* the index is empty now */
++    }
+     VkImageView views[RSX_BE_MAX_COLOR_TARGETS + 1];
+     for (u32 i = 0; i < n; i++) views[i] = s_eobj[rt[i]].im.view;
+     views[n] = dview;
+@@ -2733,6 +4842,8 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
+     if (pvkCreateFramebuffer(s_vk.device, &fci, NULL, &fb) != VK_SUCCESS) return VK_NULL_HANDLE;
+     memcpy(s_e2.fb[s_e2.fb_count].key, key, sizeof key);
+     s_e2.fb[s_e2.fb_count++].fb = fb;
++    s_efb_index[hf] = (u16)s_e2.fb_count;
++    s_efb_last = s_e2.fb_count;
+     return fb;
+ }
+ 
+@@ -2743,16 +4854,17 @@ static VkImageView vk_eng_scratch_depth(u32 w, u32 h)
      if (s_e2.scratch_depth.view && s_e2.scratch_w >= w && s_e2.scratch_h >= h)
          return s_e2.scratch_depth.view;
      vk_eng_drop_framebuffers();
@@ -16043,7 +16180,7 @@ index e2687b7..24e850f 100644
      s_e2.scratch_w = w; s_e2.scratch_h = h;
      return s_e2.scratch_depth.view;
  }
-@@ -2773,10 +4841,16 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
+@@ -2773,12 +4885,25 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
  {
      u32 lo, hi;
      memcpy(&lo, &d->min_lod, 4); memcpy(&hi, &d->max_lod, 4);
@@ -16052,16 +16189,27 @@ index e2687b7..24e850f 100644
                    | ((u64)d->mip_present << 3) | ((u64)(d->wrap_s & 0xF) << 4)
                    | ((u64)(d->wrap_t & 0xF) << 8) | ((u64)(d->wrap_r & 0xF) << 12)
 -                  | ((u64)(lo >> 16) << 16) | ((u64)(hi >> 16) << 32);
+-    for (u32 i = 0; i < s_esamp_count; i++) if (s_esamp[i].key == key) return s_esamp[i].s;
+-    if (s_esamp_count >= VK_ENG_SAMP_CACHE) return s_vk.sampler;
 +                  | ((u64)(lo >> 16) << 16) | ((u64)(hi >> 16) << 32)
 +                  | ((u64)bias_q << 48) | ((u64)(d->max_aniso & 7u) << 61);
 +    /* CONTROL0's anisotropy codes as sample counts (RPCS3 vk::max_aniso). */
 +    static const float aniso[8] = { 1.f, 2.f, 4.f, 6.f, 8.f, 10.f, 12.f, 16.f };
 +    float af = aniso[d->max_aniso & 7u];
 +    if (af > s_vk.max_aniso) af = s_vk.max_aniso;
-     for (u32 i = 0; i < s_esamp_count; i++) if (s_esamp[i].key == key) return s_esamp[i].s;
-     if (s_esamp_count >= VK_ENG_SAMP_CACHE) return s_vk.sampler;
++    u32 hs = vk_samp_slot(key);
++    for (; s_esamp_index[hs]; hs = (hs + 1) & (VK_ENG_SAMP_INDEX - 1))
++        if (s_esamp[s_esamp_index[hs] - 1].key == key) return s_esamp[s_esamp_index[hs] - 1].s;
++    if (s_esamp_count >= s_esamp_cap) {
++        static int said = 0;
++        if (!said) { said = 1; VK_LOG("sampler cache full (%u): new states get the default sampler\n",
++                                     (unsigned)s_esamp_cap); }
++        return s_vk.sampler;
++    }
      float min_lod = d->min_lod, max_lod = d->mip_present ? d->max_lod : d->min_lod;
-@@ -2789,6 +4863,9 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
+     if (max_lod < min_lod) max_lod = min_lod;
+     VkSamplerCreateInfo sci = {
+@@ -2789,52 +4914,131 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
          .addressModeU = vk_gcm_wrap(d->wrap_s), .addressModeV = vk_gcm_wrap(d->wrap_t),
          .addressModeW = vk_gcm_wrap(d->wrap_r),
          .minLod = min_lod, .maxLod = max_lod,
@@ -16071,7 +16219,10 @@ index e2687b7..24e850f 100644
          .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK };
      VkSampler smp;
      if (pvkCreateSampler(s_vk.device, &sci, NULL, &smp) != VK_SUCCESS) return s_vk.sampler;
-@@ -2798,43 +4875,118 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
+     s_esamp[s_esamp_count].key = key;
+     s_esamp[s_esamp_count++].s = smp;
++    s_esamp_index[hs] = (u16)s_esamp_count;            /* hs: the empty slot the probe ended on */
+     return smp;
  }
  
  /* The view a bound engine handle samples through: an uploaded texture, a
@@ -16212,7 +16363,7 @@ index e2687b7..24e850f 100644
  }
  
  static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices, u32 vertex_count,
-@@ -2843,6 +4995,7 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+@@ -2843,6 +5047,7 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
      (void)user;
      if (!s_e2.pipeline || !vertices || !vertex_count || !stride) return;
      if (topology < RSX_TOPOLOGY_POINTS || topology > RSX_TOPOLOGY_TRIANGLE_STRIP) return;
@@ -16220,7 +16371,7 @@ index e2687b7..24e850f 100644
      vk_eng_pipe* P = &s_epipe[s_e2.pipeline - 1];
      if (!P->used || stride != P->stride) return;
  
-@@ -2867,24 +5020,101 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+@@ -2867,24 +5072,101 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
      VkFramebuffer fb = vk_eng_framebuffer(rp, s_eng_bound.rt, n, dview, dkey, w, h);
      if (!pipe || !rp || !fb) return;
  
@@ -16338,7 +16489,7 @@ index e2687b7..24e850f 100644
      pvkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
      VkViewport vp = { 0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f };
      if (s_e2.have_vp && s_e2.vp[2] > 0.0f && s_e2.vp[3] > 0.0f) {
-@@ -2902,18 +5132,60 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+@@ -2902,18 +5184,60 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
      pvkCmdSetViewport(s_vk.cmd, 0, 1, &vp);
      pvkCmdSetScissor(s_vk.cmd, 0, 1, &sc);
      pvkCmdSetStencilReference(s_vk.cmd, VK_STENCIL_FACE_FRONT_AND_BACK, s_e2.stencil_ref & 0xFFu);
@@ -16407,7 +16558,7 @@ index e2687b7..24e850f 100644
  }
  
  static const rsx_draw_backend s_vk_engine_backend = {
-@@ -2930,6 +5202,15 @@ static const rsx_draw_backend s_vk_engine_backend = {
+@@ -2930,6 +5254,15 @@ static const rsx_draw_backend s_vk_engine_backend = {
      .depth_target_create  = vk_eng_depth_target_create,
      .depth_target_release = vk_eng_release,
      .depth_snapshot       = vk_eng_depth_snapshot,
@@ -16423,7 +16574,7 @@ index e2687b7..24e850f 100644
      .pipeline_create      = vk_eng_pipeline_create,
      .pipeline_release     = vk_eng_pipeline_release,
      .bind_targets         = vk_eng_bind_targets,
-@@ -2941,6 +5222,11 @@ static const rsx_draw_backend s_vk_engine_backend = {
+@@ -2941,6 +5274,11 @@ static const rsx_draw_backend s_vk_engine_backend = {
      .set_viewport         = vk_eng_set_viewport,
      .set_scissor          = vk_eng_set_scissor,
      .set_stencil_ref      = vk_eng_set_stencil_ref,
@@ -16435,7 +16586,7 @@ index e2687b7..24e850f 100644
      .draw                 = vk_eng_draw,
      .clear_color          = vk_eng_clear_color,
      .clear_depth_stencil  = vk_eng_clear_depth_stencil,
-@@ -3017,6 +5303,26 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3017,6 +5355,29 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      pvkGetPhysicalDeviceFeatures(s_vk.phys, &have);
      want.textureCompressionBC = have.textureCompressionBC;
      s_vk.bc_ok = have.textureCompressionBC ? 1 : 0;
@@ -16454,15 +16605,18 @@ index e2687b7..24e850f 100644
 +    /* CONTROL0 anisotropy, capped at what the device reports. */
 +    want.samplerAnisotropy = have.samplerAnisotropy;
 +    s_vk.max_aniso = 1.0f;
-+    if (have.samplerAnisotropy) {
++    {
 +        VkPhysicalDeviceProperties pp;
 +        pvkGetPhysicalDeviceProperties(s_vk.phys, &pp);
-+        s_vk.max_aniso = pp.limits.maxSamplerAnisotropy;
++        if (have.samplerAnisotropy) s_vk.max_aniso = pp.limits.maxSamplerAnisotropy;
++        const u32 lim = pp.limits.maxSamplerAllocationCount;
++        s_esamp_cap = lim > 256 + 64 ? lim - 256 : 64;
++        if (s_esamp_cap > VK_ENG_SAMP_CACHE) s_esamp_cap = VK_ENG_SAMP_CACHE;
 +    }
      VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                                 .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
                                 .enabledExtensionCount = s_vk.windowed ? 1u : 0u,
-@@ -3036,7 +5342,10 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3036,7 +5397,10 @@ static int vk_init_all(u32 width, u32 height, const char* title)
                                          .commandPool = s_vk.pool,
                                          .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
                                          .commandBufferCount = 1 };
@@ -16474,7 +16628,7 @@ index e2687b7..24e850f 100644
      VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
      VK_CHECK(pvkCreateFence(s_vk.device, &fci, NULL, &s_vk.fence), "vkCreateFence");
  
-@@ -3046,9 +5355,9 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3046,9 +5410,9 @@ static int vk_init_all(u32 width, u32 height, const char* title)
                          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT)) return -1;
      if (vk_create_image(&s_vk.depth, s_vk.depth_format, s_vk.width, s_vk.height,
                          VK_IMAGE_USAGE_TRANSFER_DST_BIT |
@@ -16487,7 +16641,7 @@ index e2687b7..24e850f 100644
      if (vk_create_render_pass()) return -1;
      if (vk_create_pipeline_objects()) return -1;
      if (vk_guest_init()) {
-@@ -3063,11 +5372,11 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3063,11 +5427,11 @@ static int vk_init_all(u32 width, u32 height, const char* title)
       * null backend makes the same choice). */
      if (vk_begin()) return -1;
      vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
@@ -16501,7 +16655,7 @@ index e2687b7..24e850f 100644
      pvkCmdClearColorImage(s_vk.cmd, s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &cr);
      pvkCmdClearDepthStencilImage(s_vk.cmd, s_vk.depth.img, VK_IMAGE_LAYOUT_GENERAL, &far_plane, 1, &dr);
      if (vk_submit_and_wait()) return -1;
-@@ -3145,6 +5454,7 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -3145,6 +5509,7 @@ void rsx_vulkan_backend_shutdown(void)
          vk_destroy_image(&s_vk.color);
          vk_destroy_buffer(&s_vk.vertices);
          vk_destroy_buffer(&s_vk.readback);
@@ -21392,10 +21546,10 @@ index d857f30..8269e72 100644
      ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_map_memory"),     "sys_mmapper_map_memory",     crt_ok);
 diff --git a/runtime/ppu/ppu_vmx.h b/runtime/ppu/ppu_vmx.h
 new file mode 100644
-index 0000000..388dace
+index 0000000..04336bc
 --- /dev/null
 +++ b/runtime/ppu/ppu_vmx.h
-@@ -0,0 +1,478 @@
+@@ -0,0 +1,576 @@
 +/* ppu_vmx.h -- exact VMX (AltiVec) semantics for lifted PPU code.
 + *
 + * Vector registers are held big-endian (byte 0 = the most significant byte,
@@ -21514,6 +21668,15 @@ index 0000000..388dace
 +    out = _mm_blendv_epi8(out, _mm_or_si128(b, q), vmx_isnan4(b));
 +    return _mm_blendv_epi8(out, _mm_or_si128(a, q), vmx_isnan4(a));
 +}
++/* Halfword lanes: each big-endian halfword to host order and back. */
++VMX_HOT __m128i vmx_ld16(const void* p) {
++    return _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)p),
++                            _mm_setr_epi8(1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14));
++}
++VMX_HOT void vmx_st16(void* p, __m128i v) {
++    _mm_storeu_si128((__m128i*)p, _mm_shuffle_epi8(v,
++                     _mm_setr_epi8(1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14)));
++}
 +VMX_HOT __m128i vmx_vnan1_4(__m128i r, __m128i b) {
 +    return _mm_blendv_epi8(vmx_fix4(r), _mm_or_si128(b, _mm_set1_epi32(0x7FC00000)), vmx_isnan4(b));
 +}
@@ -21587,6 +21750,44 @@ index 0000000..388dace
 +VMX_MUL(vmx_vmulosh, 4, vmx_h, vmx_sw, int16_t, 1)
 +
 +/* ---- multiply-add / multiply-sum (VA-form) ---- */
++#ifdef VMX_SIMD
++/* The multiply-sums the lift uses most, four or eight lanes at a time;
++ * test_vmx_simd.c holds them to the loops in the #else branch. */
++/* (a*b) >> 15 (+ 0x4000 first when rounding) + c, saturated to 16 bits: in
++ * 32-bit lanes, because -32768 * -32768 >> 15 does not fit in 16. */
++VMX_HOT __m128i vmx_mhadd4(__m128i a, __m128i b, __m128i c, int rnd, __m128i* sat) {
++    const __m128i lo = _mm_mullo_epi16(a, b), hi = _mm_mulhi_epi16(a, b);
++    __m128i p0 = _mm_unpacklo_epi16(lo, hi), p1 = _mm_unpackhi_epi16(lo, hi);
++    if (rnd) { p0 = _mm_add_epi32(p0, _mm_set1_epi32(0x4000)); p1 = _mm_add_epi32(p1, _mm_set1_epi32(0x4000)); }
++    p0 = _mm_add_epi32(_mm_srai_epi32(p0, 15), _mm_cvtepi16_epi32(c));
++    p1 = _mm_add_epi32(_mm_srai_epi32(p1, 15), _mm_cvtepi16_epi32(_mm_srli_si128(c, 8)));
++    const __m128i r = _mm_packs_epi32(p0, p1);
++    /* saturated where unpacking the packed lanes does not give the sums back */
++    const __m128i b0 = _mm_cvtepi16_epi32(r), b1 = _mm_cvtepi16_epi32(_mm_srli_si128(r, 8));
++    *sat = _mm_or_si128(*sat, _mm_or_si128(_mm_xor_si128(b0, p0), _mm_xor_si128(b1, p1)));
++    return r;
++}
++VMX_HOT void vmx_vmhaddshs(VMX_D, VMX_A, VMX_B, VMX_C, uint32_t* vscr) {
++    __m128i sat = _mm_setzero_si128();
++    vmx_st16(d_, vmx_mhadd4(vmx_ld16(a_), vmx_ld16(b_), vmx_ld16(c_), 0, &sat));
++    if (!_mm_testz_si128(sat, sat)) *vscr |= VMX_SAT; }
++VMX_HOT void vmx_vmhraddshs(VMX_D, VMX_A, VMX_B, VMX_C, uint32_t* vscr) {
++    __m128i sat = _mm_setzero_si128();
++    vmx_st16(d_, vmx_mhadd4(vmx_ld16(a_), vmx_ld16(b_), vmx_ld16(c_), 1, &sat));
++    if (!_mm_testz_si128(sat, sat)) *vscr |= VMX_SAT; }
++VMX_HOT void vmx_vmladduhm(VMX_D, VMX_A, VMX_B, VMX_C) {
++    vmx_st16(d_, _mm_add_epi16(_mm_mullo_epi16(vmx_ld16(a_), vmx_ld16(b_)), vmx_ld16(c_))); }
++VMX_HOT void vmx_vmsumshm(VMX_D, VMX_A, VMX_B, VMX_C) {
++    vmx_st(d_, _mm_add_epi32(_mm_madd_epi16(vmx_ld16(a_), vmx_ld16(b_)), vmx_ld(c_))); }
++VMX_HOT void vmx_vmsumubm(VMX_D, VMX_A, VMX_B, VMX_C) {
++    const __m128i a = _mm_loadu_si128((const __m128i*)a_), b = _mm_loadu_si128((const __m128i*)b_);
++    const __m128i lo = _mm_madd_epi16(_mm_cvtepu8_epi16(a), _mm_cvtepu8_epi16(b));
++    const __m128i hi = _mm_madd_epi16(_mm_cvtepu8_epi16(_mm_srli_si128(a, 8)),
++                                      _mm_cvtepu8_epi16(_mm_srli_si128(b, 8)));
++    vmx_st(d_, _mm_add_epi32(_mm_hadd_epi32(lo, hi), vmx_ld(c_))); }
++#define VMX_MULSUM_SIMD 1
++#endif
++#ifndef VMX_MULSUM_SIMD
 +VMX_INL void vmx_vmhaddshs(VMX_D, VMX_A, VMX_B, VMX_C, uint32_t* vscr) { VMX_ARGS_PREP; const uint8_t* c = (const uint8_t*)c_;
 +    for (int i = 0; i < 8; i++) {
 +        int64_t p = ((int64_t)(int16_t)vmx_h(a, i) * (int16_t)vmx_h(b, i)) >> 15;
@@ -21603,6 +21804,7 @@ index 0000000..388dace
 +    for (int i = 0; i < 4; i++) { uint32_t s = vmx_w(c, i);
 +        for (int j = 0; j < 4; j++) s += (uint32_t)a[4 * i + j] * b[4 * i + j];
 +        vmx_sw(r, i, s); } VMX_OUT; }
++#endif
 +VMX_INL void vmx_vmsummbm(VMX_D, VMX_A, VMX_B, VMX_C) { VMX_ARGS_PREP; const uint8_t* c = (const uint8_t*)c_;
 +    for (int i = 0; i < 4; i++) { uint32_t s = vmx_w(c, i);
 +        for (int j = 0; j < 4; j++) s += (uint32_t)((int32_t)(int8_t)a[4 * i + j] * (int32_t)b[4 * i + j]);
@@ -21616,11 +21818,13 @@ index 0000000..388dace
 +        int64_t s = (int64_t)vmx_w(c, i) + (int64_t)vmx_h(a, 2 * i) * vmx_h(b, 2 * i)
 +                  + (int64_t)vmx_h(a, 2 * i + 1) * vmx_h(b, 2 * i + 1);
 +        vmx_sw(r, i, vmx_sat_u(s, 0xFFFFFFFFll, vscr)); } VMX_OUT; }
++#ifndef VMX_MULSUM_SIMD
 +VMX_INL void vmx_vmsumshm(VMX_D, VMX_A, VMX_B, VMX_C) { VMX_ARGS_PREP; const uint8_t* c = (const uint8_t*)c_;
 +    for (int i = 0; i < 4; i++) vmx_sw(r, i, (uint32_t)((int32_t)vmx_w(c, i)
 +        + (int32_t)(int16_t)vmx_h(a, 2 * i) * (int16_t)vmx_h(b, 2 * i)
 +        + (int32_t)(int16_t)vmx_h(a, 2 * i + 1) * (int16_t)vmx_h(b, 2 * i + 1)));
 +    VMX_OUT; }
++#endif
 +VMX_INL void vmx_vmsumshs(VMX_D, VMX_A, VMX_B, VMX_C, uint32_t* vscr) { VMX_ARGS_PREP; const uint8_t* c = (const uint8_t*)c_;
 +    for (int i = 0; i < 4; i++) {
 +        int64_t s = (int64_t)(int32_t)vmx_w(c, i) + (int64_t)(int16_t)vmx_h(a, 2 * i) * (int16_t)vmx_h(b, 2 * i)
@@ -21800,10 +22004,23 @@ index 0000000..388dace
 +#endif
 +VMX_FUN(vmx_vexptefp, exp2f(f), 0, 1)
 +VMX_FUN(vmx_vlogefp, log2f(f), 0, 1)
++#ifdef VMX_SIMD
++/* roundps in each direction; inputs flushed where the scalar forms flush. */
++#define VMX_RFI4(name, mode, flush_in) \
++VMX_HOT void name(VMX_D, VMX_B, uint32_t vscr) { \
++    __m128i y = vmx_ld(b_); if (flush_in) y = vmx_flush4(y, vscr); \
++    const __m128i z = _mm_castps_si128(_mm_round_ps(_mm_castsi128_ps(y), (mode) | _MM_FROUND_NO_EXC)); \
++    vmx_st(d_, vmx_flush4(vmx_vnan1_4(z, y), vscr)); }
++VMX_RFI4(vmx_vrfin, _MM_FROUND_TO_NEAREST_INT, 0)
++VMX_RFI4(vmx_vrfiz, _MM_FROUND_TO_ZERO, 0)
++VMX_RFI4(vmx_vrfip, _MM_FROUND_TO_POS_INF, 1)
++VMX_RFI4(vmx_vrfim, _MM_FROUND_TO_NEG_INF, 1)
++#else
 +VMX_FUN(vmx_vrfin, nearbyintf(f), 0, 2)      /* host default rounding: to nearest even */
 +VMX_FUN(vmx_vrfiz, truncf(f), 0, 2)
 +VMX_FUN(vmx_vrfip, ceilf(f), 1, 2)
 +VMX_FUN(vmx_vrfim, floorf(f), 1, 2)
++#endif
 +
 +/* int <-> float with a 2^uimm scale. 2^e for |e| <= 31 is a normal float,
 + * built from its bits: the same factor ldexpf gives, and a product by a power
@@ -21844,6 +22061,29 @@ index 0000000..388dace
 +        else v = (uint32_t)f;
 +        vmx_sw(r, i, v); } VMX_OUT; }
 +
++/* ---- byte permutes ----
++ * The register holds its bytes in guest order, byte 0 first, so a 16-byte
++ * load puts register byte i in lane i and the byte-level ops map directly. */
++#ifdef VMX_SIMD
++/* vperm: each control byte picks byte (c & 15) of A, or of B when c & 16. */
++VMX_HOT void vmx_vperm(VMX_D, VMX_A, VMX_B, VMX_C) {
++    const __m128i a = _mm_loadu_si128((const __m128i*)a_), b = _mm_loadu_si128((const __m128i*)b_);
++    const __m128i c = _mm_loadu_si128((const __m128i*)c_);
++    const __m128i idx = _mm_and_si128(c, _mm_set1_epi8(0x0F));
++    const __m128i sel = _mm_slli_epi16(c, 3);          /* bit 4 of each byte to bit 7 */
++    _mm_storeu_si128((__m128i*)d_, _mm_blendv_epi8(_mm_shuffle_epi8(a, idx),
++                                                    _mm_shuffle_epi8(b, idx), sel)); }
++/* vsldoi: bytes sh..sh+15 of A:B -- palignr, whose count must be a constant. */
++#define VMX_VSLDOI(d, a, b, sh) \
++    _mm_storeu_si128((__m128i*)(d), _mm_alignr_epi8(_mm_loadu_si128((const __m128i*)(b)), \
++                                                    _mm_loadu_si128((const __m128i*)(a)), (sh)))
++#else
++VMX_INL void vmx_vperm(VMX_D, VMX_A, VMX_B, VMX_C) { VMX_ARGS_PREP; const uint8_t* c = (const uint8_t*)c_;
++    for (int i = 0; i < 16; i++) { const uint8_t s = c[i] & 0x1F; r[i] = s < 16 ? a[s] : b[s - 16]; } VMX_OUT; }
++#define VMX_VSLDOI(d, a, b, sh) do { uint8_t _t[32]; memcpy(_t, (a), 16); memcpy(_t + 16, (b), 16); \
++    memcpy((d), _t + (sh), 16); } while (0)
++#endif
++
 +/* ---- compares; record forms return the CR6 nibble [all, 0, none, 0] ---- */
 +#define VMX_CMP(name, cnt, get, set, test) \
 +VMX_INL uint32_t name(VMX_D, VMX_A, VMX_B) { VMX_ARGS_PREP; int all = 1, none = 1; \
@@ -21861,9 +22101,21 @@ index 0000000..388dace
 +VMX_CMP(vmx_vcmpgtsb, 16, vmx_b, vmx_sb64, (int8_t)x > (int8_t)y)
 +VMX_CMP(vmx_vcmpgtsh, 8, vmx_h, vmx_sh64, (int16_t)x > (int16_t)y)
 +VMX_CMP(vmx_vcmpgtsw, 4, vmx_w, vmx_sw64, (int32_t)x > (int32_t)y)
++#ifdef VMX_SIMD
++/* Ordered compares, as the C ones: a NaN lane is false. */
++#define VMX_FCMP4(name, op) \
++VMX_HOT uint32_t name(VMX_D, VMX_A, VMX_B) { \
++    const __m128 m = op(_mm_castsi128_ps(vmx_ld(a_)), _mm_castsi128_ps(vmx_ld(b_))); \
++    vmx_st(d_, _mm_castps_si128(m)); \
++    const int k = _mm_movemask_ps(m); return (uint32_t)((k == 15) << 3 | (k == 0) << 1); }
++VMX_FCMP4(vmx_vcmpeqfp, _mm_cmpeq_ps)
++VMX_FCMP4(vmx_vcmpgefp, _mm_cmpge_ps)
++VMX_FCMP4(vmx_vcmpgtfp, _mm_cmpgt_ps)
++#else
 +VMX_CMP(vmx_vcmpeqfp, 4, vmx_w, vmx_sw64, vmx_f((uint32_t)x) == vmx_f((uint32_t)y))
 +VMX_CMP(vmx_vcmpgefp, 4, vmx_w, vmx_sw64, vmx_f((uint32_t)x) >= vmx_f((uint32_t)y))
 +VMX_CMP(vmx_vcmpgtfp, 4, vmx_w, vmx_sw64, vmx_f((uint32_t)x) > vmx_f((uint32_t)y))
++#endif
 +/* vcmpbfp: bit 31 = !(a <= b), bit 30 = !(a >= -b); CR6 EQ = every lane in bounds */
 +VMX_INL uint32_t vmx_vcmpbfp(VMX_D, VMX_A, VMX_B) { VMX_ARGS_PREP; int inb = 1;
 +    for (int i = 0; i < 4; i++) { float x = vmx_f(vmx_w(a, i)), y = vmx_f(vmx_w(b, i));
@@ -22160,17 +22412,18 @@ index 092654c..cd613a2 100644
      ctx->gpr[4]  = SMOKE_SC_EXITSTAT;     /* s64* exit status (out) */
 diff --git a/runtime/ppu/tests/test_vmx_simd.c b/runtime/ppu/tests/test_vmx_simd.c
 new file mode 100644
-index 0000000..c7bf26d
+index 0000000..d4234cf
 --- /dev/null
 +++ b/runtime/ppu/tests/test_vmx_simd.c
-@@ -0,0 +1,127 @@
-+/* Differential test: the SIMD float ops in ppu_vmx.h against the scalar loops
-+ * they replace, bit for bit, over random registers rich in the awkward cases
-+ * (signed zeros, denormals, infinities, quiet and signalling NaNs with
-+ * payloads), with VSCR[NJ] off and on.
+@@ -0,0 +1,165 @@
++/* Differential test: the SIMD VMX ops in ppu_vmx.h (float arithmetic,
++ * compares and roundings, conversions, permutes, multiply-sums) against the
++ * scalar loops they replace, bit for bit, over random registers rich in the
++ * awkward cases (signed zeros, denormals, infinities, quiet and signalling
++ * NaNs with payloads, -32768 lanes), with VSCR[NJ] off and on.
 + *
-+ *   cc -O2 -march=x86-64    -DPFX=sc_ -c test_vmx_simd_impl.c -o sc.o
-+ *   cc -O2 -march=x86-64-v3 -DPFX=sd_ -c test_vmx_simd_impl.c -o sd.o
++ *   cc -O2 -fwrapv -march=x86-64    -DPFX=sc_ -c test_vmx_simd_impl.c -o sc.o
++ *   cc -O2 -fwrapv -march=x86-64-v3 -DPFX=sd_ -c test_vmx_simd_impl.c -o sd.o
 + *   cc -O2 test_vmx_simd.c sc.o sd.o -lm -o test_vmx_simd && ./test_vmx_simd [iterations [daz]]
 + */
 +#include <stdint.h>
@@ -22211,6 +22464,20 @@ index 0000000..c7bf26d
 +    void p##vcfux(void*, const void*, unsigned); \
 +    void p##vctsxs(void*, const void*, unsigned, uint32_t*); \
 +    void p##vctuxs(void*, const void*, unsigned, uint32_t*); \
++    void p##vperm(void*, const void*, const void*, const void*); \
++    void p##vmhaddshs(void*, const void*, const void*, const void*, uint32_t*); \
++    void p##vmhraddshs(void*, const void*, const void*, const void*, uint32_t*); \
++    void p##vmladduhm(void*, const void*, const void*, const void*); \
++    void p##vmsumshm(void*, const void*, const void*, const void*); \
++    void p##vmsumubm(void*, const void*, const void*, const void*); \
++    uint32_t p##vcmpeqfp(void*, const void*, const void*); \
++    uint32_t p##vcmpgefp(void*, const void*, const void*); \
++    uint32_t p##vcmpgtfp(void*, const void*, const void*); \
++    void p##vrfin(void*, const void*, uint32_t); \
++    void p##vrfiz(void*, const void*, uint32_t); \
++    void p##vrfip(void*, const void*, uint32_t); \
++    void p##vrfim(void*, const void*, uint32_t); \
++    void p##vsldoi(void*, const void*, const void*, unsigned); \
 +    int p##simd(void);
 +DECL(sc_)
 +DECL(sd_)
@@ -22273,6 +22540,29 @@ index 0000000..c7bf26d
 +#define T3(op) sc_##op(x, a, b, c, vscr); sd_##op(y, a, b, c, vscr); diff(#op, a, b, x, y, vscr);
 +#define T1(op) sc_##op(x, b, vscr); sd_##op(y, b, vscr); diff(#op, a, b, x, y, vscr);
 +        T2(vaddfp) T2(vsubfp) T2(vmaxfp) T2(vminfp) T3(vmaddfp) T3(vnmsubfp) T1(vrefp) T1(vrsqrtefp)
++        T1(vrfin) T1(vrfiz) T1(vrfip) T1(vrfim)
++#define TC(op) { uint32_t c1 = sc_##op(x, a, b), c2 = sd_##op(y, a, b); diff(#op, a, b, x, y, 0); \
++                 if (c1 != c2) { uint8_t e1[16] = { (uint8_t)c1 }, e2[16] = { (uint8_t)c2 }; diff(#op " CR6", a, b, e1, e2, 0); } }
++        TC(vcmpeqfp) TC(vcmpgefp) TC(vcmpgtfp)
++        /* integer multiply-sums: plain random bytes, -32768 lanes now and then */
++        {   uint8_t ia[16], ib[16], ic[16];
++            for (int i = 0; i < 16; i++) { ia[i] = (uint8_t)rnd(); ib[i] = (uint8_t)rnd(); ic[i] = (uint8_t)rnd(); }
++            if ((rnd() & 3) == 0) { ia[0] = 0x80; ia[1] = 0; ib[0] = 0x80; ib[1] = 0; }
++#define TI(op) sc_##op(x, ia, ib, ic); sd_##op(y, ia, ib, ic); diff(#op, ia, ib, x, y, 0);
++#define TS(op) { uint32_t s1 = 0, s2 = 0; sc_##op(x, ia, ib, ic, &s1); sd_##op(y, ia, ib, ic, &s2); diff(#op, ia, ib, x, y, 0); \
++                 if (s1 != s2) { uint8_t e1[16] = { (uint8_t)s1 }, e2[16] = { (uint8_t)s2 }; diff(#op " SAT", ia, ib, e1, e2, 0); } }
++            TS(vmhaddshs) TS(vmhraddshs) TI(vmladduhm) TI(vmsumshm) TI(vmsumubm)
++        }
++        /* The permutes, against the definition as well: a byte at a time. */
++        {   uint8_t ref[16], cc[16]; const unsigned sh = rnd() % 16;
++            for (int i = 0; i < 16; i++) cc[i] = (uint8_t)rnd();
++            for (int i = 0; i < 16; i++) { const unsigned s = cc[i] & 31; ref[i] = s < 16 ? a[s] : b[s - 16]; }
++            sc_vperm(x, a, b, cc); sd_vperm(y, a, b, cc);
++            diff("vperm/ref", a, b, ref, x, 0); diff("vperm", a, b, x, y, 0);
++            for (int i = 0; i < 16; i++) ref[i] = i + sh < 16 ? a[i + sh] : b[i + sh - 16];
++            sc_vsldoi(x, a, b, sh); sd_vsldoi(y, a, b, sh);
++            diff("vsldoi/ref", a, b, ref, x, sh); diff("vsldoi", a, b, x, y, sh);
++        }
 +        {   const unsigned k = rnd() % 32;
 +            uint8_t z[16]; uint32_t v1 = 0, v2 = 0, v3 = 0;
 +            ref_vcfsx(z, b, k); sc_vcfsx(x, b, k); sd_vcfsx(y, b, k);
@@ -22288,15 +22578,15 @@ index 0000000..c7bf26d
 +            if (!!v1 != !!v2 || v2 != v3) diff("vctuxs SAT", a, b, (const uint8_t*)"\1\0\0\0\0\0\0\0\0\0\0\0\0\0\0", (const uint8_t*)"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", k);
 +        }
 +    }
-+    printf("%ld iterations x 12 ops%s: %ld mismatches\n", n, daz ? " (half with DAZ)" : "", s_fail);
++    printf("%ld iterations x 26 ops%s: %ld mismatches\n", n, daz ? " (half with DAZ)" : "", s_fail);
 +    return s_fail != 0;
 +}
 diff --git a/runtime/ppu/tests/test_vmx_simd_impl.c b/runtime/ppu/tests/test_vmx_simd_impl.c
 new file mode 100644
-index 0000000..49a5592
+index 0000000..75d8e5b
 --- /dev/null
 +++ b/runtime/ppu/tests/test_vmx_simd_impl.c
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,48 @@
 +/* One side of test_vmx_simd: ppu_vmx.h's float ops compiled for whatever
 + * -march the build passes, behind names with a prefix (PFX), so a baseline
 + * build (the scalar loops) and an x86-64-v3 one (the SSE/AVX forms) can be
@@ -22319,6 +22609,25 @@ index 0000000..49a5592
 +void CAT(PFX, vcfux)(void* d, const void* b, unsigned u)  { vmx_vcfux(d, b, u); }
 +void CAT(PFX, vctsxs)(void* d, const void* b, unsigned u, uint32_t* v) { vmx_vctsxs(d, b, u, v); }
 +void CAT(PFX, vctuxs)(void* d, const void* b, unsigned u, uint32_t* v) { vmx_vctuxs(d, b, u, v); }
++void CAT(PFX, vperm)(void* d, const void* a, const void* b, const void* c) { vmx_vperm(d, a, b, c); }
++void CAT(PFX, vsldoi)(void* d, const void* a, const void* b, unsigned sh) {
++    switch (sh & 15) {
++#define S(k) case k: VMX_VSLDOI(d, a, b, k); break;
++    S(0) S(1) S(2) S(3) S(4) S(5) S(6) S(7) S(8) S(9) S(10) S(11) S(12) S(13) S(14) S(15)
++#undef S
++    } }
++uint32_t CAT(PFX, vcmpeqfp)(void* d, const void* a, const void* b) { return vmx_vcmpeqfp(d, a, b); }
++uint32_t CAT(PFX, vcmpgefp)(void* d, const void* a, const void* b) { return vmx_vcmpgefp(d, a, b); }
++uint32_t CAT(PFX, vcmpgtfp)(void* d, const void* a, const void* b) { return vmx_vcmpgtfp(d, a, b); }
++void CAT(PFX, vrfin)(void* d, const void* b, uint32_t v) { vmx_vrfin(d, b, v); }
++void CAT(PFX, vrfiz)(void* d, const void* b, uint32_t v) { vmx_vrfiz(d, b, v); }
++void CAT(PFX, vrfip)(void* d, const void* b, uint32_t v) { vmx_vrfip(d, b, v); }
++void CAT(PFX, vrfim)(void* d, const void* b, uint32_t v) { vmx_vrfim(d, b, v); }
++void CAT(PFX, vmhaddshs)(void* d, const void* a, const void* b, const void* c, uint32_t* v) { vmx_vmhaddshs(d, a, b, c, v); }
++void CAT(PFX, vmhraddshs)(void* d, const void* a, const void* b, const void* c, uint32_t* v) { vmx_vmhraddshs(d, a, b, c, v); }
++void CAT(PFX, vmladduhm)(void* d, const void* a, const void* b, const void* c) { vmx_vmladduhm(d, a, b, c); }
++void CAT(PFX, vmsumshm)(void* d, const void* a, const void* b, const void* c) { vmx_vmsumshm(d, a, b, c); }
++void CAT(PFX, vmsumubm)(void* d, const void* a, const void* b, const void* c) { vmx_vmsumubm(d, a, b, c); }
 +int CAT(PFX, simd)(void) {
 +#ifdef VMX_SIMD
 +    return 1;
@@ -26617,7 +26926,7 @@ index d9f86bb..c610dad 100644
              ctx->pc = pc;
              __attribute__((musttail)) return fn(ctx);
 diff --git a/runtime/spu/spu_dma.h b/runtime/spu/spu_dma.h
-index 90f3221..254805c 100644
+index 90f3221..5ee7aaf 100644
 --- a/runtime/spu/spu_dma.h
 +++ b/runtime/spu/spu_dma.h
 @@ -16,6 +16,7 @@
@@ -27464,7 +27773,18 @@ index 90f3221..254805c 100644
          if (bt && spu->image_id==3) {
              uint32_t ea32 = (uint32_t)ea;
              int is_put   = ((cmd & 0x20) && !(cmd & 0x40));   /* PUT-family */
-@@ -1386,11 +1549,25 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1373,7 +1536,9 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+                     cmd, lsa, (unsigned long long)ea, size, tag);
+         } else if (_pn == 96)
+             fprintf(stderr, "[spurs-pm] DMA trace suppressed from here\n");
+-        _pn++;
++        /* Stops at the cap: counting every transfer wrapped it negative after
++         * ~2^31 of them, and a long session's log then grew by gigabytes. */
++        if (_pn <= 96) _pn++;
+     }
+ 
+     /* Execute the transfer.
+@@ -1386,11 +1551,25 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
           * they are easy to miss entirely while diagnosing a pipeline that
           * never fills. Always report the issue: the DESTINATION lsa is the
           * value the whole transfer hangs on. */
@@ -27491,7 +27811,7 @@ index 90f3221..254805c 100644
          rc = mfc_do_list_transfer(spu, (uint32_t)ea & SPU_LS_MASK,
                                    ea & 0xFFFFFFFF00000000ull, size, cmd);
      } else {
-@@ -1406,7 +1583,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1406,7 +1585,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
           * dispatch that CLAIMS a ticket but never stages its job. */
          { extern volatile unsigned g_wws_batch_gets; g_wws_batch_gets++; }
          static int _n = 0;
@@ -27500,7 +27820,7 @@ index 90f3221..254805c 100644
              const uint8_t* p = spu->ls + 0xC00;
              fprintf(stderr, "[wws-batch] GET 0xC00 ea=0x%09llX size=0x%X:",
                      (unsigned long long)ea, size);
-@@ -1419,8 +1596,8 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1419,8 +1598,8 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
           * shareableWriteIfDiscarded=(f>>12)&1, logBufSet=(f>>5)&0xF, logBuf=f&0x1F.
           * Answers lifter-vs-builder: are shareable-output UseBuffer + kRunJob +
           * store commands PRESENT in the list the PPU built? */
@@ -27511,7 +27831,7 @@ index 90f3221..254805c 100644
              static const char* NM[8] = {"kNop","kReserveBufSet","kUseBuffer",
                  "kUnreserveBufSets","kReqDepDec","kRunJob","kEndCommand","kInvalid"};
              const uint8_t* p = spu->ls + 0xC00;
-@@ -1439,9 +1616,9 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1439,9 +1618,9 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
      /* After a cri-task GET, dump the bytes it just read (the task context) so we
       * can tell if eaContext holds valid SPURS work data or garbage. */
      {
@@ -27523,7 +27843,7 @@ index 90f3221..254805c 100644
                  const uint8_t* p = spu->ls + (lsa & 0x3FFFF);
                  fprintf(stderr, "[DMA] GET data @LS0x%05X (from ea=0x%09llX):", lsa, (unsigned long long)ea);
                  for (uint32_t i=0;i<size && i<0x40;i+=4)
-@@ -1460,6 +1637,23 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1460,6 +1639,23 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
      return rc;
  }
  
@@ -27547,7 +27867,7 @@ index 90f3221..254805c 100644
  /* ---------------------------------------------------------------------------
   * Tag group synchronization
   * -----------------------------------------------------------------------*/
-@@ -1539,9 +1733,9 @@ static inline void mfc_channel_write(mfc_engine* mfc, spu_context* spu,
+@@ -1539,9 +1735,9 @@ static inline void mfc_channel_write(mfc_engine* mfc, spu_context* spu,
           * RdTagStat must equal the mask EXACTLY (mask 2 = tag 1 =
           * kLoadJob_readBuffers). Log the inputs so we can see whether the tag
           * really is reported complete. Env SPU_TAGPROBE=1. */
@@ -40621,7 +40941,7 @@ index a297bf5..3de04e9 100644
  #ifdef _WIN32
      HANDLE       host_thread;
 diff --git a/runtime/syscalls/sys_semaphore.c b/runtime/syscalls/sys_semaphore.c
-index 19ecafc..827fd5b 100644
+index 19ecafc..aa0e859 100644
 --- a/runtime/syscalls/sys_semaphore.c
 +++ b/runtime/syscalls/sys_semaphore.c
 @@ -196,10 +196,10 @@ void lbp_unstick_once(void)
@@ -40701,7 +41021,23 @@ index 19ecafc..827fd5b 100644
              fprintf(stderr, "[sem] post(id=%u) -> ESRCH: slot inactive"
                              " (value=%d max=%d)%c",
                      sem_id, s->value, s->max_value, 10);
-@@ -513,7 +513,7 @@ int64_t sys_semaphore_post(ppu_context* ctx)
+@@ -503,17 +503,20 @@ int64_t sys_semaphore_post(ppu_context* ctx)
+     uint32_t sem_id = LV2_ARG_U32(ctx, 0);
+     int32_t  count  = LV2_ARG_S32(ctx, 1);
+ 
+-    { static int _n=0; if (getenv("SEMTID") && _n < 60000)
++    /* The counter stops at its cap: counting every post wrapped it negative
++     * in a long session and reopened the log. */
++    { static int _n=0; static int st = -1; if (st < 0) st = getenv("SEMTID") ? 1 : 0;
++      if (st && _n < 60000)
+         fprintf(stderr, "[WAKE tid=%llu] semaphore_post(sem=%u count=%d)\n",
+                 (unsigned long long)ctx->thread_id, sem_id, count);
+-      else if (!getenv("SEMTID") && _n < 40)
++      else if (!st && _n < 40)
+         fprintf(stderr, "[WAKE] semaphore_post(sem=%u count=%d)\n", sem_id, count);
+-      _n++; }
++      if (_n < 60000) _n++; }
+     /* SEMCHAIN: dump the guest call-chain at every sem=3 post (the sema the main
       * loading thread starves on) -- reveals which thread/loop produces it. */
      if (getenv("SEMCHAIN") && sem_id == 3) {
          static int _c = 0;
@@ -40710,7 +41046,7 @@ index 19ecafc..827fd5b 100644
              fprintf(stderr, "[SEMCHAIN] sem=3 post by tid=%llu\n", (unsigned long long)ctx->thread_id);
              ppu_log_host_chain("sem3-post"); }
      }
-@@ -537,7 +537,7 @@ int64_t sys_semaphore_post(ppu_context* ctx)
+@@ -537,7 +540,7 @@ int64_t sys_semaphore_post(ppu_context* ctx)
  #ifdef _WIN32
      EnterCriticalSection(&s->value_lock);
      if (s->value + count > s->max_value) {
@@ -43738,7 +44074,7 @@ index 67dfd3f..3c68616 100644
          # Fallback for opcode 4
          result.mnemonic = f"vmx_x{xo_full}"
 diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
-index b19e240..f80a1d9 100644
+index b19e240..9aaa60d 100644
 --- a/tools/ppu_lifter.py
 +++ b/tools/ppu_lifter.py
 @@ -41,6 +41,11 @@ except ImportError:
@@ -43776,17 +44112,17 @@ index b19e240..f80a1d9 100644
  } ppu_context;
  
  /* Memory access helpers (provided by runtime) */
-@@ -127,9 +141,232 @@ void     vm_write64(uint64_t addr, uint64_t val);
+@@ -127,10 +141,233 @@ void     vm_write64(uint64_t addr, uint64_t val);
   * threads -- a plain conditional write races and corrupts under real concurrency. */
  int      ppu_stwcx32(uint64_t addr, uint32_t expected, uint32_t val);
  int      ppu_stdcx64(uint64_t addr, uint64_t expected, uint64_t val);
 +/* lwarx/ldarx: note the 128-byte reservation granule (line-granular reservations
 + * on lines shared with SPUs; see ppu_loader.cpp). */
 +void     ppu_resv_line_note(uint64_t addr);
-+#ifdef __cplusplus
-+}
-+#endif
-+
+ #ifdef __cplusplus
+ }
+ #endif
+ 
 +/* Inline guest-load fast paths. Every lifted load used to be an out-of-line
 + * call into the runtime; a CPU-bound title spends most of its main thread
 + * there (inFamous's culling leaf func_0041CF98: one read32 + seven read16 per
@@ -43826,9 +44162,9 @@ index b19e240..f80a1d9 100644
 +    VM_RAW_ST(uint64_t, ea, lo); VM_RAW_ST(uint64_t, ea + 8, hi); }
 +extern uint32_t g_vm_inl_lim;
 +extern uint32_t ppu_hle_inject_base;
- #ifdef __cplusplus
- }
- #endif
++#ifdef __cplusplus
++}
++#endif
 +/* g_vm_inl_lim (ppu_loader.cpp) is 0 until the runtime knows no memory
 + * diagnostic is armed, then the size of [0x10000, end of the mapping - 16): one
 + * compare covers the switch, the null page and the end, for any n up to 16. */
@@ -44006,9 +44342,10 @@ index b19e240..f80a1d9 100644
 +#define vm_swrite32(a, v) vm_write32(a, v)
 +#define vm_swrite64(a, v) vm_write64(a, v)
 +#endif
- 
++
  /* Syscall handler */
  #ifdef __cplusplus
+ extern "C"
 @@ -236,16 +473,64 @@ static inline double ppu_fmadd_core(double a, double c, double b, int neg_b, int
      if (r != r) return ppu_fp_default_qnan();
      return neg_res ? -r : r;
@@ -44905,14 +45242,28 @@ index b19e240..f80a1d9 100644
  
          # Cell unaligned vector loads (CBEA / AltiVec): lvlx loads bytes
          # [EA&15 .. 15] of the aligned quadword left-justified into vD and
-@@ -2287,8 +2949,8 @@ class PPULifter:
-             return (f"{{ uint64_t ea = {_xea(ra,rb)}; "
-                     f"ea &= ~{size - 1}ULL; "
-                     f"memset(&ctx->vr[{vd}], 0, 16); "
+@@ -2280,15 +2942,15 @@ class PPULifter:
+             vd = int(ops[0][1:]) if ops[0].startswith("v") else _reg_idx(ops[0])
+             ra = _reg_idx(ops[1])
+             rb = _reg_idx(ops[2])
+-            # EA selects the element in the raw big-endian vector and is
+-            # rounded down to that element's natural alignment. Other
+-            # destination elements are undefined; keep our zero-fill policy.
+-            size = {"lvebx": 1, "lvehx": 2, "lvewx": 4}[mn]
+-            return (f"{{ uint64_t ea = {_xea(ra,rb)}; "
+-                    f"ea &= ~{size - 1}ULL; "
+-                    f"memset(&ctx->vr[{vd}], 0, 16); "
 -                    f"memcpy((uint8_t*)&ctx->vr[{vd}] + (ea & 15), "
 -                    f"vm_base + (uint32_t)ea, {size}); }}")
-+                    f"{{ uint{size*8}_t _e = VM_RAW_LD(uint{size*8}_t, ea); "
-+                    f"memcpy((uint8_t*)&ctx->vr[{vd}] + (ea & 15), &_e, {size}); }} }}")
++            # The Cell loads the whole aligned quadword for these, as lvx does
++            # (RPCS3 lifts them that way); the ISA leaves the other elements
++            # undefined, so this is right for any program. One 16-byte load
++            # replaces a 16-byte clear plus a narrow store at a variable
++            # offset -- which the vspltw that usually follows, reading all 16
++            # bytes, could not forward from (lvewx + vspltw is how a scalar
++            # float is broadcast).
++            return (f"{{ uint64_t ea = ({_xea(ra,rb)}) & ~0xFULL; "
++                    f"vm_raw_ld16(&ctx->vr[{vd}], ea); }}")
  
          if mn == "stvebx" or mn == "stvehx" or mn == "stvewx":
              vs = int(ops[0][1:]) if ops[0].startswith("v") else _reg_idx(ops[0])
@@ -44927,7 +45278,37 @@ index b19e240..f80a1d9 100644
  
          if mn == "lvsl" or mn == "lvsr":
              vd = int(ops[0][1:]) if ops[0].startswith("v") else _reg_idx(ops[0])
-@@ -3060,8 +3722,24 @@ class PPULifter:
+@@ -2320,15 +2982,8 @@ class PPULifter:
+             va = int(ops[1][1:])
+             vb = int(ops[2][1:])
+             vc = int(ops[3][1:])
+-            return (f"{{ uint8_t* a = (uint8_t*)&ctx->vr[{va}]; "
+-                    f"uint8_t* b = (uint8_t*)&ctx->vr[{vb}]; "
+-                    f"uint8_t* c = (uint8_t*)&ctx->vr[{vc}]; "
+-                    f"uint8_t* d = (uint8_t*)&ctx->vr[{vd}]; "
+-                    f"uint8_t tmp[16]; "
+-                    f"for (int i = 0; i < 16; i++) {{ "
+-                    f"uint8_t sel = c[i] & 0x1F; "
+-                    f"tmp[i] = (sel < 16) ? a[sel] : b[sel - 16]; }} "
+-                    f"memcpy(d, tmp, 16); }}")
++            # ppu_vmx.h: two byte shuffles and a blend where SSSE3 is there.
++            return f"vmx_vperm(&ctx->vr[{vd}], &ctx->vr[{va}], &ctx->vr[{vb}], &ctx->vr[{vc}]);"
+ 
+         # VMX splat (vspltw, vsplth, vspltb) — duplicate one element across vector
+         if mn == "vspltw":
+@@ -2469,9 +3124,8 @@ class PPULifter:
+             va = int(ops[1][1:])
+             vb = int(ops[2][1:])
+             sh = int(ops[3])  # numeric shift count (disasm emits plain number)
+-            return (f"{{ uint8_t tmp[32]; "
+-                    f"memcpy(tmp, &ctx->vr[{va}], 16); memcpy(tmp+16, &ctx->vr[{vb}], 16); "
+-                    f"memcpy(&ctx->vr[{vd}], tmp + {sh}, 16); }}")
++            # ppu_vmx.h: one palignr where SSSE3 is there (sh is an immediate).
++            return f"VMX_VSLDOI(&ctx->vr[{vd}], &ctx->vr[{va}], &ctx->vr[{vb}], {sh & 15});"
+ 
+         # VMX integer multiply-accumulate
+         if mn == "vmsumshm":
+@@ -3060,8 +3714,24 @@ class PPULifter:
          # ------- Default: emit as comment -------
          return f"/* TODO: {mn} {insn.operands} */;"
  
@@ -44954,7 +45335,7 @@ index b19e240..f80a1d9 100644
          mn = mnemonic.rstrip("la")  # strip link and absolute bits
          if mn.startswith("b"):
              mn = mn[1:]  # strip leading 'b'
-@@ -3088,8 +3766,8 @@ class PPULifter:
+@@ -3088,8 +3758,8 @@ class PPULifter:
              "le": f"(!((ctx->cr >> {shift}) & 4))",
              "so": f"((ctx->cr >> {shift}) & 1)",
              "ns": f"(!((ctx->cr >> {shift}) & 1))",
@@ -44965,7 +45346,7 @@ index b19e240..f80a1d9 100644
          }
  
          return cond_map.get(mn, f"/* cond: {mnemonic} */ 1")
-@@ -3266,6 +3944,17 @@ class PPULifter:
+@@ -3266,6 +3936,17 @@ class PPULifter:
  
          # Emit helper macros
          lines.append("/* Rotate helpers */")
@@ -44983,7 +45364,7 @@ index b19e240..f80a1d9 100644
          lines.append("static inline uint32_t ppc_rlwinm(uint32_t rs, int sh, int mb, int me) {")
          lines.append("    sh &= 31;")
          lines.append("    uint32_t rotated = sh ? ((rs << sh) | (rs >> (32 - sh))) : rs;")
-@@ -3411,8 +4100,17 @@ class PPULifter:
+@@ -3411,8 +4092,17 @@ class PPULifter:
          label = self.name_map.get(func.start_addr)
          if label:
              lines.append(f"/* {label} */")
@@ -45003,7 +45384,7 @@ index b19e240..f80a1d9 100644
              lines.append(f"    {bline}" if not bline.endswith(":") else bline)
  
          # If a function doesn't end with blr/b/bctr (a return or unconditional
-@@ -3634,11 +4332,12 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts
+@@ -3634,11 +4324,12 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts
                  return _k + 1
          return 0
      def _live(lo, i):
@@ -45021,7 +45402,7 @@ index b19e240..f80a1d9 100644
          seg = all_insns[lo:i]
          targets = set()
          for x in seg:
-@@ -3651,9 +4350,43 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts
+@@ -3651,9 +4342,43 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts
                          pass
          def _ends_block(x):     # a branch that does not return to the next insn
              return x.mnemonic.startswith('b') and x.mnemonic not in ('bl', 'bctrl', 'blrl')
@@ -45066,7 +45447,7 @@ index b19e240..f80a1d9 100644
                  # back to the block's first insn: a branch target, or the insn
                  # right after another branch (fallthrough entry)
                  while k > 0 and seg[k].addr not in targets and not _ends_block(seg[k - 1]):
-@@ -4087,6 +4820,9 @@ def main() -> None:
+@@ -4087,6 +4812,9 @@ def main() -> None:
      parser.add_argument("--output", "-o", default=".", help="Output directory")
      parser.add_argument("--header-name", default="ppu_recomp.h", help="Header file name")
      parser.add_argument("--source-name", default="ppu_recomp.c", help="Source file name")
@@ -45076,7 +45457,7 @@ index b19e240..f80a1d9 100644
      parser.add_argument("--single-file", action="store_true",
                          help="Emit one ppu_recomp.c instead of split chunks (for "
                               "single-file post-processing, e.g. flOw's vmx_splice)")
-@@ -4120,6 +4856,10 @@ def main() -> None:
+@@ -4120,6 +4848,10 @@ def main() -> None:
                          help="Prefix for every emitted func_*/function_table "
                               "symbol (e.g. 'libsre_') so a relocated PRX image "
                               "links alongside the main title without collisions")
@@ -45087,7 +45468,7 @@ index b19e240..f80a1d9 100644
      parser.add_argument("--hle-stubs", metavar="FILE", default=None,
                          help="EBOOT.imports.json ([{library,nid,stub}]). Each "
                               "import stub address is lifted as ps3_hle_call(nid) "
-@@ -4535,22 +5275,32 @@ def main() -> None:
+@@ -4535,22 +5267,32 @@ def main() -> None:
      # Firmware-import stub split: the .lib.stub trampolines are usually lumped
      # into one big function by boundary detection. Carve each 0x20-byte stub out
      # as its own function so direct calls land on it and it can be emitted as a
@@ -45127,7 +45508,7 @@ index b19e240..f80a1d9 100644
      lifter.header_name = args.header_name
      # A single-module executable keeps r2 (TOC) constant, so an `ld r2, N(r1)` TOC
      # restore can be lowered to this literal instead of a stack read (the recomp has
-@@ -4647,7 +5397,7 @@ def main() -> None:
+@@ -4647,7 +5389,7 @@ def main() -> None:
          print(f"Wrote {os.path.basename(src_path)}")
      else:
          print("Writing C source (split into chunks)...", flush=True)
@@ -45726,10 +46107,10 @@ index 4eef694..5527d6b 100644
      test_const_base_no_table()
      test_const_base_needs_constant()
 diff --git a/tools/test_ppu_lift.py b/tools/test_ppu_lift.py
-index 096fc3a..081440a 100644
+index 096fc3a..2c785a4 100644
 --- a/tools/test_ppu_lift.py
 +++ b/tools/test_ppu_lift.py
-@@ -929,6 +929,10 @@ extern "C" uint32_t vm_read32(uint64_t a) { uint32_t v; memcpy(&v, g_vm_stub + V
+@@ -929,6 +929,12 @@ extern "C" uint32_t vm_read32(uint64_t a) { uint32_t v; memcpy(&v, g_vm_stub + V
  extern "C" void vm_write32(uint64_t a, uint32_t v) { v = CONF_BSWAP32(v); memcpy(g_vm_stub + VMOFF(a), &v, 4); }
  extern "C" uint64_t vm_read64(uint64_t a) { uint64_t v; memcpy(&v, g_vm_stub + VMOFF(a), 8); return CONF_BSWAP64(v); }
  extern "C" void vm_write64(uint64_t a, uint64_t v) { v = CONF_BSWAP64(v); memcpy(g_vm_stub + VMOFF(a), &v, 8); }
@@ -45737,6 +46118,8 @@ index 096fc3a..081440a 100644
 + * ppu_recomp.h defines them over vm_base, this driver over the stub page. */
 +#define VM_RAW_LD(T, ea) ({ T _v; memcpy(&_v, g_vm_stub + VMOFF(ea), sizeof(T)); _v; })
 +#define VM_RAW_ST(T, ea, val) do { T _v = (val); memcpy(g_vm_stub + VMOFF(ea), &_v, sizeof(T)); } while (0)
++static inline void vm_raw_ld16(void* dst, uint64_t ea) { memcpy(dst, g_vm_stub + VMOFF(ea & ~15ull), 16); }
++static inline void vm_raw_st16(uint64_t ea, const void* src) { memcpy(g_vm_stub + VMOFF(ea & ~15ull), src, 16); }
  """)
      out.append("int main(void) {")
      out.append("    ppu_context* ctx = &g_ctx;")

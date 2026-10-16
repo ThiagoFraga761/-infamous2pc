@@ -78,6 +78,8 @@ int      ppu_run(uint32_t entry_opd, uint32_t stack_top);
 void     ps3_load_prx_modules(void);
 
 extern const char* ppu_vfs_root;              /* host dir the PS3 mount points map into */
+extern char        g_sys_fs_root[512];        /* the same, for the raw sys_fs syscalls */
+void     cellGame_init_from_paramsfo(const char* sfo_path);   /* title id, name, version */
 
 /* The status the guest handed to sys_process_exit. A title that exits that way
  * never returns through ppu_run, so this is only read on the path where the
@@ -346,6 +348,19 @@ static void derive_vfs_root(const char* eboot)
     ppu_vfs_root = s_vfs_root;
 }
 
+/* The raw sys_fs syscalls translate on their own and default to the working
+ * directory, which play.sh puts one level above the disc tree. The title opens
+ * its save icon, ./USRDIR/ui/xmb/savedata/icon.png, that way: it missed, the
+ * title handed cellSaveData an ICON0 with no buffer, and every save stopped
+ * after PARAM.SFO. Point both layers at the same tree. */
+static void sync_sys_fs_root(void)
+{
+    if ((size_t)snprintf(g_sys_fs_root, sizeof g_sys_fs_root, "%s", ppu_vfs_root)
+            >= sizeof g_sys_fs_root)
+        fprintf(stderr, "[boot] WARNING: VFS root longer than %zu characters; raw sys_fs "
+                        "opens will miss\n", sizeof g_sys_fs_root - 1);
+}
+
 /* ---------------------------------------------------------------------------
  * Guest VM
  * -----------------------------------------------------------------------*/
@@ -479,7 +494,14 @@ int main(int argc, char** argv)
      * getenv on another thread is undefined in glibc. derive_vfs_root needs only
      * the path. */
     derive_vfs_root(argv[1]);
+    sync_sys_fs_root();
     printf("[boot] VFS root: %s\n", ppu_vfs_root);
+    /* Without it cellGame reports the placeholder title id BLES00000. */
+    {
+        char sfo[1100];
+        snprintf(sfo, sizeof sfo, "%s/PS3_GAME/PARAM.SFO", ppu_vfs_root);
+        cellGame_init_from_paramsfo(sfo);
+    }
 
 #ifndef _WIN32
     /* inFAMOUS 2 installs to /dev_hdd0 on its first boot: keep that beside the
