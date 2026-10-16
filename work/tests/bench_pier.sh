@@ -17,7 +17,10 @@ BIN="$WORK/port/${1:-build-vk}/MyGameRecomp"
 ELF="$WORK/../disc/PS3_GAME/USRDIR/EBOOT.elf"
 OUT="$(mktemp -d -t pier.XXXXXX)"
 PAD="$OUT/pad.txt"; : > "$PAD"
-mkdir -p "$OUT/shots"
+mkdir -p "$OUT/shots" "$OUT/save"
+# A save directory of its own, empty: a new game every time, and a player's
+# saves are never loaded or overwritten.
+export PS3_SAVEDATA_ROOT="$OUT/save"
 PS3_VERBOSE="${PS3_VERBOSE:-0}" SDL_NO_SIGNAL_HANDLERS=1 SDL_AUDIODRIVER=dummy PS3RECOMP_VK_GUEST_PROGRAMS=1 \
 PS3RECOMP_ENG_FPSLOG=1 PS3RECOMP_ENG_SHOT="$OUT/shots" PS3RECOMP_ENG_SHOT_EVERY=300 \
 PAD_FILE="$PAD" PAD_SCRIPT="45:0x4000,55:0x4000,65:0x4000,75:0x4000,85:0x4000,125:0x4000,135:0x4000,145:0x4000" \

@@ -193,6 +193,27 @@ per DMA:
   8-byte reload**, which the CPU cannot forward: three quarters of
   `spu_rdch`. It is now written as two 64-bit halves.
 
+**The integer helpers were scalar on x86.** Past the pier tutorial (the
+drive in `work/runs/drive_tut.sh` hangs from a ledge at ~65-85 fps) one job
+module, `jobmod_6d1c65171899` (image 209), is 38% of all SPU time. By its
+DMA it reads mesh data from main memory and PUTs vertex data into RSX local
+memory: geometry processing.
+
+Its hottest function counted bits one at a time. `spu_cntb` had NEON code
+and, on x86, only the per-byte reference loop. The same was true of 45 more
+integer ops: `xsbh`, `ceqbi`, `xshw`, the immediate rotates, `fsm`, `clz`,
+`gb` and the rest of `runtime/spu/spu_helpers.h`'s NEON list. Their
+references are loops over the `u128` union. The compiler turned them into
+general-register code, or into 30 instructions where one does, and every
+call paid a round trip through the stack from the vector registers the
+lifted code keeps its operands in.
+
+They now have SSE4.1 forms, with AVX2 for the per-word shifts and AVX-512
+BW/VL for the per-halfword shifts and `lzcnt`. `tests/test_spu_int_neon.c`
+checks every one against its reference: 2.8 million random cases, gcc and
+clang, x86-64-v2/v3/v4. Two alternating pier runs: gameplay 112 -> 123 fps,
+cutscene 83 -> 88.
+
 The Wwise chain still falls behind under load (see "Falling behind under
 load"): a job then runs a descriptor the title has already refilled, loops
 past its step budget, loops on the interpreter as well, and the chain used to
@@ -416,6 +437,33 @@ the colour export width), and the downsampled buffer matches the scene.
 `PS3RECOMP_ENG_DRAWTRACE_PX=<fx>,<fy>` names the draws that change one pixel,
 which is how the pass was found.
 
+## Water
+
+The water is drawn after the lit scene (`0x011C0000`) and its 256x256
+reflection (`0x0F6F0000`), in two passes over the same mesh:
+
+1. A shading pass writes the water's colour into `0x003B0000`. It reads the
+   scene, the reflection, the scene depth and a 512x512 normal map.
+2. A copy pass draws the mesh again into the scene. Its fragment program only
+   samples `0x003B0000` at the fragment's own place.
+
+For that place, the vertex program writes the screen uv times w into a
+texcoord. The fragment program reads it with SRC2 bit 31 set, the
+perspective-correction flag, which multiplies the interpolated value by 1/w.
+RPCS3 does the same, as `tc * gl_FragCoord.w`. The translator ignored the flag,
+so the copy sampled uv x w, outside the water, where `0x003B0000` is black. The
+New Marais swamp and the sea at the Empire City pier came out black.
+
+The flag now becomes `tc * RSX_FRAG_RCP_W`. That is `SV_Position.w` under
+glslang, which follows Vulkan's `FragCoord`, and `1 / SV_Position.w` under
+D3DCompile, which defines `RSX_DX_POSITION_W`. In a New Marais frame, 183 of
+the 507 fragment programs read a texcoord this way. Most of them are
+full-screen passes, where w is 1.
+
+`TEX_COORD_CONTROL` (`0x0B40 + 4i`, bit 0: texcoord i is 2D, its z and w read
+0 and the fragment's w) is not modelled. The drawtrace logs where the game
+sets it.
+
 ## Resolution scale (`PS3RECOMP_RES_SCALE`)
 
 `PS3RECOMP_RES_SCALE=2` (or 3, 4) draws every colour and depth target that
@@ -569,6 +617,11 @@ and the audio chain froze the game with it.
 | `PLAY_PROFILE=0`, `PLAY_PROFILE_BELOW=<fps>` | `work/play.sh` records 20 s of `perf` after 30 s of 3D frames under 70 fps (at most three a session); off, or another threshold |
 | `SPURS_IDLE_STATS=1` | what ends each idle SPU's wait (a notify, a timeout onto work, its spin), every 10 s |
 | `SPURS_IDLE_SPIN_US=<us>` | how long an idle SPU polls for work before it sleeps (200 in the port) |
+| `PS3_SAVEDATA_ROOT=<dir>` | the savedata directory itself; every script that boots the game points it at a fresh directory, so a test never loads or overwrites a player's saves |
+| `PS3RECOMP_ENG_SHADER_DUMP=<dir>` | each new pipeline's HLSL as `p<N>_vs.hlsl` / `p<N>_ps.hlsl`; the `p<N>` matches the drawtrace's only within the same run |
+| `PS3RECOMP_ENG_DRAWTRACE_AT=<file>` | with `PS3RECOMP_ENG_DRAWTRACE`: trace the frame after `<file>` appears (a script picks the moment) |
+| `PS3RECOMP_ENG_SHOT_FROM=<frame>,<n>`, `PS3RECOMP_ENG_SHOT_ALL=1` | shots only in that window of frames (with `SHOT_EVERY` small, to look for a flicker); light frames too |
+| `PS3RECOMP_ENG_STALE=1` | skip a colour target whose guest bytes were written after it was drawn (2 also logs); off by default, page-granular and racy with deferred writebacks |
 
 ## Lessons
 
