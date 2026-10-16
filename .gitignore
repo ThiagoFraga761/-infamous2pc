@@ -1,0 +1,42 @@
+# Allowlist: everything is ignored unless it is named below. The game, the
+# dumps, anything generated from them (lifted code, builds, logs, saves) and
+# local tools never reach the repository, whatever lands in this directory.
+/*
+!/.gitignore
+!/README.md
+!/LICENSE
+!/CREDITS.md
+!/docs/
+!/scripts/
+!/rpi/
+!/work/
+
+/work/*
+!/work/play.sh
+!/work/port/
+!/work/tools/
+!/work/tests/
+!/work/patches/
+
+/work/port/*
+!/work/port/CMakeLists.txt
+!/work/port/main.cpp
+!/work/port/stubs.cpp
+!/work/port/port_cpu_check.c
+!/work/port/native_passes.c
+!/work/port/config.toml
+!/work/port/tools/
+/work/port/tools/*
+!/work/port/tools/spu_cc.sh
+
+/work/tools/*
+!/work/tools/lift_spu.py
+!/work/tools/ppm2png.py
+
+/work/tests/*
+!/work/tests/*.sh
+
+/work/patches/*
+!/work/patches/ps3recomp.patch
+
+__pycache__/

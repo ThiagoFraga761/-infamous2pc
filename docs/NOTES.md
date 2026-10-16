@@ -1,0 +1,292 @@
+# Notes
+
+What was learned while porting inFAMOUS 2 (BCUS98125 01.00). Addresses are
+effective addresses in that executable's memory map unless marked LS (SPU local
+store).
+
+## How the port is put together
+
+- **PPU.** `ppu_loader.py` finds the functions and imports. `ppu_lifter.py`
+  translates the ~39,000 functions (346 jump tables) to C in `work/src/recomp`.
+  The port links that with the ps3recomp runtime. System modules are HLE.
+- **SPU.** Every SPU image the game runs is lifted to C (`work/tools/lift_spu.py`):
+  - the WWS job manager's policy module (EA 0x887080, at LS 0xA00);
+  - the 27 job modules (`C0DEC0DE`, at LS 0x4000);
+  - the 5 plugins of the ambient-occlusion job (at LS 0x6C00);
+  - the 30 SPURS job-chain binaries (Wwise among them);
+  - job-chain binaries the game loads from its data files instead of the
+    EBOOT. A run with `SPU_DUMP_MISS=<dir>` (`work/play.sh` sets it to
+    `work/runs/spujob-miss/`) writes each one out, and `lift_spu.py` lifts
+    what it finds there;
+  - the Bink decoder and EDGE zlib.
+
+  The lifted code keeps SPU registers in vector locals (`--local-regs`), and
+  the SPU translation units are built with clang (`work/port/tools/spu_cc.sh`).
+- **RSX.** ps3recomp's draw engine with the Vulkan backend runs the game's own
+  vertex and fragment programs, decompiled to HLSL and compiled to SPIR-V with
+  glslang.
+
+## The frame's critical path
+
+A 3D frame of the opening cutscene used to spend about 7 ms in the SPU
+ambient-occlusion job and 9 ms in the SPU lighting job, one after the other:
+
+- t+4.5..5.5 ms: NV3089 copies the depth (the Z24S8 depth buffer itself, read
+  as A8R8G8B8, to 0x47777B80) and then the normals (a colour target, to
+  0x473F3B80) into main memory. Each is copied as two strips, 1024 and 256
+  pixels wide; the second strip's source and destination are 0x1000 further
+  on.
+- SSAO job P075 (job module cc13c684dd3e) reads them and writes label 0x890.
+- Lighting job P071 (job module 9a537c60d338) lights them in place and writes
+  label 0x870.
+- The RSX waits on those labels before the composite. Its wait on 0x870 is
+  for the previous frame's value, so the composite can sample the lighting
+  while the job still writes it.
+
+Both jobs now have GPU replacements. Measured on the same build:
+
+| | 3D menu | 3D cutscene |
+|---|---|---|
+| SPU jobs | 42 fps | ~31 fps |
+| GPU SSAO | 57 fps | ~40 fps |
+| GPU SSAO + lighting | ~64 fps | ~45 fps |
+| G-buffer copies left out of guest memory | ~79 fps | ~52 fps |
+| SPU runtime: overlay index, idle DMA, wider copies | ~88 fps | ~56 fps |
+
+### After the GPU passes: the threads themselves
+
+With both jobs on the GPU, no single wait dominates. `PS3_CLOCK_STATS` showed
+the RSX thread 5% idle in the cutscene (65-80% turning the FIFO into Vulkan
+commands, 15-29% at present waiting on the GPU). Stack samples of every thread
+(`eu-stack` 24 times over 10 s) showed:
+
+- the main PPU thread running 80% of the time;
+- the SPU threads idle about half of it.
+
+These changes followed:
+
+- **The GPU starts on a frame while it is being recorded.** Every
+  `PS3RECOMP_VK_SPLIT` operations (512) the batch so far is submitted without
+  a fence. A flush waits on the last submission's fence, which covers the
+  earlier ones. The wait at present went from 4.7 to 1.8 ms.
+- **The window blit goes out with the frame**, in the same `vkQueueSubmit`,
+  instead of a submit-and-wait of its own. Engine mode also stopped reading
+  every presented frame back (only a dump needs it).
+- **Short `usleep`s are exact.** The main thread polls flags with
+  `usleep(1..10)` about 4,500 times a second (`PS3_POLLTOP=10` names the
+  sites). Linux held each one to the 50 us timer slack, ~60 us a turn. Sleeps
+  of up to 20 us now spin (yielding) to the deadline, and the slack is 1 us.
+- **The store path's SPU-reservation check is inline.** As a call it was 7%
+  of the main thread.
+
+Together they added about 8% to the frames rendered over the cutscene. The
+host is shared (a browser and Steam ran during the measurements), so single
+runs differ by about ±5%.
+
+### Local memory write tracking (`PS3RECOMP_WTRACK`)
+
+A gameplay profile had the RSX thread 97% busy, and most of that time went to
+textures and vertices it had already seen.
+
+**Textures.** The engine hashed every texture in use once a frame (35-90 MB)
+to notice changes. Every one of them lives in RSX local memory.
+
+**How the tracking works** (`runtime/memory/guest_wtrack.c`):
+
+- Once a range has been read, its pages become read-only.
+- The first write, from any thread and by any path, faults. The SIGSEGV
+  handler makes the page writable again and stamps it from a global clock.
+- A range is unchanged since stamp S while no page in it carries a later
+  stamp.
+- Host code that has the kernel write guest memory (fread, recv) brackets the
+  call. Otherwise the kernel would fail with EFAULT instead of faulting.
+
+**Results.**
+
+- Texture cache lookups went from 3.7 ms to 0.3 ms a frame.
+- `=2` keeps hashing and reports any change the tracking missed. The
+  cutscene reports none.
+
+### Geometry cache (`PS3RECOMP_GEO_CACHE`)
+
+The same tracking validates a cache of each draw's decoded vertices and
+rebuilt indices:
+
+- The key is everything else the result depends on.
+- A draw over unwritten memory skips the index decode, the remap, the fetch
+  and the topology rebuild.
+- Geometry the SPUs rewrite every frame is let go after two misses, so its
+  pages are not armed to fault every frame.
+
+**Results.**
+
+- In the cutscene, 87% of draws hit.
+- Vertex work went from 3.7 ms to 1.5 ms a frame.
+- `=2` rebuilds every hit and compares the results; the cutscene reports
+  none differing.
+
+### The Wwise job chain and its guard
+
+The gameplay freezes all came from the audio job chain. A lifted Wwise job
+would loop forever, and a NULL call followed in the WWS handlers.
+
+**What `SPURS_JC_TRACE=1` showed.** The audio thread sometimes notifies the
+chain's job guard two or three times in a burst. The runtime banked each
+notify as a credit, so the chain ran extra laps. Those laps read descriptors
+the title was still writing for its next frame, sometimes only half written.
+
+**The fixes.**
+
+- **Guard count as on hardware:** a notify never takes it below zero, and
+  a notify while the guard is already open is lost.
+- **The chain wakes on a condition variable**, instead of polling every
+  1 ms.
+- **The job manager's grab:** a lap's descriptors are copied the moment the
+  guard opens.
+- **Each job reads its descriptor once.** It used to read it twice: once to
+  pick the lift, again to stage. In between, the title could swap the
+  binary.
+
+**Diagnostics.**
+
+- A job that runs past its step budget (`SPURS_JOB_LIFT_BUDGET`) is run
+  again on the interpreter, from the very local store it was given.
+- Its store is kept (`SPU_DUMP_STUCK`) for `PS3RECOMP_SPU_REPLAY=<file>`.
+
+### Ambient occlusion on the GPU (`PS3RECOMP_NATIVE_SSAO`)
+
+- **Passes.** Five fragment passes:
+  - half-size linear depth;
+  - 12 samples per pixel;
+  - a depth-aware 5-tap blur across;
+  - the same blur down;
+  - a depth-aware upsample to the R8 image at 0xCF800000 (B8, linear,
+    1280x720).
+
+  They run at the depth copy, from the normals target and an RGBA8 snapshot of
+  the depth buffer. The texture unit that samples 0xCF800000 gets the result.
+- **SPU side.** The plugins' entry (LS 0x6C30, images 240-244) is gated. It
+  returns at once while the game samples the GPU's result, and runs as usual
+  otherwise.
+- **Parameters change every frame with the camera's field of view.** They sit
+  in the job's 0x140-byte block at 0x00A26780:
+  - +0x00: 1/z = a·d24/(2^24−1) + b;
+  - +0x10 / +0x40 / +0x70: the sample tables;
+  - +0xA0: the camera matrix, whose first three columns rotate a normal into
+    pixel offsets;
+  - +0xE0: the unoccluded total, the projection scale, the sphere radius, the
+    falloff and the depth clamp;
+  - +0x100: the output remap and the blur and upsample weights.
+
+  Fixed constants taken from one capture draw wrong halos in half the scenes.
+- **Checked** with `=2`, which computes without substituting and diffs against
+  the SPU's output: at most 0.08% of pixels are more than 8 levels off, and the
+  mean error is under 1.4 levels (SPU float truncation).
+
+### Lighting on the GPU (`PS3RECOMP_NATIVE_LIGHTING`)
+
+- **Passes.** Five compute passes:
+  - per light;
+  - bounds of the view-space positions per fifth of a tile;
+  - the lights that reach each of the 40x18 tiles;
+  - per pixel;
+  - clearing tiles where no pixel was in range.
+
+  Up to 256 point and spot lights. Output:
+  - diffuse: RGB square-root encoded with a shared scale in A;
+  - specular: the intensity, in A.
+
+  Both are written over the copies, as the job does.
+- **Inputs.**
+  - The two images are latched (privately copied) at their NV3089 copies.
+  - The parameters are taken when the job loads them: a DMA watch on its
+    256-byte block at 0x00A25A80. The block holds the position matrix at
+    +0x10, the clip matrix at +0x50, the light count at +0x90, the light table
+    at +0x94 (48-byte records) and the colour scale at +0x98.
+  - The lighting is computed when the game first samples one of the two
+    copies.
+- **SPU side.** The job's per-tile function (LS 0x4AC8 of image 212) is gated.
+  Nothing below it touches a channel or DMA, so the job's transfers, queue and
+  label stay as they are.
+- **Checked** with `=2`:
+  - Most frames have under 0.2% of pixels more than 1 level off.
+  - In a few frames, up to ~0.4% of pixels are more than 4 off, at the edges
+    of lit objects.
+  - Some tiles disagree on "lit by nothing" against "empty". Both decode to
+    black.
+  - Taking the job's own parameters instead of reading them at the copy did
+    not change these numbers, and neither did disabling the tile culling.
+
+### What the GPU passes made unnecessary
+
+While both passes are live, the copies have no reader left.
+`rsx_draw_engine_copy_note` returns nonzero and the NV3089 copy skips the guest
+side: no GPU readback (each one was a flush and a wait, five per frame), no
+pixel conversion, no CPU copy. That took the frame from about six GPU flushes
+to one.
+
+The gated jobs still run their DMA. `spu_dma_skip_range` makes their
+transfers of the G-buffer, the SSAO scratch and the occlusion image complete
+without moving bytes, which removes ~20 MB of copies a frame.
+
+A looser rule for the second strip, which accepted any destination in the
+first row, broke the video segment. That memory is reused during loading. The
+strip must come from the same source at the same offset.
+
+### Gates and fallback
+
+`spu_gate_function` (ps3recomp patch) makes a lifted SPU function return as
+soon as it is entered, but only while a flag says the GPU's result is what the
+game samples:
+
+- The flag is set by a successful substitution and cleared by any failure: a
+  backend refusal, an unsupported light, or a texture bound in a format or
+  size the GPU image does not fit.
+- When the flag is clear, the SPU does that frame's work.
+
+## Stuck SPURS jobs
+
+A lifted Wwise job once looped forever in gameplay after 66,000 normal runs,
+and the audio chain froze the game with it.
+
+- **Step budget.** Every lifted job now has one (`SPURS_JOB_LIFT_BUDGET`,
+  default 50 million). It counts trampoline hops, plus the loop heads of the
+  job binaries, which are lifted with `--loop-budget`; a loop inside one
+  function never comes back to the trampoline. The longest real job measured
+  is ~274,000 steps.
+- **Retry.** A job that runs past its budget is run again on the interpreter,
+  but only when it has written nothing outside its local store (no PUT, atomic
+  put or outbound mailbox), so nothing is repeated:
+  - If the interpreter finishes it, the lift was looping, and that binary runs
+    on the interpreter for the rest of the session.
+  - If the interpreter does not finish it either, the input is wrong.
+
+  The log says which one happened.
+
+## Diagnostics worth knowing
+
+| Variable | What it does |
+|---|---|
+| `PS3RECOMP_ENG_FPSLOG=1` | frames per 10 s |
+| `PS3RECOMP_ENG_SHOT=<dir>` | the presented image of every Nth 3D frame, as PPM (`-` logs mean brightness) |
+| `PS3RECOMP_NATIVE_SSAO=2`, `PS3RECOMP_NATIVE_LIGHTING=2` | compute on the GPU and diff against the SPU, once a second |
+| `PS3RECOMP_NATIVE_SSAO_DUMP=<dir>`, `PS3RECOMP_NATIVE_LIGHTING_DUMP=<dir>` | images of those comparisons |
+| `PS3_TIMELINE=1` | RSX semaphore waits, SPU labels and SPU job sampling on one timeline |
+| `PS3_CLOCK_STATS=1` | where the RSX thread's time goes, with per-label waits |
+| `SPU_OVL_DMA=<overlay>,<n>,<skip>` | the DMA transfers of one job module |
+| `PS3RECOMP_VK_STATS=1` | Vulkan flushes and time spent waiting on the GPU |
+| `SPURS_JOB_STEPS=1` | each lifted job image's longest run, in steps |
+| `SPU_DUMP_MISS=<dir>` | write out job binaries that have no lift |
+| `PS3_POLLTOP=<s>` | the guest's busiest `usleep` poll sites, per thread |
+| `PS3RECOMP_VK_SPLIT=<n>` | operations per command buffer before it goes to the GPU (0: one per frame) |
+| `PS3RECOMP_ENG_HASHSTATS=1` | texture bytes hashed per frame, by memory and span size |
+
+## Lessons
+
+- **Brightness wrong overall:** suspect a GPU readback the CPU makes. The game
+  reads a 20x11 luminance reduction from VRAM for its auto-exposure, so render
+  targets up to 1024 px are written back to guest memory every frame.
+- **SPU float:** truncating, no denormals, extended range. AVX-512's `{rz-sae}`
+  reproduces it bit-exactly. Set DAZ in MXCSR but not FTZ: FTZ hangs the game.
+- **Parallel builds:** each chunk of the lifted PPU code takes about 4 GB to
+  compile.
