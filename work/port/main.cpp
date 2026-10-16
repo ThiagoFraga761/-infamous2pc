@@ -297,8 +297,13 @@ static DWORD WINAPI frame_clock(LPVOID)
             CLOCK_TIMED(st_drain, cellGcm_rsx_process_fifo());
 
             if (rsx_backend_pump() != 0) {
-                rsx_ok = 0;              /* window closed */
-                continue;
+                /* The window was closed: that is the player quitting. Running
+                 * on without it left a headless process behind. _Exit, not
+                 * exit: the guest threads are still running, and destructors
+                 * and atexit handlers would race them. */
+                fprintf(stderr, "[rsx] window closed -- exiting\n");
+                fflush(stderr);
+                _Exit(0);
             }
             /* Present a flip the drain just reached, now: the drain stops at
              * the flip, so the batch is exactly the finished frame, and the

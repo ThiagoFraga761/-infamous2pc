@@ -284,6 +284,26 @@ game samples:
   size the GPU image does not fit.
 - When the flag is clear, the SPU does that frame's work.
 
+## Particles and fragment depth export
+
+The game draws its particles (smoke, fire, sparks, fog sheets) into a 512x288
+colour target (`0xB9E000`) over a 512x288 depth buffer (`0x0F770000`), then
+blends the result over the 1280x720 picture in the final composite. The
+particle shader reads that depth too and discards a fragment behind the scene
+(soft particles). The depth buffer is filled each frame by one full-screen
+pass that writes depth from the fragment program: `r1.z`, with
+SHADER_CONTROL's depth-export bits (`0x0E`) set.
+
+The fragment program translator had no depth export, so that pass left the
+buffer at its clear value. Particles were depth-tested and soft-tested against
+a flat 0.5, so most of them were dropped and large sprites were cut along
+straight lines -- the likely source of the flat, dark rectangles reported over
+the water in a cutscene (not yet checked in that scene). Now `r1.z` becomes `SV_Depth` (as RPCS3 does, from r1 whatever
+the colour export width), and the downsampled buffer matches the scene.
+
+`PS3RECOMP_ENG_DRAWTRACE_PX=<fx>,<fy>` names the draws that change one pixel,
+which is how the pass was found.
+
 ## Stuck SPURS jobs
 
 A lifted Wwise job once looped forever in gameplay after 66,000 normal runs,
@@ -320,6 +340,8 @@ and the audio chain froze the game with it.
 | `PS3_POLLTOP=<s>` | the guest's busiest `usleep` poll sites, per thread |
 | `PS3RECOMP_VK_SPLIT=<n>` | operations per command buffer before it goes to the GPU (0: one per frame) |
 | `PS3RECOMP_ENG_HASHSTATS=1` | texture bytes hashed per frame, by memory and span size |
+| `PS3RECOMP_ENG_DRAWTRACE_PX=<fx>,<fy>` | with `PS3RECOMP_ENG_DRAWTRACE`: every draw that changes the pixel at that place (fractions of the target) |
+| `PS3RECOMP_VK_PRESENT=mailbox\|fifo\|immediate` | presentation mode (mailbox by default: no tearing, no stall while the window is hidden) |
 | `PS3_VERBOSE=1` | log every SPU job dispatch and every wait (on by default when stderr is not a terminal; costs ~15% at the pier) |
 | `BENCH_PERF=<s>` | `work/tests/bench_pier.sh`: also a `perf` profile of the walk; threads are named (`spurs0`..`spurs4`, `rsx`, `p:<guest name>`) |
 

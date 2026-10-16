@@ -17,6 +17,8 @@ export PS3RECOMP_VK_GUEST_PROGRAMS=1
 # lighting the SPU jobs did. PS3RECOMP_NATIVE_SSAO=0 / PS3RECOMP_NATIVE_LIGHTING=0
 # turn either off; =2 compares the GPU's result with the SPU's (a diagnostic).
 export PS3RECOMP_VK_WINDOW=1
+# Mailbox presentation by default: no tearing, no wait on the display, and no
+# stall while the window is hidden. PS3RECOMP_VK_PRESENT=fifo is vsync.
 export SDL_NO_SIGNAL_HANDLERS=1
 # Every 10 s, "[rsx fps] N fps ..." in this terminal.
 export PS3RECOMP_ENG_FPSLOG=1
@@ -42,5 +44,36 @@ export SPURS_JC_TIMING="${SPURS_JC_TIMING:-1}"
 export PS3_VERBOSE="${PS3_VERBOSE:-0}"
 LOG="$HERE/runs/play-$(date +%Y%m%d-%H%M%S).log"
 echo "log: $LOG"
+# A hang leaves the thread stacks behind: when no "[rsx fps]" line has come
+# for 30 s, eu-stack (elfutils) writes every thread's stack -- lifted guest
+# functions included, as func_<address> -- next to the log, once.
+watch_stall() {
+    set +e                             # a failing probe must not end the watcher
+    local gpid="" off=0 same=0 seen=0 size
+    for _ in $(seq 1 100); do
+        gpid=$(pgrep -P $$ -x MyGameRecomp | head -1); [ -n "$gpid" ] && break; sleep 0.2
+    done
+    [ -n "$gpid" ] && command -v eu-stack > /dev/null || return 0
+    while kill -0 "$gpid" 2>/dev/null; do
+        sleep 5
+        # Only what was logged since the last look.
+        size=$(stat -c %s "$LOG" 2>/dev/null || echo 0)
+        if [ "$size" -lt "$off" ]; then off=0; fi
+        if tail -c +$((off + 1)) "$LOG" 2>/dev/null | head -c $((size - off)) | grep -aq "rsx fps\] [0-9]"; then
+            same=0; seen=1
+        elif [ "$seen" = 1 ]; then
+            same=$((same + 5))
+        fi
+        off=$size
+        if [ "$same" -eq 30 ]; then
+            local out="${LOG%.log}.stall-$(date +%H%M%S).stacks"
+            eu-stack -p "$gpid" -n 40 > "$out" 2>&1
+            echo "[play.sh] no frame for 30 s -- thread stacks in $out" >&2
+        fi
+    done
+}
+watch_stall &
+WATCH=$!
 cd "$ROOT"
 "$BIN" disc/PS3_GAME/USRDIR/EBOOT.elf 2>&1 | tee "$LOG"
+kill "$WATCH" 2>/dev/null || true
