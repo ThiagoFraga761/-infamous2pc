@@ -537,6 +537,65 @@ Effect: the RSX thread's time at present went from 21-33% to 0-4% at 1x, the
 Not scaled yet: lines and points (1 pixel), NV3089 copies (CPU copies of a
 downsampled readback, so water and blur sources stay at 720p).
 
+## What limits the frame rate where (2026-10-16)
+
+Two scenes, two different limits:
+
+- **Under the Empire City pier** (the "Blast open the gate" sequence, reached
+  by `work/runs/drive_tut.sh`). The RSX thread drains 97% of the time
+  (`PS3_CLOCK_STATS`). The frame has ~10,500 draws, against ~4,500 at the
+  pier and ~3,700 in New Marais.
+- **New Marais** (`work/runs/nm_bench.sh`, from a copy of a save). The RSX
+  thread is busy about 70% of the time, and the main PPU thread spends ~40%
+  of its time in `usleep` polls. Waits at `0x370640`/`0x370668` and
+  `0x3710B8`/`0x3710E4` make up ~55% of the frame, and all five SPURS SPUs are
+  busy through them: the frame waits on SPU throughput.
+  - SPU time divides into job code (~50%: `jobmod_6d1c` geometry 16%, `ec5f`
+    8%, `bc11` 8%, `5cff` 7%), dispatch (~17%: `spu_drain_call`,
+    `spu_task_launch_check`, `spu_lookup`, `spu_indirect_branch`) and DMA
+    (~11%).
+  - `SPURS_NSPUS_MIN=7` changes nothing, nor does raising every workload's
+    maximum contention to 7 with it: the game's work does not spread over
+    SPUs it did not ask for.
+  - A longer idle spin (`SPURS_IDLE_SPIN_US=2000`) is worth ~3%.
+
+`PS3_TIMELINE=<frame>,<n>` now also records each `usleep` (thread, caller)
+and the SPURS idle mask every 250 us, which is how the second picture was
+taken.
+
+### Cheaper draws on the RSX thread
+
+All of these leave the output unchanged:
+
+- **VS constants by range.** The Vulkan backend now takes
+  `bind_vs_constants_range`: only the rows the vertex program reads, and the
+  viewport tail, are compared and copied. Before, every draw copied the whole
+  8 KB register file three times, and compared it once; under the pier that
+  was 86 MB a frame. `PS3RECOMP_ENG_VPC_FULL=1` forces the whole block.
+- **Vertex fetch.** A draw fetched over its whole index range (the remap's
+  ranged path) has consecutive elements: the fetch walks the source by stride
+  instead of resolving each reference. SNORM16, SINT16 and UINT8 got their
+  own loops; they went through the per-element reference decoder, and SNORM16
+  is the most common format under the pier. The per-vertex element range is
+  computed once per draw instead of once per attribute.
+  `tests/test_vertex_fetch.c` covers the consecutive case now.
+- **Texture binding memo.** A unit whose registers repeat within a frame, and
+  which names a plain texture (no colour or depth target at its address),
+  reuses the handle and sampler it got earlier in the frame. The texture
+  cache checks a texture for changes once a frame anyway. `s_tex_gen` drops
+  the memo when a target is created or a texture handle is replaced or
+  evicted. `PS3RECOMP_ENG_TEXMEMO=0` turns it off.
+- **The FIFO feeds the old state machine less.** With the register-file
+  engine drawing, `rsx_process_method` (the vtable path's `rsx_state`) has no
+  backend and no reader. It is now fed only the methods with effects outside
+  that state: the reference, the back-end labels and the draws. It was ~8%
+  of the RSX thread. `PS3RECOMP_FIFO_LEGACY=1` feeds it everything.
+- **SPU function lookup.** Each SPU thread caches `spu_lookup`'s answers. The
+  registry only changes while it is built.
+
+Measured: under the pier, 27-29 fps became 33-37. In New Marais, ~74 became
+~80.
+
 ## Saves
 
 The game loads its save icon once, at boot, through the raw `sys_fs`
@@ -599,7 +658,6 @@ and the audio chain froze the game with it.
 | `PS3RECOMP_ENG_SHOT=<dir>` | the presented image of every Nth 3D frame, as PPM (`-` logs mean brightness) |
 | `PS3RECOMP_NATIVE_SSAO=2`, `PS3RECOMP_NATIVE_LIGHTING=2` | compute on the GPU and diff against the SPU, once a second |
 | `PS3RECOMP_NATIVE_SSAO_DUMP=<dir>`, `PS3RECOMP_NATIVE_LIGHTING_DUMP=<dir>` | images of those comparisons |
-| `PS3_TIMELINE=1` | RSX semaphore waits, SPU labels and SPU job sampling on one timeline |
 | `PS3_CLOCK_STATS=1` | where the RSX thread's time goes, with per-label waits |
 | `SPU_OVL_DMA=<overlay>,<n>,<skip>` | the DMA transfers of one job module |
 | `PS3RECOMP_VK_STATS=1` | Vulkan flushes and time spent waiting on the GPU |
@@ -622,6 +680,9 @@ and the audio chain froze the game with it.
 | `PS3RECOMP_ENG_DRAWTRACE_AT=<file>` | with `PS3RECOMP_ENG_DRAWTRACE`: trace the frame after `<file>` appears (a script picks the moment) |
 | `PS3RECOMP_ENG_SHOT_FROM=<frame>,<n>`, `PS3RECOMP_ENG_SHOT_ALL=1` | shots only in that window of frames (with `SHOT_EVERY` small, to look for a flicker); light frames too |
 | `PS3RECOMP_ENG_STALE=1` | skip a colour target whose guest bytes were written after it was drawn (2 also logs); off by default, page-granular and racy with deferred writebacks |
+| `PS3RECOMP_ENG_TEXMEMO=0` | bind every texture unit afresh (no per-frame memo) |
+| `PS3RECOMP_FIFO_LEGACY=1` | feed every FIFO method to the vtable path's `rsx_state` too |
+| `PS3_TIMELINE=<frame>,<n>` | events over n engine frames: RSX waits, SPU labels, each SPU's job every 250 us, the SPURS idle mask, every `usleep` (thread, caller) |
 
 ## Lessons
 
