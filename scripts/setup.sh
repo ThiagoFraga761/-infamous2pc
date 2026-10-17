@@ -25,6 +25,14 @@ else
     exit 1
 fi
 
+# Dear ImGui (MIT) for the launcher and the in-game menu, at a fixed tag;
+# without it the port builds and runs with no UI.
+IMGUI_TAG=v1.91.5
+if [ ! -f "$DIR/libs/thirdparty/imgui/imgui.cpp" ]; then
+    git clone --quiet --depth 1 --branch "$IMGUI_TAG" https://github.com/ocornut/imgui.git \
+        "$DIR/libs/thirdparty/imgui"
+fi
+
 python3 -m venv "$ROOT/.venv"
 "$ROOT/.venv/bin/pip" install --quiet -r "$DIR/requirements.txt"
 echo "toolkit ready: $DIR (python: $ROOT/.venv)"

@@ -25,6 +25,13 @@
 !/work/port/port_cpu_check.c
 !/work/port/native_passes.c
 !/work/port/config.toml
+!/work/port/settings.cpp
+!/work/port/settings.h
+!/work/port/ui.cpp
+!/work/port/ui.h
+!/work/port/tests/
+/work/port/tests/*
+!/work/port/tests/*.cpp
 !/work/port/tools/
 /work/port/tools/*
 !/work/port/tools/spu_cc.sh

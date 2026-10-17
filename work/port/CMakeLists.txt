@@ -182,6 +182,8 @@ endif()
 
 add_executable(${PROJECT_NAME}
     main.cpp
+    settings.cpp
+    ui.cpp
     stubs.cpp
     port_cpu_check.c
     native_passes.c
@@ -206,14 +208,21 @@ add_executable(${PROJECT_NAME}
 #                          is a per-lane scalar loop. Empty keeps the baseline;
 #                          port_cpu_check.c stops an x86-64-vN build with a
 #                          message on a CPU below that level.
+option(PORT_SPU_LS_DEBUG "Keep the SPU local-store debug hooks in the lifted code" OFF)
 set(PORT_SPU_MARCH "x86-64-v3" CACHE STRING
     "-march for the lifted SPU sources on x86-64 (empty: compiler default)")
 if(SPU_SOURCES)
+    set(_spu_defs "SPU_USE_DISPATCH_MT;SPU_WRCH_INLINE")
+    if(NOT PORT_SPU_LS_DEBUG)
+        list(APPEND _spu_defs "SPU_LS_NO_DEBUG")
+    endif()
     set_source_files_properties(${SPU_SOURCES} PROPERTIES
         INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
         # SPU_WRCH_INLINE: the MFC parameter channel writes inline
         # (spu_wrch_fast, runtime/spu/spu_helpers.h).
-        COMPILE_DEFINITIONS "SPU_USE_DISPATCH_MT;SPU_WRCH_INLINE")
+        # SPU_LS_NO_DEBUG: no local-store debug hooks in the lifted code
+        # (runtime/spu/spu_context.h); PORT_SPU_LS_DEBUG=ON keeps them.
+        COMPILE_DEFINITIONS "${_spu_defs}")
     if(NOT MSVC OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         set(_spu_opts "-O2")
         if(PORT_SPU_MARCH AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")

@@ -30,6 +30,8 @@
 
 /* The lifter's generated header, which declares ppu_context and the function
  * table. It comes first: everything below is written against that struct. */
+#include "settings.h"
+#include "ui.h"
 #include "ppu_recomp.h"
 
 /* The Win32 names -- Sleep, GetTickCount64, CreateThread, InterlockedIncrement,
@@ -156,6 +158,7 @@ extern "C" int  rsx_null_backend_pump_messages(void);
 #  define rsx_backend_pump    rsx_null_backend_pump_messages
 #  define RSX_BACKEND_NAME    "null (headless software)"
 #endif
+extern "C" int  rsx_be_thread_presents_queued(void);   /* libs/video/rsx_be_thread.c */
 
 /* ---------------------------------------------------------------------------
  * Configuration
@@ -214,6 +217,7 @@ static DWORD WINAPI frame_clock(LPVOID)
     int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
     fprintf(stderr, "[rsx] %s backend init %s\n", RSX_BACKEND_NAME,
             rsx_ok ? "OK -- window open" : "FAILED");
+    port_ui_backend_ready();   /* the start screen, if any: the boot waits on its "Play" */
 
     double hz = 60.0;
     { const char* e = getenv("PS3_VBLANK_HZ");
@@ -317,8 +321,13 @@ static DWORD WINAPI frame_clock(LPVOID)
              * freely, so the window is not blank during boot. */
             if (cellGcm_take_flip_pending())
                 CLOCK_TIMED(st_present, present_guest_frame());
-            else if (cellGcm_flip_request_count() == 0 && now - last_boot_present >= 4000ull) {
-                /* Before the first flip: keep the window fresh, at the old 4 ms pace. */
+            else if (cellGcm_flip_request_count() == 0 &&
+                     now - last_boot_present >= (port_ui_start_screen() ? 16000ull : 4000ull) &&
+                     rsx_be_thread_presents_queued() == 0) {
+                /* Before the first flip: keep the window fresh, at the old 4 ms
+                 * pace; about 60 a second under the start screen, which only
+                 * needs the menu to follow the mouse. Never behind a present
+                 * still queued: with VSync that wait would hold up the drain. */
                 last_boot_present = now;
                 CLOCK_TIMED(st_present, rsx_backend_present());
             }
@@ -415,6 +424,21 @@ int main(int argc, char** argv)
         printf("usage: %s <PPU ELF>\n", argv[0]);
         return 2;
     }
+
+    /* The player's settings (user/settings.ini) become the environment the
+     * port reads, below anything already set there (settings.h). First, so
+     * that every getenv after this sees them. Only with a window: a headless
+     * run (the tests, the benchmarks) stays what its own environment says,
+     * whatever the player chose. */
+    const char* vk_window = getenv("PS3RECOMP_VK_WINDOW");
+    if (vk_window && vk_window[0] && vk_window[0] != '0') { port_settings* ps = port_settings_get();
+      const int had = port_settings_load(ps, port_settings_path());
+      port_settings_from_env(ps);
+      port_settings_export(ps);
+      printf("[settings] %s %s: scale %d, voices %s, text %s, VSync %s\n",
+             had ? "read" : "defaults, no", port_settings_path(), ps->scale, ps->voice, ps->text,
+             ps->vsync ? "on" : "off");
+      port_ui_init(argc, argv); }
 
     /* inFAMOUS 2: the audio sync the main thread waits on comes from its Wwise
      * jobs' own throw_event, so a job must not also get a synthetic "job done"
@@ -561,6 +585,7 @@ int main(int argc, char** argv)
      * until the title registers its vblank and flip handlers during init. */
     g_ps3_guest_caller = harness_guest_caller;
     CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL);
+    port_ui_wait_start();
 
     printf("\n[boot] dispatching entry OPD 0x%08X (stack top 0x%08X)\n\n",
            entry, STACK_TOP);

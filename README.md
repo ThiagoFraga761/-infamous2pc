@@ -47,6 +47,17 @@ As de Empire City foram renderizadas em 2× (2560×1440) e reduzidas.</sub>
 
 ## Novidades
 
+- **Tela de opções e menu no jogo:**
+  - Ao abrir, o jogo mostra a tela de opções, com Vídeo, Idioma, Desempenho e
+    Controle e saves; depois é só clicar em **Jogar**.
+  - No meio do jogo, **F1** (ou **Select+Start** segurados) abre o mesmo menu.
+  - Funciona com mouse, teclado e controle.
+  - Dublagem e legenda podem ser de idiomas diferentes.
+- **SPUs mais rápidos:**
+  - Contas de float com expoente 255 resolvidas no vetor.
+  - Sem barreira de memória antes de cada DMA.
+  - Sem checagens de debug no código traduzido.
+  - Nas ruas pesadas: de 54,9 para 56,9 fps.
 - **Engasgo ao virar a câmera: corrigido.**
   - Cada textura que o jogo descartava fazia o port parar e esperar a GPU
     inteira. Girando a câmera numa área nova, eram ~5.800 esperas por
@@ -153,18 +164,30 @@ work/play.sh        # janela + controle + som
 A tradução leva alguns minutos; a primeira compilação é demorada, porque o
 código traduzido do PPU é grande.
 
-| Tecla / variável | O que faz |
+Ao abrir, aparece a **tela de opções**. Tudo o que se escolhe fica gravado em
+`user/settings.ini`:
+
+| Aba | O que tem |
 |---|---|
+| Vídeo | resolução (720p, 1440p, 4K), tela cheia, VSync, esticar ou barras, monitor |
+| Idioma | dublagem e legendas, separadas |
+| Desempenho | predefinições, limite de FPS, contador de FPS, thread de gravação |
+| Controle e saves | controle detectado e teste de botões, pasta e backup dos saves, logs |
+
+| Tecla | O que faz |
+|---|---|
+| **F1**, ou **Select+Start** segurados | abre e fecha o menu durante o jogo |
 | **F11** ou **Alt+Enter** | tela cheia / janela |
 | **Esc** | fecha o jogo |
-| `PS3_SYS_LANG=pt` | idioma do console: `pt` (PT-BR, padrão), `en`, `es`, `fr`… |
-| `PS3RECOMP_RES_SCALE=2` | renderiza em 2× (1440p); `3` = 4K |
-| `PS3RECOMP_VK_FULLSCREEN=1` | já abre em tela cheia |
-| `PS3RECOMP_VK_STRETCH=1` | estica a imagem para encher a tela, como antes |
-| `PS3RECOMP_BE_THREAD=0` | desliga a thread de gravação Vulkan |
-| `PS3RECOMP_VK_PRESENT=fifo` | VSync (o padrão é `mailbox`) |
 
-O `work/play.sh` documenta as outras opções.
+- **Pular a tela de opções:** `work/play.sh --play` ou `PS3_SKIP_LAUNCHER=1`.
+- **Novo jogo ou outro save:** o inFAMOUS 2 não tem menu principal. Na primeira
+  vez ele mostra "Começar um jogo novo"; depois disso sempre continua do save
+  mais recente, como no PS3. Novo jogo e carregar ficam dentro do jogo, em
+  **Start → Dados salvos**.
+- **Variáveis de ambiente:** continuam valendo e ganham do arquivo
+  (`PS3RECOMP_RES_SCALE=2`, `PS3_VOICE_LANG=english`, `PS3RECOMP_VK_PRESENT=fifo`…).
+  O `work/play.sh` documenta as outras.
 
 ## Idioma
 
@@ -176,7 +199,8 @@ console:
   trata esse número como desconhecido e cai no inglês.
 - O caminho para o PT-BR é o idioma "Português" (7), que a lista da região
   norte-americana liga aos arquivos `brazilian`.
-- Por isso o `play.sh` usa `PS3_SYS_LANG=pt`.
+- O port escolhe esse número sozinho a partir do idioma das legendas, e serve
+  os arquivos de voz e de texto que você escolheu na aba Idioma.
 
 ## Saves e dados
 
@@ -405,7 +429,19 @@ scripts/build.sh    # build into work/port/build-vk
 work/play.sh        # window + controller + sound
 ```
 
-**F11**/**Alt+Enter** toggles full screen, and **Esc** quits. Useful
+The game opens on an options screen:
+
+- the tabs are Video, Language, Performance, and Controller and saves;
+- choices are saved to `user/settings.ini`;
+- **F1** (or **Select+Start** held) opens the same menu in game;
+- `--play` or `PS3_SKIP_LAUNCHER=1` skips the screen.
+
+inFAMOUS 2 has no main menu. The first time it shows "Start a new game"; after
+that it always continues from the newest save, as on the PS3. A new game or
+another save is loaded in game, from **Start → Saved Data**.
+
+**F11**/**Alt+Enter** toggles full screen, and **Esc** quits. Environment
+variables still win over the file. Useful
 variables:
 
 - `PS3_SYS_LANG`: `pt` (default), `en`, ….

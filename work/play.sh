@@ -44,16 +44,12 @@ export SPURS_JC_TIMING="${SPURS_JC_TIMING:-1}"
 # runtime logs every SPU job and wait (thousands of lines a second, through
 # one lock): quiet unless asked for.
 export PS3_VERBOSE="${PS3_VERBOSE:-0}"
-# The console language the game reads: it picks its voices and text by it
-# (the disc carries brazilian.psarc and brazilian_text.psarc). Portuguese by
-# default, and "pt", not "pt-br": the game treats every language number above
-# 16 as unknown and falls back to English, and pairs Portuguese (7) with its
-# Brazilian files. PS3_SYS_LANG=en for English (libs/system/cellSysutil.c).
-export PS3_SYS_LANG="${PS3_SYS_LANG:-pt}"
-# The backend's Vulkan calls on a thread of their own, beside the engine:
-# +12% where the draws are heaviest (docs/NOTES.md). PS3RECOMP_BE_THREAD=0
-# goes back to one thread.
-export PS3RECOMP_BE_THREAD="${PS3RECOMP_BE_THREAD:-1}"
+# Resolution, VSync, full screen, voices and text, the FPS limit and the
+# Vulkan recording thread come from user/settings.ini (work/port/settings.h),
+# which the launcher and the in-game menu (F1) write; the defaults are 720p,
+# Brazilian Portuguese voices and text, the recording thread on. A variable
+# set here or in the shell still wins (PS3_SYS_LANG=en, PS3RECOMP_RES_SCALE=2,
+# PS3_VOICE_LANG=english, PS3RECOMP_BE_THREAD=0, ...).
 LOG="$HERE/runs/play-$(date +%Y%m%d-%H%M%S).log"
 echo "log: $LOG"
 # A hang leaves the thread stacks behind: when no "[rsx fps]" line has come
@@ -81,9 +77,14 @@ watch_stall() {
         # Only what was logged since the last look.
         size=$(stat -c %s "$LOG" 2>/dev/null || echo 0)
         if [ "$size" -lt "$off" ]; then off=0; fi
-        chunk=$(tail -c +$((off + 1)) "$LOG" 2>/dev/null | head -c $((size - off)) | grep -a "rsx fps\] [0-9]")
+        new=$(tail -c +$((off + 1)) "$LOG" 2>/dev/null | head -c $((size - off)))
+        chunk=$(printf '%s\n' "$new" | grep -a "rsx fps\] [0-9]")
+        # The start screen and a restart for new settings show no game: a
+        # freeze counts only once the game has drawn a 3D frame since then.
+        printf '%s\n' "$new" | grep -aq "\[ui\] starting again" && seen=0
         if [ -n "$chunk" ]; then
-            same=0; seen=1
+            same=0
+            echo "$chunk" | awk '{ if ($9 + 0 > 0) w = 1 } END { exit !w }' && seen=1
             # "[rsx fps] F fps (N frames in 10s: W world, L light)": F, or 999 when W < 80% of N.
             for fps in $(echo "$chunk" | awk '{w = $9 + 0; n = substr($5, 2) + 0; print (n && w * 5 >= n * 4) ? int($3) : 999}'); do
                 if [ "$fps" -lt "${PLAY_PROFILE_BELOW:-70}" ]; then slow=$((slow + 1)); else slow=0; fi

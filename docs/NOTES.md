@@ -861,6 +861,107 @@ geometry, and are destroyed when that set completes (`vk_defer_image`,
   cache, not all of them.
 - During the same turn: no flushes, and 39-50 fps.
 
+### The SPUs in the heavy views
+
+With the recording thread, the PPU main thread waits almost only on SPU job
+progress (`0x370640`, `0x3710B8`). While it waits, all five SPUs are busy
+83% of the time: SPU throughput is the limit there. 37% of the SPU threads'
+time was the runtime, not the jobs. Three cuts:
+
+- **Extended-range floats in the vector.**
+  - An SPU single with exponent 255 is an ordinary number (2^128..2^129), not
+    IEEE Inf or NaN. The geometry jobs keep such values, and with
+    `SPU_FIX_STATS=1` ~14 million lanes a second took the scalar exact path,
+    each through `spu_cold_thunk`, which saves all 32 vector registers.
+  - The fix-ups now work the whole vector in double precision, where every
+    SPU single is exact, a product is exact and a sum is exact up to the
+    error twosum returns (`spu__x_*` in `runtime/spu/spu_helpers.h`).
+  - Only a sum the double rounded exactly onto a 24-bit boundary still goes
+    scalar.
+  - `tests/test_spu_float_neon.c` has an extended-range case set: 2 million
+    cases, gcc and clang, AVX2 and AVX-512, all bit-identical to the scalar
+    references.
+- **No fence before each DMA on x86.**
+  - `mfc_submit` put a full fence before every command. x86 orders everything
+    but a load after an earlier store, and that reordering the MFC allows
+    too.
+  - The fence after a store-carrying command stays, and the lock-line
+    commands keep theirs.
+- **No local-store debug checks in the lifted code.**
+  - Every LS load and store tested `g_spu_ls_dbg`: 383 tests in the geometry
+    job's hottest function, ~6% of its time.
+  - The port builds the lifted sources with `SPU_LS_NO_DEBUG`;
+    `-DPORT_SPU_LS_DEBUG=ON` keeps the hooks.
+
+Three alternating pairs in the heavy view: 54.9 -> 56.9 fps.
+
+## The start screen and the in-game menu
+
+`rpi/launcher/` has the design and the plan.
+
+- **Settings.**
+  - `user/settings.ini` (`work/port/settings.cpp`) is read at start, only with
+    a window, and each value becomes the variable the port already reads.
+  - A variable set in the environment wins, so headless runs (tests,
+    benchmarks) never see the player's choices. The UI shows that value,
+    greyed out, and saving keeps the file's own (`port_settings_from_env`).
+- **UI.** `libs/video/rsx_ui.cpp` runs Dear ImGui (cloned by
+  `scripts/setup.sh`, outside the patch) over the window.
+  - The frame is built on the rsx thread, which owns the SDL window and its
+    events, and copied (`CloneOutput`).
+  - Whichever thread presents the window records the copy into the swapchain
+    image, in a render pass after the frame's blit. The swapchain gains
+    `COLOR_ATTACHMENT` for it.
+  - Text is baked at 36 px and scaled to the window each frame.
+- **Start screen.**
+  - The boot path already presents the window before the game's first
+    flip, every 4 ms (16 ms under the start screen). The start screen is
+    drawn there, and `main()` waits for its "Play" before `ppu_run`.
+  - It owns the window's input (`rsx_ui_set_modal`): Escape would otherwise
+    quit, and F1 would leave the menu open over the game.
+  - An option that only takes effect at start (resolution, monitor,
+    language, the recording thread) makes "Play" start the process again:
+    `execve` with an environment built aside, without what the old settings
+    exported and with `PS3_SKIP_LAUNCHER=1`. The running process's
+    environment is never touched, since other threads read it.
+  - The recording thread queued presents without a bound. Nothing else
+    limits them before the first flip, so with VSync the start screen piled
+    them up and the boot waited out the backlog after "Play". `t_present`
+    keeps two queued at most, and the boot's own refresh skips while one is
+    still queued, so VSync never holds up the FIFO drain behind it.
+- **In-game menu.**
+  - F1, or Select+Start held half a second, opens it. While it is open,
+    `cellPad` gives the game a neutral pad.
+  - While nothing is shown, SDL events do not go to ImGui: it trickles its
+    queue one change per frame, so a click from an hour before replayed into
+    the menu when it opened. Opening it also clears ImGui's input.
+  - A lost swapchain can tear the UI down on the recording thread. That
+    thread destroys only the Vulkan side; the SDL backend and the ImGui
+    context go on the window's thread.
+  - Full screen, VSync (the swapchain is made again on the presenting thread),
+    stretching and the FPS limit apply at once.
+- **Voices and text.**
+  - `PS3_VOICE_LANG` / `PS3_TEXT_LANG` serve any language pack the game opens
+    as the chosen one of its kind (`lang_redirect` in
+    `runtime/ppu/ppu_fs.cpp`, where every open and stat resolves its path).
+  - The console language follows the text where the game's North American
+    list has it.
+
+## The game's own menus
+
+inFAMOUS 2 has no main menu. Checked with two boots and no input:
+
+- Without a save, after the logos it shows "Começar um jogo novo" over the
+  lightning, with "Pressione ⊗ para continuar", and waits for the button.
+- With a save, it calls `cellSaveDataListAutoLoad` during the loading screen,
+  its `funcFixed` picks the newest save, and play starts with no screen to
+  pass.
+
+That is the game, not the port: the manual says the same, and a new game or
+another save is loaded from the pause menu (Start > Saved Data). The start
+screen and the saves page say so, because a player who saw the "new game"
+screen once reads its absence as a bug.
+
 ## The window
 
 The present blit used to stretch the 16:9 frame across the whole window. Full
