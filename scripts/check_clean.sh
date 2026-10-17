@@ -30,9 +30,15 @@ for f in $files; do
     size=$(stat -c %s "$f")
     limit=1048576
     case "$f" in work/patches/*.patch) limit=8388608 ;; esac
+    # The README's screenshots: small JPEGs in one place, the only binaries
+    # allowed. A frame capture is a picture of the game, not a part of it.
+    shot=0
+    case "$f" in docs/screenshots/*.jpg) shot=1; limit=524288 ;; esac
     [ "$size" -gt "$limit" ] && bad "$f: larger than $limit bytes ($size)"
     # Binary content.
-    if [ "$size" -gt 0 ] && ! grep -Iq . "$f"; then bad "$f: binary file"; fi
+    if [ "$shot" -eq 1 ]; then
+        [ "$(head -c 3 "$f" | od -An -tx1 | tr -d ' ')" = "ffd8ff" ] || bad "$f: not a JPEG"
+    elif [ "$size" -gt 0 ] && ! grep -Iq . "$f"; then bad "$f: binary file"; fi
     # Code lifted from the game: the names the lifters give its SPU images
     # (job modules, plugins, the policy module) and its PPU functions.
     # (definitions only: tools name them in templates and comments)
