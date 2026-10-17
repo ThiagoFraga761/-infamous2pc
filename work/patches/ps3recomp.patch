@@ -4574,10 +4574,72 @@ index 79ea8ca..53e8706 100644
      }
  
 diff --git a/libs/system/cellSysutil.c b/libs/system/cellSysutil.c
-index 252c3e8..d1b8f32 100644
+index 252c3e8..4825faf 100644
 --- a/libs/system/cellSysutil.c
 +++ b/libs/system/cellSysutil.c
-@@ -301,7 +301,11 @@ s32 cellSysutilGetSystemParamString(s32 id, u32 buf_ea, u32 bufsize)
+@@ -10,6 +10,11 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#ifdef _WIN32
++#define strcasecmp _stricmp
++#else
++#include <strings.h>
++#endif
+ #include <stdint.h>
+ 
+ /* Guest-memory stores — out-params from the recompiled title are guest VM
+@@ -257,6 +262,40 @@ s32 cellSysutilCheckCallback(void)
+  * near the guest's variable, and nothing on the way says a word.
+  *
+  * A u32 cannot be passed a host pointer by accident. */
++/* PS3_SYS_LANG: the console language a title reads (and picks its voice and
++ * text by), as the cellSysutil number (0-19) or a name: ja, en, en-gb, fr,
++ * es, de, it, nl, pt, pt-br, ru, ko, zh-t, zh-s, fi, sv, da, no, pl, tr.
++ * Default English (US).
++ *
++ * pt-br (17), en-gb (18) and tr (19) came late, and a title built before them
++ * may treat them as unknown and fall back to its first language. inFAMOUS 2
++ * does: anything above 16 becomes "none", and it reaches its Brazilian voices
++ * through pt (7), which its North American language list pairs with
++ * "brazilian". */
++static s32 sysutil_lang(void)
++{
++    static s32 lang = -1;
++    if (lang >= 0) return lang;
++    lang = CELL_SYSUTIL_LANG_ENGLISH_US;
++    const char* e = getenv("PS3_SYS_LANG");
++    if (e && *e) {
++        static const struct { const char* name; s32 v; } names[] = {
++            { "ja", 0 }, { "en", 1 }, { "en-us", 1 }, { "fr", 2 }, { "es", 3 }, { "de", 4 },
++            { "it", 5 }, { "nl", 6 }, { "pt", 7 }, { "pt-pt", 7 }, { "ru", 8 }, { "ko", 9 },
++            { "zh-t", 10 }, { "zh-s", 11 }, { "fi", 12 }, { "sv", 13 }, { "da", 14 },
++            { "no", 15 }, { "pl", 16 }, { "pt-br", 17 }, { "en-gb", 18 }, { "tr", 19 } };
++        char* end;
++        const long n = strtol(e, &end, 10);
++        if (end != e && !*end && n >= 0 && n <= 19) lang = (s32)n;
++        else {
++            for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
++                if (!strcasecmp(e, names[i].name)) { lang = names[i].v; break; }
++        }
++        printf("[cellSysutil] system language %d (PS3_SYS_LANG=%s)\n", lang, e);
++    }
++    return lang;
++}
++
+ s32 cellSysutilGetSystemParamInt(s32 id, u32 value_ea)
+ {
+     if (!value_ea)
+@@ -265,7 +304,7 @@ s32 cellSysutilGetSystemParamInt(s32 id, u32 value_ea)
+     s32 v = 0;
+     switch (id) {
+     case CELL_SYSUTIL_SYSTEMPARAM_ID_LANG:
+-        v = CELL_SYSUTIL_LANG_ENGLISH_US;
++        v = sysutil_lang();
+         break;
+     case CELL_SYSUTIL_SYSTEMPARAM_ID_ENTER_BUTTON_ASSIGN:
+         v = CELL_SYSUTIL_ENTER_BUTTON_ASSIGN_CROSS;
+@@ -301,7 +340,11 @@ s32 cellSysutilGetSystemParamString(s32 id, u32 buf_ea, u32 bufsize)
  
      switch (id) {
      case CELL_SYSUTIL_SYSTEMPARAM_ID_NICKNAME: {

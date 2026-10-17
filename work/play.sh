@@ -44,10 +44,16 @@ export SPURS_JC_TIMING="${SPURS_JC_TIMING:-1}"
 # runtime logs every SPU job and wait (thousands of lines a second, through
 # one lock): quiet unless asked for.
 export PS3_VERBOSE="${PS3_VERBOSE:-0}"
+# The console language the game reads: it picks its voices and text by it
+# (the disc carries brazilian.psarc and brazilian_text.psarc). Portuguese by
+# default, and "pt", not "pt-br": the game treats every language number above
+# 16 as unknown and falls back to English, and pairs Portuguese (7) with its
+# Brazilian files. PS3_SYS_LANG=en for English (libs/system/cellSysutil.c).
+export PS3_SYS_LANG="${PS3_SYS_LANG:-pt}"
 LOG="$HERE/runs/play-$(date +%Y%m%d-%H%M%S).log"
 echo "log: $LOG"
 # A hang leaves the thread stacks behind: when no "[rsx fps]" line has come
-# for 30 s, eu-stack (elfutils) writes every thread's stack -- lifted guest
+# for 15 s, eu-stack (elfutils) writes every thread's stack -- lifted guest
 # functions included, as func_<address> -- next to the log, once.
 # A slow stretch leaves a profile behind: after three fps lines in a row under
 # PLAY_PROFILE_BELOW (70), counting only windows that are mostly 3D frames
@@ -89,10 +95,19 @@ watch_stall() {
             profiles=$((profiles + 1)); last_prof=$(date +%s); slow=0
             echo "[play.sh] fps under ${PLAY_PROFILE_BELOW:-70} for 30 s -- profiling 20 s into $prof" >&2
         fi
-        if [ "$same" -eq 30 ] && kill -0 "$gpid" 2>/dev/null && command -v eu-stack > /dev/null; then
-            local out="${LOG%.log}.stall-$(date +%H%M%S).stacks"
-            eu-stack -p "$gpid" -n 40 > "$out" 2>&1
-            echo "[play.sh] no frame for 30 s -- thread stacks in $out" >&2
+        # A freeze: no frame for ~15 s (the fps line comes every 10 s). Every
+        # thread's stack, then a 5 s profile of what still runs, and the stacks
+        # again 30 s later -- a player closes a frozen game soon.
+        if { [ "$same" -eq 15 ] || [ "$same" -eq 45 ]; } && kill -0 "$gpid" 2>/dev/null; then
+            local tag; tag=$(date +%H%M%S)
+            if command -v eu-stack > /dev/null; then
+                eu-stack -p "$gpid" -n 40 > "${LOG%.log}.stall-$tag.stacks" 2>&1
+            fi
+            if [ "$same" -eq 15 ] && [ -n "$PERF" ]; then
+                LD_LIBRARY_PATH="$PERF_LIBS" "$PERF" record -q -F 999 -p "$gpid" \
+                    -o "${LOG%.log}.stall-$tag.perf.data" -- sleep 5 > /dev/null 2>&1 &
+            fi
+            echo "[play.sh] no frame for $same s -- thread stacks in ${LOG%.log}.stall-$tag.stacks" >&2
         fi
     done
 }

@@ -751,6 +751,30 @@ while saving." (the dialog is answered on the console, not drawn) and retried
 title id from `PARAM.SFO` (cellGame had been reporting the placeholder
 `BLES00000`).
 
+## Language
+
+The disc carries the voices and text of every region (`brazilian.psarc`,
+`brazilian_text.psarc`, `latino.psarc` and the rest), and the game picks a
+pair at boot from `cellSysutilGetSystemParamInt(CELL_SYSUTIL_SYSTEMPARAM_ID_LANG)`.
+`cellSysutil` used to answer English (US) always; it now reads
+`PS3_SYS_LANG` (a number 0-19 or a name, see `cellSysutil.c`), and
+`play.sh` sets `pt`.
+
+Not `pt-br`. The choice is made at 0x98944:
+
+- Any system language above 16 becomes "none". Brazilian Portuguese (17),
+  British English (18) and Turkish (19) came after the game's SDK.
+- Each region has a list of the game's own language indices (the name table
+  at 0x8D11DC). The North American one, region 0, holds english, french,
+  latino and brazilian.
+- A system language matches a list entry when the numbers are equal, or
+  through four pairs at `*(0x9432C4 - 0x7FF4)`: british/english,
+  latino/spanish, brazilian/portuguese, chinese/chinese_s.
+- No match picks the list's first entry, english.
+
+So 17 falls back to English, and 7 (Portuguese) matches "brazilian" through
+its pair.
+
 ## Long sessions
 
 Twenty minutes into the game, past the opening, showed what a short benchmark
