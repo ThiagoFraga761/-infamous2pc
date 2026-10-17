@@ -65,6 +65,12 @@ export PS3_VERBOSE="${PS3_VERBOSE:-0}"
 # PS3_VOICE_LANG=english, PS3RECOMP_BE_THREAD=0, ...).
 LOG="$HERE/runs/play-$(date +%Y%m%d-%H%M%S).log"
 echo "log: $LOG"
+# A stall of a few seconds, the kind a player calls a freeze and that is over
+# before the watcher below acts: the game itself writes every thread's stack
+# into <log>-stalls/ when no frame comes for PS3_STALL_MS (main.cpp).
+export PS3_STALL_MS="${PS3_STALL_MS:-2500}"
+export PS3_STALL_DIR="${PS3_STALL_DIR:-${LOG%.log}-stalls}"
+mkdir -p "$PS3_STALL_DIR"
 # A hang leaves the thread stacks behind: when no "[rsx fps]" line has come
 # for 15 s, eu-stack (elfutils) writes every thread's stack -- lifted guest
 # functions included, as func_<address> -- next to the log, once.

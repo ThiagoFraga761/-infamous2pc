@@ -50,7 +50,9 @@
 
 #ifndef _WIN32
 #include <errno.h>
+#include <pthread.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #ifdef _WIN32
@@ -199,6 +201,41 @@ extern "C" unsigned ppu_boot_frames_presented(void)
 {
     return (unsigned)g_frames_presented;
 }
+
+#ifndef _WIN32
+/* PS3_STALL_MS=<ms>, with PS3_STALL_DIR=<dir>: once the game has drawn frames,
+ * a gap of that long with none sends every thread's stack (eu-stack) to
+ * <dir>/stall-<n>.stacks, once per gap and at most 8 a run. The play.sh
+ * watcher only acts after 15 s of nothing; the stalls of a few seconds that a
+ * player calls a freeze are over by then, and they leave no trace. */
+static void* stall_watch(void*)
+{
+    const char* e = getenv("PS3_STALL_MS");
+    const char* dir = getenv("PS3_STALL_DIR");
+    const long ms = e ? atol(e) : 0;
+    if (ms <= 0 || !dir || !*dir) return NULL;
+    pthread_setname_np(pthread_self(), "stall-watch");
+    unsigned last = 0;
+    unsigned long long since = ps3_qpc_us();
+    int armed = 1, n = 0;
+    for (;;) {
+        usleep(50000);
+        const unsigned f = (unsigned)g_frames_presented;
+        const unsigned long long now = ps3_qpc_us();
+        if (f != last) { last = f; since = now; armed = 1; continue; }
+        if (f < 100 || !armed || now - since < (unsigned long long)ms * 1000ull) continue;
+        armed = 0;
+        if (n >= 8) continue;
+        char path[1024], cmd[1200];
+        snprintf(path, sizeof path, "%s/stall-%d.stacks", dir, ++n);
+        snprintf(cmd, sizeof cmd, "eu-stack -p %d -n 32 > '%s' 2>&1", (int)getpid(), path);
+        fprintf(stderr, "[stall] no frame for %ld ms: every thread's stack into %s\n", ms, path);
+        fflush(stderr);
+        if (system(cmd) != 0) fprintf(stderr, "[stall] eu-stack failed\n");
+    }
+    return NULL;
+}
+#endif
 
 static void present_guest_frame(void)
 {
@@ -585,6 +622,9 @@ int main(int argc, char** argv)
      * until the title registers its vblank and flip handlers during init. */
     g_ps3_guest_caller = harness_guest_caller;
     CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL);
+#ifndef _WIN32
+    { pthread_t sw; if (pthread_create(&sw, NULL, stall_watch, NULL) == 0) pthread_detach(sw); }
+#endif
     port_ui_wait_start();
 
     printf("\n[boot] dispatching entry OPD 0x%08X (stack top 0x%08X)\n\n",

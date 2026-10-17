@@ -895,6 +895,35 @@ time was the runtime, not the jobs. Three cuts:
 
 Three alternating pairs in the heavy view: 54.9 -> 56.9 fps.
 
+### Stalls and hitches (2026-10-17)
+
+`work/runs/soak.sh` (local) plays a copy of the newest save for half an hour:
+walking, running into new ground, jumping, fighting.
+
+- **Two 30-minute soaks: no freeze and no stuck job.** The freezes the
+  player reports are rarer than that.
+- **Hitches over 40 ms (`PS3RECOMP_VK_HITCH=40`, 10 minutes):** 130.
+  - Builds were in 22 of them, almost all while a new area loaded (a burst
+    of 362 pipelines once).
+  - The rest came from upstream of the backend: no build, no GPU wait. Most
+    were 40-90 ms, but one was 2.9 s and another 8.2 s, during plain
+    gameplay. A player sees that as a freeze that undoes itself.
+- **Catching the next one.** The play.sh watcher only acts after 15 s without
+  a frame, so stalls like these left nothing behind. `PS3_STALL_MS` /
+  `PS3_STALL_DIR` (`main.cpp`) make the game write every thread's stack
+  itself after that long without a frame. play.sh sets 2.5 s, into
+  `<log>-stalls/`; the soak sets 1.5 s.
+- **A new pipeline no longer drains the recording queue.**
+  - `t_pipeline_create` used to wait for the worker to run everything
+    queued, then build. The Vulkan backend's `pipeline_create` only
+    translates the shaders and fills a slot, so it now runs on the engine's
+    thread beside the worker (`pipeline_create_any_thread`).
+  - The slot table has a lock.
+  - Engine translations have their own SPIR-V buffer.
+  - glslang is initialised once, thread-safely.
+  - The dummy cube is left to the first draw that samples it, since building
+    it submits.
+
 ## The start screen and the in-game menu
 
 `rpi/launcher/` has the design and the plan.
