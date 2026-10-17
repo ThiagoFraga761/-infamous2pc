@@ -267,6 +267,18 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ps3recomp_runtime
 )
 
+# The start screen's background is the disc's own PIC1.PNG, read with libpng
+# when the system has it (Fedora: libpng-devel); without it, a gradient. The
+# library's path only, and the define on ui.cpp alone: an include directory or
+# a definition on the target would change every lifted TU's compile command.
+find_package(PNG QUIET)
+if(PNG_FOUND)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${PNG_LIBRARIES})
+    set_source_files_properties(ui.cpp PROPERTIES
+        COMPILE_DEFINITIONS PORT_HAVE_PNG=1
+        INCLUDE_DIRECTORIES "${PNG_INCLUDE_DIRS}")
+endif()
+
 # The runtime is C++, and on Apple also Objective-C. Letting CMake infer the
 # link language from the generated C would leave the C++ standard library out.
 set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX)

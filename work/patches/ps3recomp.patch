@@ -464,7 +464,7 @@ index 3f74504..512e50e 100644
  
      if (bytesRead) vm_write64((u32)(uintptr_t)bytesRead, (u64)n);
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index f2b4c11..4fbaf1e 100644
+index f2b4c11..87a7185 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
 @@ -421,6 +421,117 @@ static unsigned long long pad_now_ms(void)
@@ -671,7 +671,22 @@ index f2b4c11..4fbaf1e 100644
        } }
  
      /* Analog sticks */
-@@ -985,7 +1127,7 @@ s32 cellPadPeriphGetInfo(CellPadPeriphInfo* info_guest)
+@@ -829,6 +971,14 @@ emit:
+             else                        s_data_fresh[port_no] = 0;
+         }
+     }
++    /* PAD_CHANGE_ONLY=1 (experiment): a packet only when the buttons or sticks
++     * differ from the last one handed out, as libpad documents len. */
++    { static int co = -1; static u16 last[PAD_MAX_HOST_PORTS][CELL_PAD_MAX_CODES]; static int have[PAD_MAX_HOST_PORTS];
++      if (co < 0) co = getenv("PAD_CHANGE_ONLY") ? 1 : 0;
++      if (co && port_no < PAD_MAX_HOST_PORTS && data->len) {
++          if (have[port_no] && !memcmp(last[port_no] + 2, data->button + 2, 6 * sizeof(u16))) data->len = 0;
++          memcpy(last[port_no], data->button, sizeof last[port_no]); have[port_no] = 1;
++      } }
+     {
+         unsigned int ea = (unsigned int)(uintptr_t)data_guest;
+         vm_write32((unsigned long long)ea + 0, (unsigned int)data->len);   /* len (s32) */
+@@ -985,7 +1135,7 @@ s32 cellPadPeriphGetInfo(CellPadPeriphInfo* info_guest)
            vm_write32((unsigned long long)ea + _o, *(u32*)((char*)info + _o)); }
  
      { static int _n = 0;
@@ -15008,10 +15023,10 @@ index ce99e68..9f43916 100644
  #endif
 diff --git a/libs/video/rsx_ui.cpp b/libs/video/rsx_ui.cpp
 new file mode 100644
-index 0000000..2c6fe4b
+index 0000000..1ff387a
 --- /dev/null
 +++ b/libs/video/rsx_ui.cpp
-@@ -0,0 +1,467 @@
+@@ -0,0 +1,616 @@
 +/*
 + * ps3recomp - a user interface over the game's window (Dear ImGui, Vulkan).
 + * See rsx_ui.h for the threads, rsx_ui_vk.h for the backend's side.
@@ -15041,7 +15056,12 @@ index 0000000..2c6fe4b
 +#define UI_FN(X) X(vkCreateImageView) X(vkDestroyImageView) X(vkCreateFramebuffer) \
 +    X(vkDestroyFramebuffer) X(vkCreateRenderPass) X(vkDestroyRenderPass)           \
 +    X(vkCreateDescriptorPool) X(vkDestroyDescriptorPool) X(vkCmdBeginRenderPass)   \
-+    X(vkCmdEndRenderPass) X(vkDeviceWaitIdle)
++    X(vkCmdEndRenderPass) X(vkDeviceWaitIdle) X(vkCreateImage) X(vkDestroyImage)   \
++    X(vkGetImageMemoryRequirements) X(vkAllocateMemory) X(vkFreeMemory)            \
++    X(vkBindImageMemory) X(vkCreateBuffer) X(vkDestroyBuffer)                      \
++    X(vkGetBufferMemoryRequirements) X(vkBindBufferMemory) X(vkMapMemory)          \
++    X(vkCreateSampler) X(vkDestroySampler) X(vkCmdPipelineBarrier)                 \
++    X(vkCmdCopyBufferToImage) X(vkGetPhysicalDeviceMemoryProperties)
 +
 +struct Ui {
 +    std::mutex lock;                  /* the ImGui context and the copied draw data */
@@ -15069,6 +15089,20 @@ index 0000000..2c6fe4b
 +    ImDrawData snap;                  /* the last frame, for the presenting thread */
 +    std::vector<ImDrawList*> lists;
 +    bool have_snap = false;
++
++    /* A picture for the port's screens (rsx_ui_set_image): the pixels wait
++     * here until the presenting thread's command buffer uploads them. */
++    struct {
++        std::vector<unsigned char> rgba;
++        int w = 0, h = 0;
++        bool want = false, ready = false;
++        VkImage img = VK_NULL_HANDLE;
++        VkDeviceMemory mem = VK_NULL_HANDLE, staging_mem = VK_NULL_HANDLE;
++        VkBuffer staging = VK_NULL_HANDLE;
++        VkImageView view = VK_NULL_HANDLE;
++        VkSampler sampler = VK_NULL_HANDLE;
++        VkDescriptorSet ds = VK_NULL_HANDLE;
++    } image;
 +
 +    std::chrono::steady_clock::time_point last{};
 +    double dt = 0.0;
@@ -15109,6 +15143,110 @@ index 0000000..2c6fe4b
 +    U.fbs.clear(); U.views.clear();
 +}
 +
++/* A memory type with these bits and properties, or ~0u. */
++uint32_t mem_type(uint32_t bits, VkMemoryPropertyFlags want)
++{
++    VkPhysicalDeviceMemoryProperties mp;
++    U.vkGetPhysicalDeviceMemoryProperties(U.vk.phys, &mp);
++    for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
++        if ((bits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & want) == want) return i;
++    return ~0u;
++}
++
++void image_release_locked()
++{
++    auto& im = U.image;
++    if (im.ds && U.imgui_vk) ImGui_ImplVulkan_RemoveTexture(im.ds);
++    if (im.sampler) U.vkDestroySampler(U.vk.device, im.sampler, nullptr);
++    if (im.view) U.vkDestroyImageView(U.vk.device, im.view, nullptr);
++    if (im.img) U.vkDestroyImage(U.vk.device, im.img, nullptr);
++    if (im.mem) U.vkFreeMemory(U.vk.device, im.mem, nullptr);
++    if (im.staging) U.vkDestroyBuffer(U.vk.device, im.staging, nullptr);
++    if (im.staging_mem) U.vkFreeMemory(U.vk.device, im.staging_mem, nullptr);
++    im.ds = VK_NULL_HANDLE; im.sampler = VK_NULL_HANDLE; im.view = VK_NULL_HANDLE;
++    im.img = VK_NULL_HANDLE; im.mem = VK_NULL_HANDLE;
++    im.staging = VK_NULL_HANDLE; im.staging_mem = VK_NULL_HANDLE;
++    im.ready = false;
++}
++
++/* The picture into a sampled image, recorded into `cb` ahead of the UI's
++ * render pass (the presenting thread owns the queue; nothing else submits
++ * for it). The staging buffer stays until the UI goes. Under U.lock. */
++void image_upload_locked(VkCommandBuffer cb)
++{
++    auto& im = U.image;
++    im.want = false;
++    const VkDeviceSize bytes = (VkDeviceSize)im.w * im.h * 4u;
++    const VkDevice dev = U.vk.device;
++    auto fail = [&](const char* what) {
++        fprintf(stderr, "[ui] the picture was not uploaded (%s)\n", what);
++        image_release_locked();
++    };
++    VkBufferCreateInfo bi = {};
++    bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
++    bi.size = bytes; bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
++    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++    if (U.vkCreateBuffer(dev, &bi, nullptr, &im.staging) != VK_SUCCESS) return fail("buffer");
++    VkMemoryRequirements mr;
++    U.vkGetBufferMemoryRequirements(dev, im.staging, &mr);
++    VkMemoryAllocateInfo ai = {};
++    ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
++    ai.allocationSize = mr.size;
++    ai.memoryTypeIndex = mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
++                                                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
++    if (ai.memoryTypeIndex == ~0u || U.vkAllocateMemory(dev, &ai, nullptr, &im.staging_mem) != VK_SUCCESS ||
++        U.vkBindBufferMemory(dev, im.staging, im.staging_mem, 0) != VK_SUCCESS) return fail("staging memory");
++    void* map = nullptr;
++    if (U.vkMapMemory(dev, im.staging_mem, 0, bytes, 0, &map) != VK_SUCCESS) return fail("map");
++    memcpy(map, im.rgba.data(), (size_t)bytes);
++
++    VkImageCreateInfo ii = {};
++    ii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
++    ii.imageType = VK_IMAGE_TYPE_2D; ii.format = VK_FORMAT_R8G8B8A8_UNORM;
++    ii.extent = { (uint32_t)im.w, (uint32_t)im.h, 1 }; ii.mipLevels = 1; ii.arrayLayers = 1;
++    ii.samples = VK_SAMPLE_COUNT_1_BIT; ii.tiling = VK_IMAGE_TILING_OPTIMAL;
++    ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
++    ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE; ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++    if (U.vkCreateImage(dev, &ii, nullptr, &im.img) != VK_SUCCESS) return fail("image");
++    U.vkGetImageMemoryRequirements(dev, im.img, &mr);
++    ai.allocationSize = mr.size;
++    ai.memoryTypeIndex = mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
++    if (ai.memoryTypeIndex == ~0u || U.vkAllocateMemory(dev, &ai, nullptr, &im.mem) != VK_SUCCESS ||
++        U.vkBindImageMemory(dev, im.img, im.mem, 0) != VK_SUCCESS) return fail("image memory");
++
++    VkImageMemoryBarrier b = {};
++    b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
++    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++    b.image = im.img; b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
++    b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++    b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++    U.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
++                           0, nullptr, 0, nullptr, 1, &b);
++    VkBufferImageCopy c = {};
++    c.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
++    c.imageExtent = ii.extent;
++    U.vkCmdCopyBufferToImage(cb, im.staging, im.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
++    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
++    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
++    U.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
++                           0, nullptr, 0, nullptr, 1, &b);
++
++    VkImageViewCreateInfo vi = {};
++    vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
++    vi.image = im.img; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = ii.format;
++    vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
++    if (U.vkCreateImageView(dev, &vi, nullptr, &im.view) != VK_SUCCESS) return fail("view");
++    VkSamplerCreateInfo si = {};
++    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
++    si.magFilter = si.minFilter = VK_FILTER_LINEAR;
++    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
++    si.maxLod = 1.0f;
++    if (U.vkCreateSampler(dev, &si, nullptr, &im.sampler) != VK_SUCCESS) return fail("sampler");
++    im.ds = ImGui_ImplVulkan_AddTexture(im.sampler, im.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
++    if (!im.ds) return fail("descriptor");
++    im.ready = true;
++}
++
 +/* The UI is over, for good (the window went, or a swapchain it cannot draw
 + * into): everything Vulkan goes now, the SDL side and the context on the
 + * window's thread, and the game gets its pad back. Under U.lock. */
@@ -15116,6 +15254,7 @@ index 0000000..2c6fe4b
 +{
 +    free_snap();
 +    if (U.ok || U.imgui_vk) {
++        image_release_locked();
 +        if (U.imgui_vk) ImGui_ImplVulkan_Shutdown();
 +        destroy_targets();
 +        if (U.rp) U.vkDestroyRenderPass(U.vk.device, U.rp, nullptr);
@@ -15227,6 +15366,26 @@ index 0000000..2c6fe4b
 +int rsx_ui_available(void) { return U.ok ? 1 : 0; }
 +
 +void* rsx_ui_title_font(void) { return U.title_font; }
++
++void rsx_ui_set_image(const void* rgba, int w, int h)
++{
++    if (!rgba || w <= 0 || h <= 0 || w > 8192 || h > 8192) return;
++    std::lock_guard<std::mutex> g(U.lock);
++    if (U.image.ready || U.image.want) return;   /* one picture */
++    U.image.rgba.assign((const unsigned char*)rgba, (const unsigned char*)rgba + (size_t)w * h * 4u);
++    U.image.w = w; U.image.h = h;
++    U.image.want = true;
++}
++
++void* rsx_ui_image(int* w, int* h)
++{
++    /* Read on the rsx thread while it builds a frame, under U.lock already
++     * (the port's draw callback): no lock here. */
++    if (!U.image.ready || !U.image.ds) return nullptr;
++    if (w) *w = U.image.w;
++    if (h) *h = U.image.h;
++    return (void*)U.image.ds;
++}
 +
 +int rsx_ui_event(const void* ev)
 +{
@@ -15359,6 +15518,7 @@ index 0000000..2c6fe4b
 +        /* Another format: the pipeline is the old render pass's, and the
 +         * copied frame points at the font's descriptor set it frees. */
 +        free_snap();
++        if (U.image.ds && U.imgui_vk) { ImGui_ImplVulkan_RemoveTexture(U.image.ds); U.image.ds = VK_NULL_HANDLE; }
 +        if (U.imgui_vk) { ImGui_ImplVulkan_Shutdown(); U.imgui_vk = false; }
 +        U.vkDestroyRenderPass(U.vk.device, U.rp, nullptr);
 +        U.rp = VK_NULL_HANDLE;
@@ -15442,6 +15602,9 @@ index 0000000..2c6fe4b
 +            return;
 +        }
 +        U.imgui_vk = true;
++        if (U.image.ready && !U.image.ds)   /* a new format: the picture's set went with the old pipeline */
++            U.image.ds = ImGui_ImplVulkan_AddTexture(U.image.sampler, U.image.view,
++                                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 +        fprintf(stderr, "[ui] ready (%ux%u, %u images)\n", width, height, count);
 +    }
 +}
@@ -15451,6 +15614,7 @@ index 0000000..2c6fe4b
 +    if (!shown()) return 0;
 +    std::lock_guard<std::mutex> g(U.lock);
 +    if (!U.ok || !U.imgui_vk || !U.have_snap || image >= U.fbs.size()) return 0;
++    if (U.image.want && !U.image.ready) image_upload_locked(cb);
 +    VkRenderPassBeginInfo bi = {};
 +    bi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 +    bi.renderPass = U.rp;
@@ -15481,10 +15645,10 @@ index 0000000..2c6fe4b
 +} /* extern "C" */
 diff --git a/libs/video/rsx_ui.h b/libs/video/rsx_ui.h
 new file mode 100644
-index 0000000..583b06b
+index 0000000..8cea11c
 --- /dev/null
 +++ b/libs/video/rsx_ui.h
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,75 @@
 +/*
 + * ps3recomp - a user interface over the game's window (Dear ImGui, Vulkan)
 + *
@@ -15543,6 +15707,14 @@ index 0000000..583b06b
 +/* The window's thread, every event pump: finish a teardown another thread
 + * started (the SDL side and the ImGui context live on this one). */
 +void rsx_ui_reap(void);
++
++/* A picture for the port's screens, RGBA8, copied: uploaded by the next
++ * present. One per run. */
++void rsx_ui_set_image(const void* rgba, int w, int h);
++
++/* The picture as an ImTextureID once it is on the GPU, else NULL. From the
++ * draw callback only. */
++void* rsx_ui_image(int* w, int* h);
 +
 +/* The large font for titles (ImFont*), or NULL: the regular one then. */
 +void* rsx_ui_title_font(void);
@@ -45788,7 +45960,7 @@ index 2e760ea..a8906eb 100644
  
  #ifdef _WIN32
 diff --git a/runtime/syscalls/sys_ppu_thread.c b/runtime/syscalls/sys_ppu_thread.c
-index fb3906a..b35efc9 100644
+index fb3906a..63ddace 100644
 --- a/runtime/syscalls/sys_ppu_thread.c
 +++ b/runtime/syscalls/sys_ppu_thread.c
 @@ -16,6 +16,11 @@
@@ -46001,7 +46173,25 @@ index fb3906a..b35efc9 100644
  
      t->state      = PPU_THREAD_STATE_RUNNING;
      t->priority   = priority;
-@@ -418,19 +483,6 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+@@ -407,6 +472,17 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+     fprintf(stderr, "[SYS] sys_ppu_thread_create tid=%llu name=\"%s\" entry=0x%08llX arg=0x%llX stack=0x%X prio=%d\n",
+             (unsigned long long)thread_id, t->name, (unsigned long long)entry, (unsigned long long)arg,
+             stack_size, priority);
++#ifndef _WIN32
++    /* PS3_THREAD_BT=<part of a name>: the host stack that created such a
++     * thread -- the lifted guest functions on it name the guest caller. */
++    { const char* w = getenv("PS3_THREAD_BT");
++      if (w && *w && strstr(t->name, w)) {
++          extern int backtrace(void**, int); extern void backtrace_symbols_fd(void* const*, int, int);
++          void* bt[48]; const int n = backtrace(bt, 48);
++          fprintf(stderr, "[SYS] thread \"%s\" created from:\n", t->name);
++          backtrace_symbols_fd(bt, n, 2);
++      } }
++#endif
+     /* YDKJ: dump the worker arg-object: func_000750A8 (thread body) does
+      * this=[arg+0x8], vtable=[arg+0xC], method=[vtable+0]. If this(+0x8) is null
+      * the worker dispatches its job on a null object -> construction never runs. */
+@@ -418,19 +494,6 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
          #undef RB
        } }
  
@@ -46021,7 +46211,7 @@ index fb3906a..b35efc9 100644
      /* Create the host thread. Give it a large RESERVED stack: each recompiled
       * guest call is a real host call, so deep guest call chains nest deeply on
       * the host stack and overflow the 1 MB default. Reserve 256 MB (committed
-@@ -440,7 +492,7 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+@@ -440,7 +503,7 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
      /* Gate only guest worker threads (game .text entry), never libsre/system threads. */
      unsigned _initflag = STACK_SIZE_PARAM_IS_A_RESERVATION;
      int _gate_this = (g_gate_on > 0 && entry >= 0x10000 && entry < 0x10000000);
@@ -46030,7 +46220,7 @@ index fb3906a..b35efc9 100644
      t->host_thread = (HANDLE)_beginthreadex(NULL, 256u * 1024 * 1024,
                                    (unsigned (__stdcall*)(void*))ppu_host_thread_proc, t,
                                    _initflag, (unsigned*)&t->host_tid);
-@@ -450,7 +502,7 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+@@ -450,7 +513,7 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
          table_unlock();
          return (int64_t)(int32_t)CELL_EAGAIN;
      }
@@ -46039,7 +46229,7 @@ index fb3906a..b35efc9 100644
      /* The guest's top priorities (0 is highest, 3071 lowest) are its audio and
       * I/O pollers. At normal host priority they wake late under a busy frame:
       * The Simpsons Arcade Game's music thread (prio 0) polls the audio read
-@@ -502,6 +554,62 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+@@ -502,6 +565,62 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
      return CELL_OK;
  }
  
@@ -46102,7 +46292,7 @@ index fb3906a..b35efc9 100644
  /* ---------------------------------------------------------------------------
   * sys_ppu_thread_exit
   *
-@@ -532,13 +640,14 @@ int64_t sys_ppu_thread_exit(ppu_context* ctx)
+@@ -532,13 +651,14 @@ int64_t sys_ppu_thread_exit(ppu_context* ctx)
          pthread_cond_signal(&t->finish_cond);
          pthread_mutex_unlock(&t->finish_mutex);
  #endif
@@ -46118,7 +46308,7 @@ index fb3906a..b35efc9 100644
          if (allow < 0) allow = getenv("PS3_NO_THREAD_EXIT_UNWIND") ? 0 : 1;
          if (allow && s_exit_armed) { s_exit_armed = 0; longjmp(s_exit_jmp, 1); }
      }
-@@ -555,7 +664,7 @@ int64_t sys_ppu_thread_join(ppu_context* ctx)
+@@ -555,7 +675,7 @@ int64_t sys_ppu_thread_join(ppu_context* ctx)
  {
      uint64_t tid          = LV2_ARG_U64(ctx, 0);
      uint32_t status_addr  = LV2_ARG_PTR(ctx, 1);
@@ -46127,7 +46317,7 @@ index fb3906a..b35efc9 100644
  
      table_lock();
      ppu_thread_info* t = find_thread(tid);
-@@ -704,7 +813,7 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
+@@ -704,7 +824,7 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
       * derivation is wrong or the struct is never initialised. Read r30 out of
       * the live context instead of deriving it: no TOC arithmetic, no
       * assumption about which callback is running. */
@@ -46136,7 +46326,7 @@ index fb3906a..b35efc9 100644
        if (sw < 0) sw = getenv("PS1_SPINWAIT") ? 1 : 0;
        if (sw) {
            static unsigned long n;
-@@ -734,7 +843,7 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
+@@ -734,7 +854,7 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
       * emulator retires over a billion R3000 instructions while emitting no GP0
       * drawing commands, and nothing else distinguishes "running the game" from
       * "spinning in a wait loop". */
@@ -46145,7 +46335,7 @@ index fb3906a..b35efc9 100644
        if (pc_on < 0) pc_on = getenv("PS1_R3000_PC") ? 1 : 0;
        if (pc_on) {
            const uint32_t lr = (uint32_t)ctx->lr;
-@@ -875,7 +984,7 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
+@@ -875,7 +995,7 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                   * forever; if it changes, the input is moving and the fault is
                   * in the extraction or the table lookup. Sampling at yields is
                   * enough because this window already takes 15,213 of them. */
@@ -46154,7 +46344,7 @@ index fb3906a..b35efc9 100644
                    if (lw == -2) { const char* e = getenv("PS1_LOOPWATCH");
                                    lw = e ? 1 : 0;
                                    lwb = e ? (uint32_t)strtoul(e, 0, 16) : 0u; }
-@@ -914,7 +1023,7 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
+@@ -914,7 +1034,7 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                 * This measures it instead: a flag per 64-byte bucket across the
                 * BIOS, reported once, so "CdInit was entered" becomes an
                 * observation rather than a deduction. */
@@ -46163,7 +46353,7 @@ index fb3906a..b35efc9 100644
                  if (cen < 0) cen = getenv("PS1_PC_CENSUS") ? 1 : 0;
                  if (cen) {
                      /* 0xBFC00000..0xBFC80000 in 64-byte buckets = 8192 flags */
-@@ -1277,6 +1386,79 @@ int64_t sys_ppu_thread_get_stack_information(ppu_context* ctx)
+@@ -1277,6 +1397,79 @@ int64_t sys_ppu_thread_get_stack_information(ppu_context* ctx)
  /* ---------------------------------------------------------------------------
   * Registration
   * -----------------------------------------------------------------------*/
@@ -46243,7 +46433,7 @@ index fb3906a..b35efc9 100644
  void sys_ppu_thread_init(lv2_syscall_table* tbl)
  {
      /* Initialize stack allocator */
-@@ -1284,6 +1466,13 @@ void sys_ppu_thread_init(lv2_syscall_table* tbl)
+@@ -1284,6 +1477,13 @@ void sys_ppu_thread_init(lv2_syscall_table* tbl)
  
      /* Clear thread table */
      memset(g_ppu_threads, 0, sizeof(g_ppu_threads));
@@ -46257,7 +46447,7 @@ index fb3906a..b35efc9 100644
  
  #ifdef _WIN32
      if (!s_table_lock_init) {
-@@ -1292,7 +1481,8 @@ void sys_ppu_thread_init(lv2_syscall_table* tbl)
+@@ -1292,7 +1492,8 @@ void sys_ppu_thread_init(lv2_syscall_table* tbl)
      }
  #endif
  

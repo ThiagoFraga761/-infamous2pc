@@ -164,12 +164,21 @@ work/play.sh        # janela + controle + som
 A tradução leva alguns minutos; a primeira compilação é demorada, porque o
 código traduzido do PPU é grande.
 
-Ao abrir, aparece a **tela de opções**. Tudo o que se escolhe fica gravado em
-`user/settings.ini`:
+Ao abrir, aparece o **menu principal**, sobre a arte do próprio disco
+(`PIC1.PNG`), e funciona com controle, teclado ou mouse:
+
+| Item | O que faz |
+|---|---|
+| **Continuar** | entra no save mais recente (mostra nome, progresso e data) |
+| **Novo jogo** | abre a tela de jogo novo do próprio inFAMOUS 2 |
+| **Carregar jogo** | lista os seus saves; escolha um |
+| **Opções** | as abas abaixo |
+| **Sair** | fecha |
+
+As opções ficam gravadas em `user/settings.ini`:
 
 | Aba | O que tem |
 |---|---|
-| Jogo | continuar, carregar um save, tela inicial do jogo (jogo novo) |
 | Vídeo | resolução (720p, 1440p, 4K), tela cheia, VSync, esticar ou barras, monitor |
 | Idioma | dublagem e legendas, separadas |
 | Desempenho | predefinições, limite de FPS, contador de FPS, thread de gravação |
@@ -181,19 +190,14 @@ Ao abrir, aparece a **tela de opções**. Tudo o que se escolhe fica gravado em
 | **F11** ou **Alt+Enter** | tela cheia / janela |
 | **Esc** | fecha o jogo |
 
-- **Pular a tela de opções:** `work/play.sh --play` ou `PS3_SKIP_LAUNCHER=1`.
-- **Saves e tela inicial do jogo:** o inFAMOUS 2 não tem menu principal. Ele só
-  mostra a tela "Começar um jogo novo" quando não acha save; com save, continua
-  do autosave, como no PS3. A aba **Jogo** da tela de opções faz o papel do menu:
-  - continuar como o jogo faz;
-  - carregar qualquer um dos seus saves, listados com nome, progresso e data;
-  - abrir a tela inicial do jogo para começar um jogo novo (`work/play.sh --title`
-    faz o mesmo pelo terminal).
-
-  Os saves não saem do lugar. Antes de carregar outro save ou abrir a tela
-  inicial, eles são copiados para `user/backups`, porque o próximo autosave do
-  jogo grava por cima do slot de autosave, como no console. Dentro do jogo:
-  **Start → Dados salvos**.
+- **Pular o menu:** `work/play.sh --play` ou `PS3_SKIP_LAUNCHER=1`; direto na tela
+  de jogo novo: `work/play.sh --title`.
+- **Por que o port tem menu:** o inFAMOUS 2 não tem menu principal. Com save, ele
+  entra direto no autosave; sem save, mostra só "Começar um jogo novo". O menu do
+  port faz esse papel sem mexer nos saves. Antes de **Novo jogo** ou de carregar
+  um save que não é o autosave, eles são copiados para `user/backups`, porque o
+  próximo autosave do jogo grava por cima do slot de autosave, como no console.
+  Dentro do jogo: **Start → Dados salvos**.
 - **Variáveis de ambiente:** continuam valendo e ganham do arquivo
   (`PS3RECOMP_RES_SCALE=2`, `PS3_VOICE_LANG=english`, `PS3RECOMP_VK_PRESENT=fifo`…).
   O `work/play.sh` documenta as outras.
@@ -241,7 +245,8 @@ são automáticas:
 
 Veja [Como jogar](#como-jogar). Pacotes no Fedora (adapte para a sua distro):
 `gcc gcc-c++ clang cmake ninja-build python3 SDL2-devel vulkan-headers
-vulkan-loader-devel glslang-devel`.
+vulkan-loader-devel glslang-devel libpng-devel` (o libpng só desenha a arte do
+disco no menu; sem ele, o fundo é liso).
 
 | Caminho | O que é |
 |---|---|
@@ -438,21 +443,20 @@ scripts/build.sh    # build into work/port/build-vk
 work/play.sh        # window + controller + sound
 ```
 
-The game opens on an options screen:
+The game opens on a main menu over the disc's own art (`PIC1.PNG`), driven by
+pad, keyboard or mouse: **Continue** (the newest save), **New game** (the
+game's own new-game screen), **Load game** (pick a save), **Options** (Video,
+Language, Performance, Controller and saves, saved to `user/settings.ini`) and
+**Quit**. **F1** (or **Select+Start** held) opens the options in game.
+`--play` or `PS3_SKIP_LAUNCHER=1` skips the menu; `--title` goes straight to the
+new-game screen.
 
-- the tabs are Game, Video, Language, Performance, and Controller and saves;
-- choices are saved to `user/settings.ini`;
-- **F1** (or **Select+Start** held) opens the same menu in game;
-- `--play` or `PS3_SKIP_LAUNCHER=1` skips the screen.
-
-inFAMOUS 2 has no main menu. It shows its "Start a new game" screen only when
-it finds no save; otherwise it continues from the newest one, as on the PS3.
-The options screen's **Jogo** tab stands in for the missing menu: continue as
-the game does, load any of your saves (listed with name, progress and date),
-or open the game's title screen for a new game (`work/play.sh --title` does
-the same). The saves stay where they are; they are copied to `user/backups`
-before another save or the title screen, since the game's next autosave writes
-over its autosave slot, as on the console. In game: **Start → Saved Data**.
+inFAMOUS 2 has no main menu of its own: with a save it goes straight into the
+autosave, without one it shows only "Start a new game". The port's menu stands
+in for it without touching the saves. Before a new game, or loading a save
+that is not the autosave, they are copied to `user/backups`, since the game's
+next autosave writes over its autosave slot, as on the console. In game:
+**Start → Saved Data**.
 
 **F11**/**Alt+Enter** toggles full screen, and **Esc** quits. Environment
 variables still win over the file. Useful

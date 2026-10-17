@@ -12,6 +12,9 @@
 #include "rsx_ui.h"
 
 #include <SDL2/SDL.h>
+#ifdef PORT_HAVE_PNG
+#include <png.h>
+#endif
 
 #include <atomic>
 #include <chrono>
@@ -295,9 +298,8 @@ void page_controller(port_settings& s)
     ImGui::SameLine();
     if (ImGui::Button("Abrir pasta dos logs")) open_folder("work/runs");
     if (!g_last_backup.empty()) hint(g_last_backup.c_str());
-    hint("O jogo não tem menu principal: com save, ele sempre continua do autosave. Na tela inicial "
-         "do port, a aba Jogo escolhe outro save ou abre a tela inicial do jogo; dentro do jogo, "
-         "Start > Dados salvos.");
+    hint("Continuar, jogo novo e carregar ficam no menu da tela inicial do port; dentro do jogo, "
+         "em Start > Dados salvos.");
     ImGui::Separator();
     bool b = s.skip_launcher;
     if (ImGui::Checkbox("Pular a tela de opções ao abrir o jogo (F1 abre no jogo)", &b)) { s.skip_launcher = b; save(); }
@@ -439,39 +441,8 @@ void read_saves()
     std::sort(g_saves.begin(), g_saves.end(), [](const SaveInfo& a, const SaveInfo& b) { return a.mtime > b.mtime; });
 }
 
-/* The start screen's first page: where the game starts. inFAMOUS 2 has no
- * menu of its own once there is a save -- it continues it -- so this is that
- * menu. Another save or the title screen is the game's first look at the
- * saves narrowed (cellSaveData: g_savedata_load, g_savedata_title); nothing
- * is moved. Either way the game's next autosave writes over its autosave
- * slot, as on the console, so the saves are backed up first. */
-void page_game()
-{
-    if (!g_saves_read) { read_saves(); g_saves_read = true; }
-    ImGui::TextUnformatted("Começar por");
-    if (ImGui::RadioButton("Continuar, como o jogo faz", g_choice == -1)) g_choice = -1;
-    for (int i = 0; i < (int)g_saves.size(); i++) {
-        const SaveInfo& si = g_saves[i];
-        char label[256];
-        snprintf(label, sizeof label, "%s   ·   %s   ·   %s##save%d", si.title.c_str(), si.detail.c_str(),
-                 si.when.c_str(), i);
-        if (ImGui::RadioButton(label, g_choice == i)) g_choice = i;
-    }
-    if (ImGui::RadioButton("Tela inicial do jogo: começar um jogo novo", g_choice == -2)) g_choice = -2;
-    ImGui::Spacing();
-    if (g_choice == -1)
-        hint("O jogo continua do save que ele mesmo escolhe, o autosave.");
-    else if (g_choice == -2)
-        hint("Abre na tela original \"Começar um jogo novo\". Os saves vão antes para user/backups: "
-             "o jogo novo grava por cima do autosave, como no PS3.");
-    else
-        hint("Carrega este save. Logo depois o jogo grava o autosave por cima do atual, como no PS3, "
-             "então os saves vão antes para user/backups.");
-    if (g_saves.empty() && g_choice >= 0) g_choice = -1;
-}
-
 /* "Play": boot, or start the process again when an option that only takes
- * effect at start changed here, starting where page_game says. */
+ * effect at start changed here, starting where the menu says (g_choice). */
 void play()
 {
     port_settings& s = *port_settings_get();
@@ -516,62 +487,188 @@ void play()
     g_go = 1;
 }
 
+/* The start screen: a game's main menu. inFAMOUS 2 has none of its own --
+ * with a save it continues it, without one it shows its new-game screen -- so
+ * this is that menu, over the disc's own picture (PIC1.PNG). Continue, a new
+ * game (the game's own new-game screen), load a save, the port's options,
+ * quit. A pad moves through it as a keyboard or a mouse does. */
+enum MenuPage { MENU_MAIN, MENU_LOAD, MENU_NEW, MENU_OPTIONS };
+MenuPage g_page = MENU_MAIN;
+bool g_page_focus = true;      /* focus the page's first item on its first frame */
+
+const ImU32 k_accent = IM_COL32(70, 200, 255, 255);
+
+/* One line of the menu: big text, an optional line under it, a bar beside
+ * the one under the pointer or the pad. */
+bool menu_item(const char* id, const char* label, const char* sub, float scale = 1.0f)
+{
+    const float fs = ImGui::GetFontSize();
+    ImFont* tf = (ImFont*)rsx_ui_title_font();
+    const float big = fs * 1.75f * scale;
+    const float h = big * 1.25f + (sub ? fs * 1.35f : 0.0f);
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    if (g_page_focus) { ImGui::SetKeyboardFocusHere(); g_page_focus = false; }
+    const bool pressed = ImGui::Selectable(id, false, 0, ImVec2(ImGui::GetContentRegionAvail().x, h));
+    const bool hot = ImGui::IsItemHovered() || ImGui::IsItemFocused();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (hot) dl->AddRectFilled(p, ImVec2(p.x + fs * 0.22f, p.y + h - fs * 0.25f), k_accent);
+    dl->AddText(tf, big, ImVec2(p.x + fs * 0.85f, p.y), hot ? IM_COL32(255, 255, 255, 255)
+                                                            : IM_COL32(190, 196, 206, 210), label);
+    if (sub)
+        dl->AddText(ImVec2(p.x + fs * 0.9f, p.y + big * 1.12f), hot ? IM_COL32(150, 215, 255, 255)
+                                                                    : IM_COL32(150, 158, 170, 190), sub);
+    return pressed;
+}
+
+/* PIC1.PNG filling the window, darkened on the left where the menu is. */
+void draw_backdrop(const ImVec2& d)
+{
+    ImDrawList* bg = ImGui::GetBackgroundDrawList();
+    int iw = 0, ih = 0;
+    if (void* tex = rsx_ui_image(&iw, &ih)) {
+        const float da = d.x / d.y, ia = (float)iw / (float)ih;
+        ImVec2 uv0(0, 0), uv1(1, 1);
+        if (da > ia) { const float v = ia / da; uv0.y = (1 - v) * 0.5f; uv1.y = 1 - uv0.y; }
+        else         { const float u = da / ia; uv0.x = (1 - u) * 0.5f; uv1.x = 1 - uv0.x; }
+        bg->AddImage((ImTextureID)(uintptr_t)tex, ImVec2(0, 0), d, uv0, uv1);
+    } else {
+        bg->AddRectFilledMultiColor(ImVec2(0, 0), d, IM_COL32(14, 22, 38, 255), IM_COL32(8, 12, 22, 255),
+                                    IM_COL32(2, 3, 6, 255), IM_COL32(4, 6, 12, 255));
+    }
+    const ImU32 dark = IM_COL32(0, 0, 0, 225), clear = IM_COL32(0, 0, 0, 0);
+    bg->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(d.x * 0.65f, d.y), dark, clear, clear, dark);
+    bg->AddRectFilled(ImVec2(0, 0), d, IM_COL32(0, 0, 0, g_page == MENU_OPTIONS ? 120 : 40));
+}
+
+void go_page(MenuPage p) { g_page = p; g_page_focus = true; }
+
+/* A sub-page's name, in the menu's type. */
+void page_title(const char* t)
+{
+    const float fs = ImGui::GetFontSize();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::GetWindowDrawList()->AddText((ImFont*)rsx_ui_title_font(), fs * 1.3f, ImVec2(p.x + fs * 0.85f, p.y),
+                                        k_accent, t);
+    ImGui::Dummy(ImVec2(0, fs * 2.0f));
+}
+
 void draw_start()
 {
     port_settings& s = *port_settings_get();
     ImGuiIO& io = ImGui::GetIO();
     const ImVec2 d = io.DisplaySize;
-    ImDrawList* bg = ImGui::GetBackgroundDrawList();
-    bg->AddRectFilledMultiColor(ImVec2(0, 0), d, IM_COL32(14, 22, 38, 255), IM_COL32(8, 12, 22, 255),
-                                IM_COL32(2, 3, 6, 255), IM_COL32(4, 6, 12, 255));
     const float fs = ImGui::GetFontSize();
-    /* the title, top left */
-    ImFont* tf = (ImFont*)rsx_ui_title_font();
-    const ImVec2 tp(d.x * 0.06f, d.y * 0.06f);
-    const float th = fs * 3.0f;
-    bg->AddText(tf, th, tp, IM_COL32(255, 255, 255, 255), "inFAMOUS 2");
-    bg->AddRectFilled(ImVec2(tp.x + 4, tp.y + th * 1.08f), ImVec2(tp.x + 4 + fs * 5.0f, tp.y + th * 1.08f + 5),
-                      IM_COL32(70, 200, 255, 255));
-    bg->AddText(ImVec2(tp.x + 4, tp.y + th * 1.08f + fs * 0.9f), IM_COL32(70, 200, 255, 255),
-                "PORT NATIVO PARA PC   ·   Linux   ·   Vulkan");
+    if (!g_saves_read) { read_saves(); g_saves_read = true; }
+    draw_backdrop(d);
 
-    /* the options and "Play", below the title, as much of the window as is left */
-    const float top = tp.y + th * 1.08f + fs * 2.6f;
-    const ImVec2 sz(fs * 38.0f < d.x * 0.88f ? fs * 38.0f : d.x * 0.88f,
-                    fs * 24.0f < d.y - top - d.y * 0.05f ? fs * 24.0f : d.y - top - d.y * 0.05f);
-    ImGui::SetNextWindowPos(ImVec2(tp.x, top), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(sz, ImGuiCond_Always);
+    /* the title, top left */
+    ImDrawList* bg = ImGui::GetBackgroundDrawList();
+    ImFont* tf = (ImFont*)rsx_ui_title_font();
+    const ImVec2 tp(d.x * 0.07f, d.y * 0.10f);
+    const float th = fs * 3.4f;
+    bg->AddText(tf, th, tp, IM_COL32(255, 255, 255, 255), "inFAMOUS 2");
+    bg->AddRectFilled(ImVec2(tp.x + 4, tp.y + th * 1.06f), ImVec2(tp.x + 4 + fs * 5.0f, tp.y + th * 1.06f + 5), k_accent);
+
+    /* Circle, Escape: back to the main page. */
+    if (g_page != MENU_MAIN &&
+        (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
+        go_page(MENU_MAIN);
+
+    const float top = tp.y + th * 1.06f + fs * 2.4f;
+    const float width = g_page == MENU_OPTIONS ? (fs * 38.0f < d.x * 0.86f ? fs * 38.0f : d.x * 0.86f)
+                                               : (fs * 34.0f < d.x * 0.62f ? fs * 34.0f : d.x * 0.62f);
+    const float height = d.y - top - fs * 3.2f;
+    ImGui::SetNextWindowPos(ImVec2(tp.x - fs * 0.9f, top), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
+    if (g_page != MENU_OPTIONS) ImGui::SetNextWindowBgAlpha(0.0f);
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_NavHighlight, ImVec4(0, 0, 0, 0));
     ImGui::Begin("##start", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
                  ImGuiWindowFlags_NoScrollbar);
-    if (ImGui::BeginTabBar("pages")) {
-        if (ImGui::BeginTabItem("Jogo")) { page_game(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Vídeo")) { page_video(s); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Idioma")) { page_language(s); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Desempenho")) { page_performance(s); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Controle e saves")) { page_controller(s); ImGui::EndTabItem(); }
-        ImGui::EndTabBar();
+    bool go = false;
+    switch (g_page) {
+    case MENU_MAIN: {
+        if (!g_saves.empty()) {
+            const SaveInfo& n = g_saves[0];
+            const std::string sub = n.title + "   ·   " + n.detail + "   ·   " + n.when;
+            if (menu_item("##continue", "CONTINUAR", sub.c_str())) {
+                /* The newest save. The game would pick its autosave itself;
+                 * naming it only when it is another one keeps the usual
+                 * start free of a backup. */
+                const size_t k = n.dir.size();
+                g_choice = (k >= 2 && n.dir.compare(k - 2, 2, "_0") == 0) ? -1 : 0;
+                go = true;
+            }
+        }
+        if (menu_item("##new", "NOVO JOGO", nullptr)) {
+            if (g_saves.empty()) { g_choice = -1; go = true; }   /* the game's new-game screen comes anyway */
+            else go_page(MENU_NEW);
+        }
+        if (!g_saves.empty() && menu_item("##load", "CARREGAR JOGO", nullptr)) go_page(MENU_LOAD);
+        if (menu_item("##options", "OPÇÕES", nullptr)) go_page(MENU_OPTIONS);
+        if (menu_item("##quit", "SAIR", nullptr)) {
+            fflush(stdout); fflush(stderr);
+            _Exit(0);
+        }
+        break; }
+    case MENU_LOAD: {
+        page_title("CARREGAR JOGO");
+        for (int i = 0; i < (int)g_saves.size(); i++) {
+            const SaveInfo& si = g_saves[i];
+            const std::string sub = si.detail + "   ·   " + si.when;
+            char id[32]; snprintf(id, sizeof id, "##save%d", i);
+            if (menu_item(id, si.title.c_str(), sub.c_str(), 0.62f)) { g_choice = i; go = true; }
+        }
+        ImGui::Spacing();
+        hint("O jogo grava o autosave por cima do atual logo depois de carregar, como no PS3. "
+             "Antes, os saves são copiados para user/backups.");
+        break; }
+    case MENU_NEW: {
+        page_title("NOVO JOGO");
+        hint("Abre a tela de jogo novo do próprio inFAMOUS 2. Quando o jogo novo salvar, o autosave atual "
+             "é substituído, como no PS3; antes, todos os saves são copiados para user/backups.");
+        ImGui::Spacing();
+        if (menu_item("##newyes", "COMEÇAR", nullptr, 0.8f)) { g_choice = -2; go = true; }
+        if (menu_item("##newno", "VOLTAR", nullptr, 0.8f)) go_page(MENU_MAIN);
+        break; }
+    case MENU_OPTIONS: {
+        ImGui::PopStyleColor(4);   /* the options' own widgets keep their colours */
+        if (ImGui::BeginTabBar("pages")) {
+            if (ImGui::BeginTabItem("Vídeo")) { page_video(s); ImGui::EndTabItem(); }
+            if (ImGui::BeginTabItem("Idioma")) { page_language(s); ImGui::EndTabItem(); }
+            if (ImGui::BeginTabItem("Desempenho")) { page_performance(s); ImGui::EndTabItem(); }
+            if (ImGui::BeginTabItem("Controle e saves")) { page_controller(s); ImGui::EndTabItem(); }
+            ImGui::EndTabBar();
+        }
+        const std::string note = restart_note(s);
+        ImGui::SetCursorPosY(height - fs * 3.0f);
+        ImGui::Separator();
+        if (g_page_focus) { ImGui::SetKeyboardFocusHere(); g_page_focus = false; }
+        if (ImGui::Button("VOLTAR", ImVec2(fs * 8.0f, fs * 1.8f))) go_page(MENU_MAIN);
+        ImGui::SameLine();
+        hint(note.empty() ? "As opções ficam gravadas. F1 (ou Select+Start segurados) abre esta tela no jogo."
+                          : ("Ao entrar no jogo ele reabre para aplicar: " + note + ".").c_str());
+        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));   /* rebalance the pop above */
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_NavHighlight, ImVec4(0, 0, 0, 0));
+        break; }
     }
-    ImGui::SetCursorPosY(sz.y - fs * 3.7f);
-    ImGui::Separator();
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f, 0.55f, 0.80f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.27f, 0.70f, 0.95f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.30f, 0.78f, 1.00f, 1.0f));
-    static bool focused;
-    if (!focused) { ImGui::SetKeyboardFocusHere(); focused = true; }
-    const bool go = ImGui::Button("JOGAR", ImVec2(fs * 9.0f, fs * 2.0f));
-    ImGui::PopStyleColor(3);
-    ImGui::SameLine();
-    const std::string note = restart_note(s);
     if (g_backup_failed) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
-        ImGui::TextWrapped("Não deu para copiar os saves para user/backups. Escolha \"Continuar\" "
-                           "ou veja o log.");
+        ImGui::TextWrapped("Não deu para copiar os saves para user/backups, então o jogo não começou. "
+                           "Veja o log.");
         ImGui::PopStyleColor();
-    } else
-        hint(note.empty() ? "F1 (ou Select+Start segurados) abre estas opções durante o jogo."
-                          : "As mudanças de resolução, monitor ou idioma reabrem o jogo ao clicar em Jogar.");
+    }
     ImGui::End();
+    ImGui::PopStyleColor(4);
+
+    /* the controls, bottom left */
+    const char* keys = g_page == MENU_MAIN ? "X / Enter  selecionar" : "X / Enter  selecionar      O / Esc  voltar";
+    bg->AddText(ImVec2(tp.x, d.y - fs * 2.2f), IM_COL32(200, 205, 214, 200), keys);
     if (go) play();
 }
 
@@ -591,6 +688,33 @@ void draw(void*)
 }
 
 } /* namespace */
+
+/* The disc's PIC1.PNG (PS3_GAME, beside USRDIR) for the start screen. */
+static void load_backdrop(const char* eboot)
+{
+#ifdef PORT_HAVE_PNG
+    std::string dir = eboot ? eboot : "";
+    for (int up = 0; up < 2; up++) {
+        const size_t k = dir.find_last_of('/');
+        dir = k == std::string::npos ? std::string(".") : dir.substr(0, k);
+    }
+    const std::string path = dir + "/PIC1.PNG";
+    png_image im;
+    memset(&im, 0, sizeof im);
+    im.version = PNG_IMAGE_VERSION;
+    if (!png_image_begin_read_from_file(&im, path.c_str())) {
+        fprintf(stderr, "[ui] no picture at %s: the start screen has a plain backdrop\n", path.c_str());
+        return;
+    }
+    im.format = PNG_FORMAT_RGBA;
+    std::vector<unsigned char> px(PNG_IMAGE_SIZE(im));
+    if (png_image_finish_read(&im, nullptr, px.data(), 0, nullptr))
+        rsx_ui_set_image(px.data(), (int)im.width, (int)im.height);
+    png_image_free(&im);
+#else
+    (void)eboot;
+#endif
+}
 
 void port_ui_init(int argc, char** argv)
 {
@@ -614,6 +738,14 @@ void port_ui_init(int argc, char** argv)
     }
     const char* skip = getenv("PS3_SKIP_LAUNCHER");
     g_want_start = !play_arg && !(skip && skip[0] == '1') && !port_settings_get()->skip_launcher;
+    if (g_want_start) load_backdrop(argc > 1 ? argv[1] : nullptr);
+    /* PS3_UI_PAGE=load|new|options: open the start screen on that page (for
+     * a screenshot of it). */
+    if (const char* pg = getenv("PS3_UI_PAGE")) {
+        if (!strcmp(pg, "load")) g_page = MENU_LOAD;
+        else if (!strcmp(pg, "new")) g_page = MENU_NEW;
+        else if (!strcmp(pg, "options")) g_page = MENU_OPTIONS;
+    }
     if (g_want_start) g_go = 0;            /* port_ui_backend_ready decides */
 }
 

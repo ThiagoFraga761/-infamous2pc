@@ -949,6 +949,16 @@ Three alternating pairs in the heavy view: 54.9 -> 56.9 fps.
 
 ## The game's own menus
 
+Where the boot decides, in the game's code: the main loop (`0x1DB544`) runs the
+save manager's update (`0x12B9F4`) every frame. Its queue starts operation 0
+(`0x12B790` → thread "Game State Thread" → `0x1243CC`), which is
+`cellSaveDataListAutoLoad`, before any screen. The result decides between the
+save and the new-game mission. The menu strings are all in the game's string
+table (read from memory while it runs): `u_menu_new_game`, `u_menu_load_game`,
+`u_menu_options` and the rest belong to the pause menu, and the new-game screen
+is `u_loadtrophies_*`. Feeding the pad only on change (`PAD_CHANGE_ONLY=1`)
+changed nothing, so the pad is not what skips a title.
+
 inFAMOUS 2 has no main menu. Checked with two boots and no input:
 
 - Without a save, after the logos it shows "Começar um jogo novo" over the
@@ -962,10 +972,12 @@ another save is loaded from the pause menu (Start > Saved Data). The start
 screen and the saves page say so, because a player who saw the "new game"
 screen once reads its absence as a bug.
 
-The start screen's "Jogo" page stands in for the menu the game lacks:
-continue, load one of the saves (read from each `PARAM.SFO`), or the title
-screen (also `play.sh --title`). Both work through the game's first
-`ListAutoLoad` (`cellSaveData.c`):
+The start screen is a main menu in the game's place: Continue, New game,
+Load game, Options and Quit, over the disc's `PIC1.PNG` (libpng, uploaded by
+`rsx_ui` in the present's command buffer, ahead of the UI pass). The save list
+comes from each `PARAM.SFO`; the port's are `KEY=value` lines, not the
+console's binary format. A new game and another save both work through the
+game's first `ListAutoLoad` (`cellSaveData.c`):
 
 - **The title screen.** An empty list (`g_savedata_title`,
   `PS3_SAVEDATA_TITLE=1`), which is what a console with no saves gives it.
@@ -1082,6 +1094,9 @@ and the audio chain froze the game with it.
 | `PS3RECOMP_VK_STATS=1` | Vulkan flushes and time spent waiting on the GPU |
 | `SPURS_JOB_STEPS=1` | each lifted job image's longest run, in steps |
 | `SPU_DUMP_MISS=<dir>` | write out job binaries that have no lift |
+| `PS3_THREAD_BT=<name part>` | the host stack that created a guest thread; `addr2line -f` names the lifted callers |
+| `PS3_UI_PAGE=load\|new\|options` | open the start screen on that page, for a screenshot of it |
+| `PAD_CHANGE_ONLY=1` | hand out a pad packet only when buttons or sticks change |
 | `PS3_POLLTOP=<s>` | the guest's busiest `usleep` poll sites, per thread |
 | `PS3RECOMP_VK_SPLIT=<n>` | operations per command buffer before it goes to the GPU (0: one per frame) |
 | `PS3RECOMP_ENG_HASHSTATS=1` | texture bytes hashed per frame, by memory and span size |
