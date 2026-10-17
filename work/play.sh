@@ -2,6 +2,9 @@
 # Play the inFAMOUS 2 port in a window, with the game's own shaders on Vulkan.
 #
 #   work/play.sh            window + controller (SDL GameController) + sound
+#   work/play.sh --play     without the port's start screen
+#   work/play.sh --title    straight to the game's own title screen ("Começar
+#                           um jogo novo"), the saves backed up first
 #   work/play.sh --dump N   also keep every N-th frame as work/runs/play/f_*.ppm
 #
 # A controller must be connected before launch (SDL picks it up at start).
@@ -24,11 +27,21 @@ export PS3RECOMP_VK_WINDOW=1
 export SDL_NO_SIGNAL_HANDLERS=1
 # Every 10 s, "[rsx fps] N fps ..." in this terminal.
 export PS3RECOMP_ENG_FPSLOG=1
-if [ "${1:-}" = "--dump" ]; then
-    mkdir -p "$HERE/runs/play"
-    export PS3RECOMP_VK_DUMP="$HERE/runs/play/f"
-    export PS3RECOMP_VK_DUMP_EVERY="${2:-300}"
-fi
+GAME_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dump)
+            mkdir -p "$HERE/runs/play"
+            export PS3RECOMP_VK_DUMP="$HERE/runs/play/f"
+            shift
+            case "${1:-}" in
+                [0-9]*) export PS3RECOMP_VK_DUMP_EVERY="$1"; shift ;;
+                *)      export PS3RECOMP_VK_DUMP_EVERY=300 ;;
+            esac ;;
+        --play|--title) GAME_ARGS+=("$1"); shift ;;
+        *) echo "play.sh: unknown option $1" >&2; exit 2 ;;
+    esac
+done
 # Each run's output also goes to work/runs/play-<time>.log, and any SPU job
 # binary the port has no lift for to work/runs/spujob-miss/ -- both local and
 # never committed: what a crash report needs.
@@ -119,5 +132,5 @@ watch_stall() {
 watch_stall &
 WATCH=$!
 cd "$ROOT"
-"$BIN" disc/PS3_GAME/USRDIR/EBOOT.elf 2>&1 | tee "$LOG"
+"$BIN" disc/PS3_GAME/USRDIR/EBOOT.elf ${GAME_ARGS[@]+"${GAME_ARGS[@]}"} 2>&1 | tee "$LOG"
 kill "$WATCH" 2>/dev/null || true

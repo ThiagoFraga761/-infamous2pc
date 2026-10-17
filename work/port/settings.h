@@ -61,10 +61,10 @@ void port_settings_export(const port_settings* s);
 
 /* The environment for starting the process again with new settings: this
  * one without what port_settings_export set (the new process reads the file
- * again), plus PS3_SKIP_LAUNCHER=1. Built aside rather than by unsetting:
- * other threads read the environment, and a failed exec keeps it whole.
- * NULL-terminated, from malloc. */
-char** port_settings_restart_env(void);
+ * again), plus PS3_SKIP_LAUNCHER=1 and `extra` ("NAME=value") when not NULL.
+ * Built aside rather than by unsetting: other threads read the environment,
+ * and a failed exec keeps it whole. NULL-terminated, from malloc. */
+char** port_settings_restart_env(const char* extra);
 
 /* user/settings.ini, or $PS3_USER_DIR/settings.ini. */
 const char* port_settings_path(void);

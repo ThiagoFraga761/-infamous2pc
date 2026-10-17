@@ -4465,7 +4465,7 @@ index 0000000..3bb484a
 +
 +#endif
 diff --git a/libs/system/cellSaveData.c b/libs/system/cellSaveData.c
-index 79ea8ca..53e8706 100644
+index 79ea8ca..4a8d430 100644
 --- a/libs/system/cellSaveData.c
 +++ b/libs/system/cellSaveData.c
 @@ -15,6 +15,7 @@
@@ -4633,6 +4633,76 @@ index 79ea8ca..53e8706 100644
          return failed ? CELL_SAVEDATA_ERROR_ACCESS_ERROR : (s32)wrote;
      }
  
+@@ -1080,6 +1097,18 @@ static void savedata_reject_log(const char* fn, const char* why, int rc)
+ #define SAVEDATA_REJECT(rc, why) \
+     do { savedata_reject_log(__func__, (why), (rc)); return (rc); } while (0)
+ 
++/* Set around one ListAutoLoad: the list it hands the title is empty, or
++ * holds only the directory named here. */
++static int s_list_hidden;
++static const char* s_list_only;
++/* -1 until read from PS3_SAVEDATA_TITLE; the port's start screen sets it
++ * before the guest boots. */
++volatile int g_savedata_title = -1;
++/* PS3_SAVEDATA_LOAD=<directory>, or the port's start screen: the save the
++ * first ListAutoLoad lists alone, so a title that continues the newest one
++ * continues this one. Empty: every save, as usual. */
++char g_savedata_load[CELL_SAVEDATA_DIRNAME_SIZE];
++
+ static s32 savedata_fixed(int is_save, CellSaveDataSetList* setList,
+                          CellSaveDataSetBuf* setBuf, CellSaveDataFixedCallback funcFixed,
+                          CellSaveDataStatCallback funcStat, CellSaveDataFileCallback funcFile,
+@@ -1095,7 +1124,14 @@ static s32 savedata_fixed(int is_save, CellSaveDataSetList* setList,
+     CellSaveDataDirList* dirs = dir_max ? calloc(dir_max, sizeof(*dirs)) : NULL;
+     if (dir_max && !dirs) return CELL_SAVEDATA_ERROR_INTERNAL;
+     u32 prefix = vm_read32((u32)(uintptr_t)setList + 8);
+-    u32 count = enumerate_save_dirs(prefix ? (char*)vm_base + prefix : "", dirs, dir_max);
++    u32 count = s_list_hidden ? 0u : enumerate_save_dirs(prefix ? (char*)vm_base + prefix : "", dirs, dir_max);
++    if (s_list_only && count && dirs) {
++        u32 k = 0, n = count < dir_max ? count : dir_max;
++        for (u32 i = 0; i < n; i++)
++            if (!strncmp(dirs[i].dirName, s_list_only, CELL_SAVEDATA_DIRNAME_SIZE)) dirs[k++] = dirs[i];
++        if (k) count = k;   /* not there: the full list, rather than a new game by mistake */
++        else printf("[cellSaveData] %s: '%s' is not among the saves, listing them all\n", __func__, s_list_only);
++    }
+     u32 listed = count < dir_max ? count : dir_max;
+     scratch_reset();
+     u32 cb = scratch_alloc(SAVEDATA_CBRESULT_SIZE);
+@@ -1183,8 +1219,32 @@ s32 cellSaveDataListAutoLoad(u32 version, u32 errDialog,
+ {
+     (void)container;
+     if (errDialog > 2) return CELL_SAVEDATA_ERROR_PARAM;
+-    printf("[cellSaveData] ListAutoLoad(version=%u)\n", version);
+-    return savedata_fixed(0, setList, setBuf, funcFixed, funcStat, funcFile, userdata);
++    /* The title screen on demand. A title that continues the newest save by
++     * itself at boot (inFAMOUS 2) shows its title screen and new-game menu
++     * only on a console with no saves. PS3_SAVEDATA_TITLE=1, or the port's
++     * start screen setting g_savedata_title, makes the FIRST ListAutoLoad see
++     * none. Nothing is moved or deleted: the saves stay where they are, and
++     * every later call, the pause menu's loads included, lists them. */
++    int hide = 0;
++    const char* only = NULL;
++    { static int s_used;
++      if (g_savedata_title < 0) { const char* e = getenv("PS3_SAVEDATA_TITLE"); g_savedata_title = e && e[0] == '1'; }
++      if (!g_savedata_load[0]) { const char* e = getenv("PS3_SAVEDATA_LOAD");
++                                 if (e) snprintf(g_savedata_load, sizeof g_savedata_load, "%s", e); }
++      if (!s_used) {
++          s_used = 1;
++          if (g_savedata_title > 0) hide = 1;
++          else if (g_savedata_load[0]) only = g_savedata_load;
++      } }
++    if (hide)      printf("[cellSaveData] ListAutoLoad(version=%u): no saves listed, for the title screen\n", version);
++    else if (only) printf("[cellSaveData] ListAutoLoad(version=%u): only '%s' listed\n", version, only);
++    else           printf("[cellSaveData] ListAutoLoad(version=%u)\n", version);
++    s_list_hidden = hide;
++    s_list_only = only;
++    const s32 rc = savedata_fixed(0, setList, setBuf, funcFixed, funcStat, funcFile, userdata);
++    s_list_hidden = 0;
++    s_list_only = NULL;
++    return rc;
+ }
+ 
+ s32 cellSaveDataAutoSave2(u32 version, const char* dirName,
 diff --git a/libs/system/cellSysutil.c b/libs/system/cellSysutil.c
 index 252c3e8..4825faf 100644
 --- a/libs/system/cellSysutil.c

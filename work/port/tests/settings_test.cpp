@@ -86,16 +86,17 @@ int main()
         setenv("SETTINGS_TEST_KEEP", "1", 1); setenv("PS3_VOICE_LANG", "english", 1);
         port_settings e; port_settings_defaults(&e);
         port_settings_export(&e);                             /* RES_SCALE is ours now */
-        char** env = port_settings_restart_env();
+        char** env = port_settings_restart_env("SETTINGS_TEST_EXTRA=1");
         CHECK(env != nullptr);
-        bool scale = false, keep = false, skip = false, voice = false;
+        bool scale = false, keep = false, skip = false, voice = false, extra = false;
         for (char** p = env; p && *p; p++) {
             if (!strncmp(*p, "PS3RECOMP_RES_SCALE=", 20)) scale = true;
             if (!strcmp(*p, "SETTINGS_TEST_KEEP=1")) keep = true;
             if (!strcmp(*p, "PS3_SKIP_LAUNCHER=1")) skip = true;
             if (!strncmp(*p, "PS3_VOICE_LANG=", 15)) voice = true;   /* the caller's, not ours */
+            if (!strcmp(*p, "SETTINGS_TEST_EXTRA=1")) extra = true;
         }
-        CHECK(!scale && keep && skip && voice);
+        CHECK(!scale && keep && skip && voice && extra);
         CHECK(getenv("PS3RECOMP_RES_SCALE") != nullptr);      /* this process keeps its own */
         free(env);
     }

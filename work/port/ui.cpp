@@ -21,6 +21,10 @@
 #include <ctime>
 #include <string>
 #include <thread>
+#include <vector>
+#include <algorithm>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 extern "C" void rsx_vulkan_backend_set_fullscreen(int on);
@@ -29,6 +33,8 @@ extern "C" void rsx_vulkan_backend_set_stretch(int on);
 extern "C" void rsx_vulkan_backend_set_fps_limit(int fps);
 extern "C" int rsx_vulkan_backend_fullscreen(void);
 extern "C" unsigned ppu_boot_frames_presented(void);
+extern "C" volatile int g_savedata_title;   /* libs/system/cellSaveData.c */
+extern "C" char g_savedata_load[32];        /* ...and the save to continue */
 
 namespace {
 
@@ -63,6 +69,7 @@ std::atomic<bool> g_start{false};  /* ...and is showing */
 double g_fps = 0.0, g_fps_t = 0.0;
 unsigned g_fps_frames = 0;
 bool g_styled = false;
+bool g_backup_failed = false;  /* "Play" refused: the saves could not be backed up */
 
 void style()
 {
@@ -168,8 +175,10 @@ void open_folder(const char* path)
 
 std::string g_last_backup;
 
-void backup_saves()
+bool backup_saves()
 {
+    struct stat st;
+    if (stat(saves_dir(), &st) != 0) { g_last_backup = "Nenhum save para copiar"; return true; }
     char ts[32];
     const time_t t = time(nullptr);
     strftime(ts, sizeof ts, "%Y%m%d-%H%M%S", localtime(&t));
@@ -177,7 +186,9 @@ void backup_saves()
     const std::string dst = std::string(u && *u ? u : "user") + "/backups/" + ts;
     const std::string cmd = "mkdir -p " + sh_quote(dst) + " && cp -a " + sh_quote(std::string(saves_dir()) + "/.") +
                             " " + sh_quote(dst + "/");
-    g_last_backup = system(cmd.c_str()) == 0 ? "Backup em " + dst : "O backup falhou";
+    const bool ok = system(cmd.c_str()) == 0;
+    g_last_backup = ok ? "Backup em " + dst : "O backup dos saves falhou";
+    return ok;
 }
 
 void page_video(port_settings& s)
@@ -284,8 +295,9 @@ void page_controller(port_settings& s)
     ImGui::SameLine();
     if (ImGui::Button("Abrir pasta dos logs")) open_folder("work/runs");
     if (!g_last_backup.empty()) hint(g_last_backup.c_str());
-    hint("O jogo não tem menu principal: depois do primeiro save ele sempre continua do mais recente. "
-         "Novo jogo e carregar outro save ficam no próprio jogo, em Start > Dados salvos.");
+    hint("O jogo não tem menu principal: com save, ele sempre continua do autosave. Na tela inicial "
+         "do port, a aba Jogo escolhe outro save ou abre a tela inicial do jogo; dentro do jogo, "
+         "Start > Dados salvos.");
     ImGui::Separator();
     bool b = s.skip_launcher;
     if (ImGui::Checkbox("Pular a tela de opções ao abrir o jogo (F1 abre no jogo)", &b)) { s.skip_launcher = b; save(); }
@@ -352,16 +364,139 @@ void draw_fps()
     dl->AddText(p, IM_COL32(120, 220, 255, 255), t);
 }
 
+/* The saves, as the "Game" page lists them. */
+struct SaveInfo { std::string dir, title, detail, when; time_t mtime; };
+std::vector<SaveInfo> g_saves;
+bool g_saves_read = false;
+int g_choice = -1;             /* -1 continue as the game does, -2 its title screen, else g_saves[i] */
+
+/* One string from a PARAM.SFO: the console's binary one (little-endian
+ * header and index, UTF-8 data), or the "KEY=value" lines cellSaveData
+ * writes, where a line with no '=' continues the value above it. */
+std::string sfo_field(const std::vector<unsigned char>& d, const char* key)
+{
+    if (d.size() < 4 || memcmp(d.data(), "\0PSF", 4)) {
+        const std::string t(d.begin(), d.end()), k = std::string(key) + "=";
+        std::string v;
+        bool in = false;
+        for (size_t a = 0; a < t.size();) {
+            size_t b = t.find('\n', a);
+            if (b == std::string::npos) b = t.size();
+            const std::string line = t.substr(a, b - a);
+            if (!line.compare(0, k.size(), k)) { v = line.substr(k.size()); in = true; }
+            else if (in && line.find('=') == std::string::npos) v += "\n" + line;
+            else if (in) break;
+            a = b + 1;
+        }
+        return v;
+    }
+    auto u32 = [&](size_t o) { return o + 4 <= d.size() ? (unsigned)d[o] | (unsigned)d[o + 1] << 8 |
+                                                         (unsigned)d[o + 2] << 16 | (unsigned)d[o + 3] << 24 : 0u; };
+    auto u16 = [&](size_t o) { return o + 2 <= d.size() ? (unsigned)d[o] | (unsigned)d[o + 1] << 8 : 0u; };
+    if (d.size() < 20 || memcmp(d.data(), "\0PSF", 4)) return {};
+    const unsigned keys = u32(8), data = u32(12), n = u32(16);
+    for (unsigned i = 0; i < n && 20 + i * 16 + 16 <= d.size(); i++) {
+        const size_t e = 20 + (size_t)i * 16;
+        const size_t ko = keys + u16(e), dl = u32(e + 4), dof = data + u32(e + 12);
+        if (ko >= d.size() || dof + dl > d.size()) continue;
+        if (strcmp((const char*)d.data() + ko, key)) continue;
+        std::string v((const char*)d.data() + dof, dl);
+        v.resize(strnlen(v.c_str(), v.size()));
+        return v;
+    }
+    return {};
+}
+
+void read_saves()
+{
+    g_saves.clear();
+    DIR* dir = opendir(saves_dir());
+    if (!dir) return;
+    while (dirent* e = readdir(dir)) {
+        if (e->d_name[0] == '.') continue;
+        const std::string sfo = std::string(saves_dir()) + "/" + e->d_name + "/PARAM.SFO";
+        struct stat st;
+        if (strlen(e->d_name) >= 32 || stat(sfo.c_str(), &st) != 0) continue;
+        FILE* f = fopen(sfo.c_str(), "rb");
+        if (!f) continue;
+        std::vector<unsigned char> d(st.st_size > 0 && st.st_size < 65536 ? (size_t)st.st_size : 0);
+        const size_t got = d.empty() ? 0 : fread(d.data(), 1, d.size(), f);
+        fclose(f);
+        d.resize(got);
+        SaveInfo si;
+        si.dir = e->d_name;
+        si.title = sfo_field(d, "SUB_TITLE");
+        si.detail = sfo_field(d, "DETAIL");
+        si.detail = si.detail.substr(0, si.detail.find('\n'));
+        if (si.title.empty()) si.title = si.dir;
+        si.mtime = st.st_mtime;
+        char when[32];
+        strftime(when, sizeof when, "%d/%m %H:%M", localtime(&si.mtime));
+        si.when = when;
+        g_saves.push_back(si);
+    }
+    closedir(dir);
+    std::sort(g_saves.begin(), g_saves.end(), [](const SaveInfo& a, const SaveInfo& b) { return a.mtime > b.mtime; });
+}
+
+/* The start screen's first page: where the game starts. inFAMOUS 2 has no
+ * menu of its own once there is a save -- it continues it -- so this is that
+ * menu. Another save or the title screen is the game's first look at the
+ * saves narrowed (cellSaveData: g_savedata_load, g_savedata_title); nothing
+ * is moved. Either way the game's next autosave writes over its autosave
+ * slot, as on the console, so the saves are backed up first. */
+void page_game()
+{
+    if (!g_saves_read) { read_saves(); g_saves_read = true; }
+    ImGui::TextUnformatted("Começar por");
+    if (ImGui::RadioButton("Continuar, como o jogo faz", g_choice == -1)) g_choice = -1;
+    for (int i = 0; i < (int)g_saves.size(); i++) {
+        const SaveInfo& si = g_saves[i];
+        char label[256];
+        snprintf(label, sizeof label, "%s   ·   %s   ·   %s##save%d", si.title.c_str(), si.detail.c_str(),
+                 si.when.c_str(), i);
+        if (ImGui::RadioButton(label, g_choice == i)) g_choice = i;
+    }
+    if (ImGui::RadioButton("Tela inicial do jogo: começar um jogo novo", g_choice == -2)) g_choice = -2;
+    ImGui::Spacing();
+    if (g_choice == -1)
+        hint("O jogo continua do save que ele mesmo escolhe, o autosave.");
+    else if (g_choice == -2)
+        hint("Abre na tela original \"Começar um jogo novo\". Os saves vão antes para user/backups: "
+             "o jogo novo grava por cima do autosave, como no PS3.");
+    else
+        hint("Carrega este save. Logo depois o jogo grava o autosave por cima do atual, como no PS3, "
+             "então os saves vão antes para user/backups.");
+    if (g_saves.empty() && g_choice >= 0) g_choice = -1;
+}
+
 /* "Play": boot, or start the process again when an option that only takes
- * effect at start changed here. */
+ * effect at start changed here, starting where page_game says. */
 void play()
 {
     port_settings& s = *port_settings_get();
     save();
+    const bool title = g_choice == -2;
+    const bool other = g_choice >= 0 && g_choice < (int)g_saves.size();
+    /* No backup, no changing where it starts: the next autosave would write
+     * over the newest save with nothing to go back to. The screen stays. */
+    if ((title || other) && !backup_saves()) {
+        fprintf(stderr, "[ui] the saves could not be backed up: starting where the game would\n");
+        g_backup_failed = true;
+        return;
+    }
+    static std::string extra;
+    if (title) {
+        fprintf(stderr, "[ui] the game's title screen (%s)\n", g_last_backup.c_str());
+        extra = "PS3_SAVEDATA_TITLE=1";
+    } else if (other) {
+        fprintf(stderr, "[ui] continuing %s (%s)\n", g_saves[g_choice].dir.c_str(), g_last_backup.c_str());
+        extra = "PS3_SAVEDATA_LOAD=" + g_saves[g_choice].dir;
+    }
     if (!restart_note(s).empty() && g_argv) {
         fprintf(stderr, "[ui] starting again with the new settings\n");
         fflush(stderr); fflush(stdout);
-        if (char** env = port_settings_restart_env()) {
+        if (char** env = port_settings_restart_env(extra.empty() ? nullptr : extra.c_str())) {
             /* The binary's own path, not /proc/self/exe: the process keeps
              * its name (MyGameRecomp), which play.sh and the scripts look for. */
             char self[4096];
@@ -372,6 +507,8 @@ void play()
         }
         fprintf(stderr, "[ui] could not start again: the old settings stay for this run\n");
     }
+    if (title) g_savedata_title = 1;
+    if (other) snprintf(g_savedata_load, sizeof g_savedata_load, "%s", g_saves[g_choice].dir.c_str());
     g_start = false;
     rsx_ui_set_modal(0);
     rsx_ui_set_menu_open(0);
@@ -405,15 +542,17 @@ void draw_start()
     ImGui::SetNextWindowPos(ImVec2(tp.x, top), ImGuiCond_Always);
     ImGui::SetNextWindowSize(sz, ImGuiCond_Always);
     ImGui::Begin("##start", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
+                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+                 ImGuiWindowFlags_NoScrollbar);
     if (ImGui::BeginTabBar("pages")) {
+        if (ImGui::BeginTabItem("Jogo")) { page_game(); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Vídeo")) { page_video(s); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Idioma")) { page_language(s); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Desempenho")) { page_performance(s); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Controle e saves")) { page_controller(s); ImGui::EndTabItem(); }
         ImGui::EndTabBar();
     }
-    ImGui::SetCursorPosY(sz.y - fs * 3.4f);
+    ImGui::SetCursorPosY(sz.y - fs * 3.7f);
     ImGui::Separator();
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f, 0.55f, 0.80f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.27f, 0.70f, 0.95f, 1.0f));
@@ -424,9 +563,14 @@ void draw_start()
     ImGui::PopStyleColor(3);
     ImGui::SameLine();
     const std::string note = restart_note(s);
-    hint(note.empty() ? "O jogo continua do último save. Novo jogo e outros saves: Start > Dados salvos, "
-                        "dentro do jogo. F1 (ou Select+Start segurados) abre estas opções lá."
-                      : "As mudanças de resolução, monitor ou idioma reabrem o jogo ao clicar em Jogar.");
+    if (g_backup_failed) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.55f, 0.45f, 1.0f));
+        ImGui::TextWrapped("Não deu para copiar os saves para user/backups. Escolha \"Continuar\" "
+                           "ou veja o log.");
+        ImGui::PopStyleColor();
+    } else
+        hint(note.empty() ? "F1 (ou Select+Start segurados) abre estas opções durante o jogo."
+                          : "As mudanças de resolução, monitor ou idioma reabrem o jogo ao clicar em Jogar.");
     ImGui::End();
     if (go) play();
 }
@@ -455,7 +599,19 @@ void port_ui_init(int argc, char** argv)
     rsx_ui_set_draw(draw, nullptr);
     rsx_ui_set_visible(port_settings_get()->fps_counter);
     bool play_arg = false;
-    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--play")) play_arg = true;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--play")) play_arg = true;
+        /* --title: straight to the game's title screen (see play()). */
+        if (!strcmp(argv[i], "--title")) {
+            play_arg = true;
+            if (backup_saves()) {
+                fprintf(stderr, "[ui] the game's title screen (%s)\n", g_last_backup.c_str());
+                g_savedata_title = 1;
+            } else {
+                fprintf(stderr, "[ui] the saves could not be backed up: the game continues the newest save\n");
+            }
+        }
+    }
     const char* skip = getenv("PS3_SKIP_LAUNCHER");
     g_want_start = !play_arg && !(skip && skip[0] == '1') && !port_settings_get()->skip_launcher;
     if (g_want_start) g_go = 0;            /* port_ui_backend_ready decides */

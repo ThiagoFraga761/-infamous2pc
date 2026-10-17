@@ -962,6 +962,27 @@ another save is loaded from the pause menu (Start > Saved Data). The start
 screen and the saves page say so, because a player who saw the "new game"
 screen once reads its absence as a bug.
 
+The start screen's "Jogo" page stands in for the menu the game lacks:
+continue, load one of the saves (read from each `PARAM.SFO`), or the title
+screen (also `play.sh --title`). Both work through the game's first
+`ListAutoLoad` (`cellSaveData.c`):
+
+- **The title screen.** An empty list (`g_savedata_title`,
+  `PS3_SAVEDATA_TITLE=1`), which is what a console with no saves gives it.
+  Its `funcFixed` answers `OK_LAST` and the title screen follows.
+- **Another save.** A list holding only that directory (`g_savedata_load`,
+  `PS3_SAVEDATA_LOAD=<dir>`), and the game continues it. A name that is not
+  there falls back to the whole list rather than to a new game.
+- **Backups.** Loading `BCUS98125_INFAMOUS2_1` ("5. Karma é uma Merda"), the
+  game wrote its autosave over `_0` within two minutes, as it would after a
+  load from the pause menu. That is why both choices back the saves up first,
+  and refuse to start when the copy fails. Nothing is moved, every later call lists the saves,
+and the pause menu loads them as before. A new game's first autosave goes to
+`BCUS98125_INFAMOUS2_0`, the autosave slot, as on the console, so the
+saves are copied to `user/backups` first. Checked on a copy of a real save: the
+title screen came up, ✕ started the new game's comic and the pier cutscene,
+and the saves were byte for byte the same after 230 s.
+
 ## The window
 
 The present blit used to stretch the 16:9 frame across the whole window. Full

@@ -201,11 +201,11 @@ unsigned port_settings_pinned(void) { return s_pinned; }
 
 extern char** environ;
 
-char** port_settings_restart_env(void)
+char** port_settings_restart_env(const char* extra)
 {
     size_t n = 0;
     while (environ[n]) n++;
-    char** env = (char**)calloc(n + 2, sizeof *env);
+    char** env = (char**)calloc(n + 3, sizeof *env);
     if (!env) return nullptr;
     size_t k = 0;
     for (size_t i = 0; i < n; i++) {
@@ -218,6 +218,7 @@ char** port_settings_restart_env(void)
         if (!drop) env[k++] = (char*)e;
     }
     env[k++] = (char*)"PS3_SKIP_LAUNCHER=1";
+    if (extra) env[k++] = (char*)extra;
     env[k] = nullptr;
     return env;
 }
