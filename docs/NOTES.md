@@ -766,6 +766,76 @@ with it, and the images are the same.
 `PS3RECOMP_VK_CALLSTATS=1` prints, every 10 s, how often per frame the engine
 called each backend entry that returns a value, waits or creates something.
 
+### The heavy views (2026-10-17)
+
+`work/runs/heavy_bench.sh` (local) loads a copy of the player's newest save
+and stands where it puts us: a street past New Marais, ~9,100 draws a frame,
+~41-46 fps. There the RSX thread was the limit, with the PPU main thread
+waiting on it about half the time.
+
+Two cuts first:
+
+- **Texture decodes.** The pipeline key decoded all 16 texture units on every
+  draw (`eng_cube_mask`, `eng_tex_ops`), and so did the constants and the
+  binding. The engine now keeps each unit's decode and redoes it only when
+  `tex_wgen` moved (`eng_tex`).
+- **VS constant compare.** The Vulkan backend compared each draw's VS rows
+  with the last upload before copying them. In the heavy view 0 of 9,091 draws
+  matched, so the compare and the copy kept for the next one only added two
+  passes over the rows. Ranged binds now copy without comparing.
+
+Together: 46.4 -> 48.1 fps.
+
+### Recording on a thread of its own (`PS3RECOMP_BE_THREAD=1`)
+
+`libs/video/rsx_be_thread.c` wraps the backend interface. The engine works
+out each draw on the RSX thread as before. Its backend calls go into a 128 MB
+queue, and a worker thread (`rsx-record`) runs them into the Vulkan backend, in
+the same order and one thread at a time.
+
+- **Calls that return nothing** (binds, state, draws, clears, uploads,
+  releases, the present) are copied into the queue, with whatever they borrow
+  from the engine, and return at once.
+- **Calls that return something:**
+  - `surface_view` is answered from what earlier calls returned. A view is
+    the same object for the same surface, remap and format until something
+    is released.
+  - The snapshots refill one texture per target, so after the first one the
+    refill is queued and the known handle returned. The worker checks the
+    handle it gets back.
+  - `geo_put` runs directly; the arena is under a lock.
+  - Everything else (creates, readbacks, the native passes) waits for the
+    queue to empty and calls the backend itself.
+- **Releases.** The backend counts every release, including those it does by
+  itself (`free_gen`): a target's snapshots and views, a snapshot made again
+  at another size. When the count moves, the kept answers are dropped.
+- **VS rows.** The backend keeps a pointer to the VS rows of a ranged
+  constant bind until the draw. That record is not handed back to the
+  producer before the draw has run (`rfree` trails `r`).
+- **Deferred readbacks.** Their completions arrive on the worker and are
+  handed to the engine on its own thread, oldest first.
+- **Lost swapchain.** A swapchain lost on the worker leaves the SDL window to
+  the shutdown. The events are pumped on the RSX thread.
+
+Measured, alternating runs:
+
+| Scene | Off | On |
+|---|---|---|
+| Heavy view | 47.7 fps | 53.6 fps |
+| New Marais (SPU-bound) | 97.7 fps | 100.1 fps |
+
+The images are the same. With it on in the heavy view, the main thread,
+the RSX thread, the recording thread and the five SPU threads are each
+84-94% busy: no single thread is the limit any more.
+
+`play.sh` turns it on; `PS3RECOMP_BE_THREAD=0` goes back to one thread.
+`PS3RECOMP_BE_THREAD_STATS=1` prints, at exit, how many calls were queued
+and how many waited.
+
+The boot suite (`work/tests/run_all.sh`) runs the headless null backend
+(`port/build`), not this path; the Vulkan engine is checked with the scene
+benchmarks and their screenshots.
+
 ## The window
 
 The present blit used to stretch the 16:9 frame across the whole window. Full

@@ -50,6 +50,10 @@ export PS3_VERBOSE="${PS3_VERBOSE:-0}"
 # 16 as unknown and falls back to English, and pairs Portuguese (7) with its
 # Brazilian files. PS3_SYS_LANG=en for English (libs/system/cellSysutil.c).
 export PS3_SYS_LANG="${PS3_SYS_LANG:-pt}"
+# The backend's Vulkan calls on a thread of their own, beside the engine:
+# +12% where the draws are heaviest (docs/NOTES.md). PS3RECOMP_BE_THREAD=0
+# goes back to one thread.
+export PS3RECOMP_BE_THREAD="${PS3RECOMP_BE_THREAD:-1}"
 LOG="$HERE/runs/play-$(date +%Y%m%d-%H%M%S).log"
 echo "log: $LOG"
 # A hang leaves the thread stacks behind: when no "[rsx fps]" line has come
