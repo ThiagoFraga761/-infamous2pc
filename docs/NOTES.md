@@ -836,6 +836,31 @@ The boot suite (`work/tests/run_all.sh`) runs the headless null backend
 (`port/build`), not this path; the Vulkan engine is checked with the scene
 benchmarks and their screenshots.
 
+### The stutter when the camera turns
+
+The player saw the frame rate drop whenever the camera turned onto something
+new. `heavy_bench.sh` with `TURN=190 TURN_S=60` holds the right stick for a
+minute, and `PS3RECOMP_VK_HITCH=25` with `PS3RECOMP_VK_STATS=1
+PS3RECOMP_VK_FLUSH_CALLERS=1` showed the cause:
+
+- ~5,800 flushes a second, 450 ms a second waiting on the GPU, and 9-12 fps
+  at the end of the turn.
+- Every flush came from `vk_eng_release`. It flushed and waited before
+  destroying an object the batch or the frame in flight might still use,
+  and new ground means textures released by the hundred.
+- Shader and pipeline builds, with the caches warm, were ~10 ms a frame.
+
+Released images (with their memory and views) and framebuffers now go on
+the dead lists of the set being recorded, like buffers and resident
+geometry, and are destroyed when that set completes (`vk_defer_image`,
+`vk_defer_fb`).
+
+- Past 512 waiting images the batch is completed early, so that their memory
+  cannot run the device out.
+- A released target takes only the framebuffers that name it out of the
+  cache, not all of them.
+- During the same turn: no flushes, and 39-50 fps.
+
 ## The window
 
 The present blit used to stretch the 16:9 frame across the whole window. Full
