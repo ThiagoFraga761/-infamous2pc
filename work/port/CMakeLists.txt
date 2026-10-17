@@ -211,7 +211,9 @@ set(PORT_SPU_MARCH "x86-64-v3" CACHE STRING
 if(SPU_SOURCES)
     set_source_files_properties(${SPU_SOURCES} PROPERTIES
         INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
-        COMPILE_DEFINITIONS SPU_USE_DISPATCH_MT)
+        # SPU_WRCH_INLINE: the MFC parameter channel writes inline
+        # (spu_wrch_fast, runtime/spu/spu_helpers.h).
+        COMPILE_DEFINITIONS "SPU_USE_DISPATCH_MT;SPU_WRCH_INLINE")
     if(NOT MSVC OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         set(_spu_opts "-O2")
         if(PORT_SPU_MARCH AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")

@@ -66,8 +66,12 @@ PLUGIN_IMAGE_BASE = 240     # after the job modules' ids (checked against the ma
 JOBBIN_IMAGE_BASE = 250     # after the plugins'
 # Every image is lifted with its registers in locals between the statements that
 # hand the context to the runtime (spu_lifter.py localize_registers): the hottest
-# job plugin loop runs 1.4x faster for it.
-LIFT_ARGS = ["--local-regs"]
+# job plugin loop runs 1.4x faster for it. --merge-chunks makes each run of
+# contiguous chunks one C function, with gotos where there were trampolines: the
+# geometry job's inner loops then stay in one frame instead of spilling every
+# register to the context at each block (see docs/NOTES.md). SPU_LIFT_EXTRA adds
+# lifter arguments for an experiment.
+LIFT_ARGS = ["--local-regs", "--merge-chunks"] + os.environ.get("SPU_LIFT_EXTRA", "").split()
 JOBBIN_MAGIC = b"\x44\x01\x28\x50"
 ELF_IMAGE_BASE = 30         # clear of the policy module (2) and the overlays (200+)
 JOBMOD_IMAGE_BASE = 200     # tools/lift_jobmods.py

@@ -596,6 +596,112 @@ All of these leave the output unchanged:
 Measured: under the pier, 27-29 fps became 33-37. In New Marais, ~74 became
 ~80.
 
+### The rings that flushed every frame
+
+The engine's per-draw data lives in host-visible rings (vertices and indices,
+uniform blocks, staging). The rings are reset when a batch completes. When one
+filled up mid-batch, `vk_ring_alloc` or `vk_eng_draw` called `vk_flush`, which
+submits the batch and waits for the GPU. That wait in the middle of the frame
+also undid the frame pipelining for that frame.
+
+Each draw writes its 8.7 KB VS block into the 16 MB uniform ring when the block
+changed. `PS3RECOMP_VK_FLUSH_CALLERS=1` with `PS3RECOMP_VK_STATS=1` named the
+draw as the flusher:
+
+| Scene | Draws | Flushes | GPU wait |
+|---|---|---|---|
+| New Marais | ~3,700 | 1 per frame | ~1.2 ms |
+| Under the pier | ~10,000 | several per frame | — |
+
+A ring that runs out now doubles at its next empty start, up to 1 GB. The
+descriptor pool's per-batch set count went from 4,096 to 16,384 for the same
+reason.
+
+| Scene | Before | After |
+|---|---|---|
+| New Marais | ~79 fps | 85-88 fps |
+| Hanging under the pier | 27 fps (33-37 after round 1) | ~105-110 fps |
+
+`[vk-stats]` now shows 0.1 flushes a second.
+
+### SPU: fewer trips through the drain loop
+
+- **`--merge-chunks`.** The SPU lifter splits code at every branch target.
+  Without this option, each split became a separate C function, joined by
+  trampolines. Each hop returned to `spu_drain_call`, wrote every register
+  back to the context, looked up the next function and reloaded the
+  registers. The geometry job's inner loops (`jobmod_6d1c`, 0xD7F4 ->
+  0xD8A8 -> 0xD9E8) paid this on every block. `--merge-chunks` (an option of
+  the toolkit's `spu_lifter.py`) emits each run of contiguous chunks as one C
+  function, with gotos where the trampolines were. Every chunk is still
+  registered for indirect entry. `work/tools/lift_spu.py` now passes it, and
+  the lift is still reproducible (a relift diffs clean). Effects:
+  - in New Marais, the SPUs are busy 3.2 of 5 during the main thread's
+    waits, against 4.0 before;
+  - the pier tutorial runs at 125-134 fps, against ~122-127.
+- **What came with the merge.**
+  - Frames get bigger, up to ~7.7 KB in one job function, with recursion on
+    top. The SPURS kernel threads and the job-chain thread went from 1 MB to
+    16 MB of stack, as lv2's SPU threads have.
+  - The lifter no longer turns a branch to LS 0 into a goto inside a group: a
+    job lifted at 0 ends there, and the drain has to see it.
+  - The lifter's register localisation no longer spills around the MFC
+    parameter writes.
+  - Still open: the nops-plus-self-branch halt idiom is only recognised for a
+    whole function, not for a chunk inside a group. Today's lift has none.
+- **Inline hop check.** `spu_task_launch_check` now has an inline fast path,
+  `spu_task_launch_hop`, for when no diagnostic is on and no stack-reset
+  entry is registered.
+- **Inline MFC parameter writes.** The writes to the MFC parameter channels
+  (`MFC_LSA`, `EAH`, `EAL`, `Size`, `TagID`), which only latch a value, are
+  done inline in lifted code (`spu_wrch_fast`).
+
+### What the main thread waits for in New Marais
+
+The `PS3_TIMELINE` usleep events name the main thread's three waits:
+
+- **`0x370640`/`0x370668`:** the SPU job progress poll (`func_00504D90`). It
+  is busy with all SPUs running: throughput.
+- **`0x3710B8`/`0x3710E4`:** the same kind of wait, mixed.
+- **`0x133640` (`func_001320A8`), ~20% of the time with every SPU idle:** a
+  loop on `CellGcmControl.ref` (0x20002008). It reads `while ((s32)(ref -
+  target) < 0) usleep(5)`. The game writes one `SET_REFERENCE` per frame,
+  into a ring of four command buffer segments (IO 0x10000..0x13000), and
+  waits for the RSX to have consumed the segment it is about to reuse. That
+  wait is on the RSX thread's throughput, not the SPUs'.
+
+`GCM_REF_PACE_US` (default 200) is the minimum spacing between two fences
+the poll path publishes. 0 hangs the boot: the loading screens have
+equality waiters. In game there is only one fence a frame, so the pacing
+does not matter there.
+
+### Vertex pulling (`PS3RECOMP_ENG_VPULL=1`, experimental, off)
+
+The vertex shader can read the guest's vertex bytes itself:
+
+- `rsx_pull` decodes them in HLSL as `rsx_vertex_decode_element` does, from a
+  `ByteAddressBuffer` over the vertex ring (binding 2). The upload offset
+  comes as a push constant, and per-attribute descriptors ride after the
+  viewport transform in the VS block.
+- A triangle list from one index run with no restart in it, or one array run,
+  is drawn without a host index buffer: `rsx_index` reads the big-endian
+  index from the uploaded run.
+- Other rebuilt topologies keep the CPU's index rebuild, but upload raw
+  vertices.
+- `dc_pull_raw` / `dc_pull` / `dc_pull_ranges` in `rsx_draw_engine.c`, and
+  `vk_eng_draw_pulled` in the Vulkan backend.
+
+Status: it renders New Marais and the pier correctly. It uploads ~9 MB of raw
+bytes a frame there, against 22 MB of expanded vertices. It bypasses the
+geometry cache, though: in New Marais it is ~3% slower than the cache. It
+stays off until it wins somewhere. Known gaps before it can be the default:
+
+- The shader's divisions (SNORM16, UNORM8, CMP32) may round differently
+  from the CPU decoder's, by up to 2.5 ULP. A pass drawn pulled and another
+  drawn fetched could then disagree on depth by one ULP.
+- A pulled pipeline that fails to build drops its draws, instead of falling
+  back to the fetch.
+
 ## Saves
 
 The game loads its save icon once, at boot, through the raw `sys_fs`
