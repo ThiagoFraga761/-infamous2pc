@@ -624,6 +624,38 @@ reason.
 
 `[vk-stats]` now shows 0.1 flushes a second.
 
+### The depth snapshots that crossed the bus
+
+`PS3RECOMP_VK_GPUPROF=1` (new) puts timestamps around every render pass
+instance and every other engine operation (copies, snapshots, clears,
+uploads, native passes). It prints GPU time per pass size and per operation,
+by caller offset, every 300 batches. Both ends of a span are bottom-of-pipe
+stamps, so the spans do not count each other.
+
+At 2x in New Marais the GPU was 90% busy (`gpu_busy_percent`) for ~70 fps.
+Per frame:
+
+| Work | GPU time |
+|---|---|
+| All draws | 2.9 ms |
+| Six `vk_eng_depth_snapshot` calls | 6.6 ms (~1.1 ms each) |
+| Their RGBA8 conversions | 1.8 ms |
+
+A depth image cannot be copied straight into a colour one, so the snapshot
+bounces through a buffer. That buffer was host-visible and made on every
+call: the bytes crossed the bus twice, and each call allocated memory. The
+stencil snapshot did the same. Both now use one device-local scratch buffer,
+grown as needed. Each use starts with a transfer barrier against the
+previous one.
+
+New Marais now runs at the same rate at every scale:
+
+| Scale | Before | After |
+|---|---|---|
+| 1x | 86 fps | ~93.5 fps |
+| 2x | 70 fps | ~93 fps |
+| 3x (native 4K) | — | ~93 fps |
+
 ### SPU: fewer trips through the drain loop
 
 - **`--merge-chunks`.** The SPU lifter splits code at every branch target.
@@ -788,6 +820,8 @@ and the audio chain froze the game with it.
 | `PS3RECOMP_ENG_STALE=1` | skip a colour target whose guest bytes were written after it was drawn (2 also logs); off by default, page-granular and racy with deferred writebacks |
 | `PS3RECOMP_ENG_TEXMEMO=0` | bind every texture unit afresh (no per-frame memo) |
 | `PS3RECOMP_FIFO_LEGACY=1` | feed every FIFO method to the vtable path's `rsx_state` too |
+| `PS3RECOMP_VK_GPUPROF=1` | GPU time per render pass (by size) and per other operation (by caller offset from `vk_gp_op_begin`; resolve with `nm`), every 300 batches |
+| `PS3RECOMP_VK_FLUSH_CALLERS=1` | with `PS3RECOMP_VK_STATS=1`: which call sites flush and wait for the GPU |
 | `PS3_TIMELINE=<frame>,<n>` | events over n engine frames: RSX waits, SPU labels, each SPU's job every 250 us, the SPURS idle mask, every `usleep` (thread, caller) |
 
 ## Lessons
