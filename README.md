@@ -1,4 +1,16 @@
-<h1 align="center">inFAMOUS 2 — port nativo para PC</h1>
+<p align="center"><img src="docs/screenshots/banner.jpg" alt="inFAMOUS 2 — port nativo para PC" width="100%"></p>
+
+<h1 align="center">inFAMOUS 2 — port nativo para PC (Linux, Vulkan)</h1>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/status-jog%C3%A1vel%2C%20em%20desenvolvimento-orange" alt="Status: jogável, em desenvolvimento">
+  <img src="https://img.shields.io/badge/plataforma-Linux%20x86--64-1793D1?logo=linux&logoColor=white" alt="Linux x86-64">
+  <img src="https://img.shields.io/badge/GPU-Vulkan-AC162C?logo=vulkan&logoColor=white" alt="Vulkan">
+  <img src="https://img.shields.io/badge/PS3-BCUS98125-003791?logo=playstation&logoColor=white" alt="PS3 BCUS98125">
+  <img src="https://img.shields.io/badge/at%C3%A9-4K-6f42c1" alt="Até 4K">
+  <img src="https://img.shields.io/badge/dublagem-PT--BR-009c3b" alt="Dublagem PT-BR">
+  <img src="https://img.shields.io/badge/c%C3%B3digo-MIT-blue" alt="Código MIT">
+</p>
 
 <p align="center">
   <a href="#english"><b>English below</b></a> ·
@@ -95,6 +107,15 @@ Ryzen 7 9800X3D + Radeon RX 9070 XT, resolução nativa (1280×720):
 Em 4K (`PS3RECOMP_RES_SCALE=3`) o pântano de New Marais roda no mesmo fps que
 em 720p: quem limita é a CPU, não a GPU. Os detalhes de onde vai o tempo de
 cada frame estão em [docs/NOTES.md](docs/NOTES.md).
+
+### PS3 × este port
+
+| | PS3 | Este port |
+|---|---|---|
+| Resolução | 1280×720 | 1280×720, 2560×1440 ou 3840×2160 |
+| Taxa de quadros | alvo de 30 fps | 54–130 fps (sem trava) |
+| Monitor ultrawide | — | imagem 16:9 com barras, sem esticar |
+| Execução | Cell (PPU + SPUs) e RSX | código traduzido para x86-64, GPU em Vulkan |
 
 ## Arquivos do jogo necessários
 
@@ -344,6 +365,13 @@ Ryzen 7 9800X3D + Radeon RX 9070 XT, native 1280×720:
 
 At 4K (`PS3RECOMP_RES_SCALE=3`), the New Marais swamp runs at the same frame
 rate as at 720p: the CPU is the limit, not the GPU.
+
+| | PS3 | This port |
+|---|---|---|
+| Resolution | 1280×720 | 1280×720, 2560×1440 or 3840×2160 |
+| Frame rate | 30 fps target | 54–130 fps (uncapped) |
+| Ultrawide monitor | — | 16:9 picture with bars, not stretched |
+| Runs on | Cell (PPU + SPUs) and RSX | code translated to x86-64, GPU on Vulkan |
 
 ## Required game files
 
