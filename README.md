@@ -47,10 +47,14 @@ As de Empire City foram renderizadas em 2× (2560×1440) e reduzidas.</sub>
 
 ## Novidades
 
-- **Tela de opções e menu no jogo:**
-  - Ao abrir, o jogo mostra a tela de opções, com Vídeo, Idioma, Desempenho e
-    Controle e saves; depois é só clicar em **Jogar**.
-  - No meio do jogo, **F1** (ou **Select+Start** segurados) abre o mesmo menu.
+- **Menu principal:** Continuar, Novo jogo, Carregar jogo, Opções e Sair, sobre
+  a arte do disco. O inFAMOUS 2 não tem menu próprio (com save ele entra direto
+  no autosave); o do port faz esse papel e copia os saves para `user/backups`
+  antes de um jogo novo ou de carregar outro save.
+- **Opções e menu no jogo:**
+  - Vídeo, Idioma, Desempenho e Controle e saves, gravados em
+    `user/settings.ini`.
+  - No meio do jogo, **F1** (ou **Select+Start** segurados) abre as opções.
   - Funciona com mouse, teclado e controle.
   - Dublagem e legenda podem ser de idiomas diferentes.
 - **SPUs mais rápidos:**
@@ -347,6 +351,16 @@ no emulator:
 
 ## What's new
 
+- **Main menu:** Continue, New game, Load game, Options and Quit, over the
+  disc's art. inFAMOUS 2 has no menu of its own (with a save it goes straight
+  into the autosave); the port's stands in, and copies the saves to
+  `user/backups` before a new game or loading another save.
+- **Options and in-game menu:** Video, Language, Performance, Controller and
+  saves, written to `user/settings.ini`; **F1** (or **Select+Start** held)
+  opens them in game. Voices and subtitles can be different languages.
+- **Faster SPUs:** extended-range floats stay in the vector, no fence before
+  each DMA, no debug checks in the lifted code. Heaviest streets: 54.9 ->
+  56.9 fps.
 - **Stutter when turning the camera: fixed.**
   - Every texture the game let go made the port stop and wait for the whole
     GPU. Turning onto new ground that was ~5,800 waits a second, half the

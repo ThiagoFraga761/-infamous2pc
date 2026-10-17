@@ -16,6 +16,8 @@ A meta é **120+ fps em 4K com FSR**, em qualquer área do jogo.
 - Água, partículas e profundidade de fragmento corretas.
 - Dublagem e textos em português (PT-BR).
 - Tela cheia com a proporção certa (F11 / Alt+Enter).
+- Menu principal (Continuar, Novo jogo, Carregar jogo, Opções, Sair) e opções
+  no jogo (F1).
 - Desempenho:
   - frame em voo na GPU;
   - menos custo por draw;
@@ -58,6 +60,8 @@ The goal is **120+ fps at 4K with FSR**, everywhere in the game.
 - Water, particles and fragment depth correct.
 - Brazilian Portuguese dub.
 - Full screen with the right aspect.
+- Main menu (Continue, New game, Load game, Options, Quit) and in-game
+  options (F1).
 - Performance work:
   - a frame in flight;
   - cheaper draws;
