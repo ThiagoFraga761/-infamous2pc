@@ -38,6 +38,7 @@ extern "C" int rsx_vulkan_backend_fullscreen(void);
 extern "C" unsigned ppu_boot_frames_presented(void);
 extern "C" volatile int g_savedata_title;   /* libs/system/cellSaveData.c */
 extern "C" char g_savedata_load[32];        /* ...and the save to continue */
+extern "C" void port_log_drain(void);       /* main.cpp: the log reaches its file */
 
 namespace {
 
@@ -610,7 +611,7 @@ void draw_start()
         if (!g_saves.empty() && menu_item("##load", "CARREGAR JOGO", nullptr)) go_page(MENU_LOAD);
         if (menu_item("##options", "OPÇÕES", nullptr)) go_page(MENU_OPTIONS);
         if (menu_item("##quit", "SAIR", nullptr)) {
-            fflush(stdout); fflush(stderr);
+            port_log_drain();
             _Exit(0);
         }
         break; }

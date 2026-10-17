@@ -50,9 +50,14 @@
 
 #ifndef _WIN32
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
+#include <string>
+#include <spawn.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
+extern char** environ;
 #endif
 
 #ifdef _WIN32
@@ -203,6 +208,7 @@ extern "C" unsigned ppu_boot_frames_presented(void)
 }
 
 #ifndef _WIN32
+extern "C" void port_log_drain(void);   /* below, with the log pump */
 /* PS3_STALL_MS=<ms>, with PS3_STALL_DIR=<dir>: once the game has drawn frames,
  * a gap of that long with none sends every thread's stack (eu-stack) to
  * <dir>/stall-<n>.stacks, once per gap and at most 8 a run. The play.sh
@@ -226,12 +232,40 @@ static void* stall_watch(void*)
         if (f < 100 || !armed || now - since < (unsigned long long)ms * 1000ull) continue;
         armed = 0;
         if (n >= 8) continue;
-        char path[1024], cmd[1200];
-        snprintf(path, sizeof path, "%s/stall-%d.stacks", dir, ++n);
-        snprintf(cmd, sizeof cmd, "eu-stack -p %d -n 32 > '%s' 2>&1", (int)getpid(), path);
-        fprintf(stderr, "[stall] no frame for %ld ms: every thread's stack into %s\n", ms, path);
+        /* PS3_STALL_PERF=<perf binary>: 2 s of samples of every thread instead
+         * (perf record), which barely touches the process. eu-stack stops every
+         * thread while it unwinds -- seconds on this binary -- and so made the
+         * stall it was looking at longer. */
+        /* posix_spawn, not system(): system() forks, and a fork of this
+         * process -- tens of gigabytes mapped -- copies its page tables and
+         * turns every later write into a copy-on-write fault until the child
+         * execs. That alone stalled the game for seconds, longer than the
+         * stall being looked at. posix_spawn shares the address space. */
+        char path[1024], pid[16];
+        const char* perf = getenv("PS3_STALL_PERF");
+        snprintf(pid, sizeof pid, "%d", (int)getpid());
+        posix_spawn_file_actions_t fa;
+        posix_spawn_file_actions_init(&fa);
+        pid_t child = -1;
+        int rc;
+        if (perf && *perf) {
+            snprintf(path, sizeof path, "%s/stall-%d.perf.data", dir, ++n);
+            posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0);
+            posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
+            char* const av[] = { (char*)perf, (char*)"record", (char*)"-q", (char*)"-F", (char*)"999",
+                                 (char*)"-p", pid, (char*)"-o", path, (char*)"--", (char*)"sleep", (char*)"2", NULL };
+            rc = posix_spawn(&child, perf, &fa, NULL, av, environ);
+        } else {
+            snprintf(path, sizeof path, "%s/stall-%d.stacks", dir, ++n);
+            posix_spawn_file_actions_addopen(&fa, 1, path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            posix_spawn_file_actions_adddup2(&fa, 1, 2);
+            char* const av[] = { (char*)"eu-stack", (char*)"-p", pid, (char*)"-n", (char*)"40", NULL };
+            rc = posix_spawnp(&child, "eu-stack", &fa, NULL, av, environ);
+        }
+        posix_spawn_file_actions_destroy(&fa);
+        fprintf(stderr, "[stall] no frame for %ld ms: %s%s\n", ms, path, rc ? " (could not start)" : "");
         fflush(stderr);
-        if (system(cmd) != 0) fprintf(stderr, "[stall] eu-stack failed\n");
+        if (!rc) waitpid(child, NULL, 0);
     }
     return NULL;
 }
@@ -346,6 +380,9 @@ static DWORD WINAPI frame_clock(LPVOID)
                  * and atexit handlers would race them. */
                 fprintf(stderr, "[rsx] window closed -- exiting\n");
                 fflush(stderr);
+#ifndef _WIN32
+                port_log_drain();
+#endif
                 _Exit(0);
             }
             /* Present a flip the drain just reached, now: the drain stops at
@@ -455,8 +492,110 @@ static void harness_guest_caller(uint32_t opd, uint64_t a0, uint64_t a1,
 
 extern "C" void port_native_passes_init(void);
 
+#ifndef _WIN32
+/* The log off the game's threads. stdout and stderr become a pipe that one
+ * thread empties into memory and another writes out, so a log write never
+ * waits on the disk. It did: with the log on a nearly full btrfs (or behind
+ * play.sh's tee), a 10-second fps line sat in write() for 10-16 s inside
+ * eng_present, on the thread that presents every frame -- a freeze that
+ * undid itself. PS3_LOG_DIRECT=1 writes straight through as before. */
+struct log_pump {
+    int in = -1, out = -1;
+    pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    pthread_cond_t  cond = PTHREAD_COND_INITIALIZER;
+    std::string buf;                  /* read, not yet written */
+    size_t dropped = 0;
+    int writing = 0;                  /* a chunk is out of buf, still being written */
+};
+static log_pump s_logs[2];            /* stdout, stderr */
+static void* log_reader(void* arg)
+{
+    log_pump* L = (log_pump*)arg;
+    pthread_setname_np(pthread_self(), "log-read");
+    char b[65536];
+    for (;;) {
+        const ssize_t n = read(L->in, b, sizeof b);
+        if (n <= 0) { if (n < 0 && errno == EINTR) continue; break; }
+        pthread_mutex_lock(&L->lock);
+        if (L->buf.size() < (64u << 20)) L->buf.append(b, (size_t)n);
+        else L->dropped += (size_t)n;    /* the output stopped for good: lose lines, not frames */
+        pthread_cond_broadcast(&L->cond);
+        pthread_mutex_unlock(&L->lock);
+    }
+    return NULL;
+}
+static void* log_writer(void* arg)
+{
+    log_pump* L = (log_pump*)arg;
+    pthread_setname_np(pthread_self(), "log-write");
+    std::string out;
+    for (;;) {
+        pthread_mutex_lock(&L->lock);
+        while (L->buf.empty()) pthread_cond_wait(&L->cond, &L->lock);
+        out.swap(L->buf);
+        const size_t dropped = L->dropped; L->dropped = 0;
+        L->writing = 1;
+        pthread_mutex_unlock(&L->lock);
+        if (dropped) {
+            char m[96];
+            const int k = snprintf(m, sizeof m, "\n[log] %zu bytes of log lost: the output did not keep up\n", dropped);
+            out.append(m, (size_t)k);
+        }
+        for (size_t off = 0; off < out.size();) {
+            const ssize_t w = write(L->out, out.data() + off, out.size() - off);
+            if (w < 0) { if (errno == EINTR) continue; break; }
+            off += (size_t)w;
+        }
+        out.clear();
+        pthread_mutex_lock(&L->lock);
+        L->writing = 0;
+        pthread_cond_broadcast(&L->cond);
+        pthread_mutex_unlock(&L->lock);
+    }
+    return NULL;
+}
+/* Before the process ends: what was logged reaches the file, for up to a
+ * second (the last lines are the ones a crash report needs). */
+extern "C" void port_log_drain(void)
+{
+    fflush(stdout); fflush(stderr);
+    usleep(20000);                    /* the reader picks up what is in the pipe */
+    for (log_pump& L : s_logs) {
+        if (L.in < 0) continue;
+        struct timespec until; clock_gettime(CLOCK_REALTIME, &until); until.tv_sec += 1;
+        pthread_mutex_lock(&L.lock);
+        while ((!L.buf.empty() || L.writing) &&
+               pthread_cond_timedwait(&L.cond, &L.lock, &until) == 0) {}
+        pthread_mutex_unlock(&L.lock);
+    }
+}
+static void log_pump_start(void)
+{
+    const char* e = getenv("PS3_LOG_DIRECT");
+    if (e && e[0] == '1') return;
+    fflush(stdout); fflush(stderr);
+    for (int i = 0; i < 2; i++) {
+        const int fd = i ? STDERR_FILENO : STDOUT_FILENO;
+        int fds[2];
+        if (pipe(fds) != 0) return;
+        fcntl(fds[1], F_SETPIPE_SZ, 1 << 20);
+        s_logs[i].out = dup(fd);
+        s_logs[i].in = fds[0];
+        dup2(fds[1], fd);
+        close(fds[1]);
+        pthread_t a, b;
+        if (pthread_create(&a, NULL, log_reader, &s_logs[i]) == 0) pthread_detach(a);
+        if (pthread_create(&b, NULL, log_writer, &s_logs[i]) == 0) pthread_detach(b);
+    }
+    atexit(port_log_drain);
+}
+#endif
+
 int main(int argc, char** argv)
 {
+#ifndef _WIN32
+    log_pump_start();
+#endif
     if (argc < 2) {
         printf("usage: %s <PPU ELF>\n", argv[0]);
         return 2;

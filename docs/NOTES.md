@@ -913,6 +913,25 @@ walking, running into new ground, jumping, fighting.
   `PS3_STALL_DIR` (`main.cpp`) make the game write every thread's stack
   itself after that long without a frame. play.sh sets 2.5 s, into
   `<log>-stalls/`; the soak sets 1.5 s.
+- **The stalls were the log.** With every thread's stack taken during one
+  (`PS3_STALL_MS`), the RSX frame thread sat in `write()`, inside the
+  `fprintf` of the 10-second fps line in `eng_present`, for 10-16 s. The log
+  file is on a btrfs that is 90% full, or behind play.sh's `tee`, and when the
+  disk held a write the thread that presents every frame held with it.
+  - stdout and stderr are now pipes (`log_pump_start`, `main.cpp`). One thread
+    reads each into memory (up to 64 MB, then lines are dropped and counted)
+    and another writes it out, so no game thread waits on the disk.
+  - `port_log_drain` flushes it before `_Exit` and at exit.
+  - `PS3_LOG_DIRECT=1` writes straight through.
+  - Before: three 25-minute soaks with stalls of 1.5, 5.8, 11.8 and 16.7 s.
+    After: none over 300 ms in 25 minutes.
+- **Sampling a stall without causing one.**
+  - The samplers start with `posix_spawn`. `system()` forks, and forking a
+    process with tens of gigabytes mapped copies its page tables and turns
+    every later write into a copy-on-write fault: the sampler alone stalled
+    the game for seconds.
+  - `PS3_STALL_PERF=<perf>` samples CPU instead of taking stacks. A stall with
+    every thread asleep shows up as almost no samples.
 - **A new pipeline no longer drains the recording queue.**
   - `t_pipeline_create` used to wait for the worker to run everything
     queued, then build. The Vulkan backend's `pipeline_create` only
