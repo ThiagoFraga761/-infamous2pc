@@ -734,6 +734,46 @@ stays off until it wins somewhere. Known gaps before it can be the default:
 - A pulled pipeline that fails to build drops its draws, instead of falling
   back to the fetch.
 
+### Geometry that stays on the GPU (2026-10-17)
+
+A geometry cache hit used to hand the backend the cached vertices and
+indices, and the backend copied both into its vertex ring on every draw. In
+New Marais that was about 100,000 hits and 22 MB a frame, the biggest
+`memmove` on the RSX thread.
+
+- **Resident copies.** A kept entry now also goes to the backend once
+  (`geo_put`), and a hit draws from that copy (`draw_geo`).
+  - The Vulkan backend keeps the copies in one 512 MB buffer
+    (`PS3RECOMP_VK_GEO_MB`), carved first fit from a free list.
+  - The buffer is in the VRAM window, which the CPU writes once and the GPU
+    reads every frame. The rings, by contrast, sit in system memory: the
+    spec's ordering puts HOST_VISIBLE | HOST_COHERENT ahead of the VRAM
+    window's type.
+  - A dropped copy goes on the dead list of the set being recorded and comes
+    back when that set completes.
+  - An entry kept while the buffer was full tries again on its hits, a few a
+    frame.
+  - `PS3RECOMP_GEO_RESIDENT=0` turns it off.
+- **Texture units that did not change.** The dispatcher counts, per texture
+  unit, the writes that change one of its registers (`tex_wgen`). A unit with
+  the same count as when the binding memo was taken reuses the memo without
+  decoding its registers or comparing them, and a unit last seen disabled is
+  skipped. Before, all 16 units were decoded on every draw.
+
+New Marais, two alternating runs each: 89.9 fps without the change, 95.0
+with it, and the images are the same.
+
+`PS3RECOMP_VK_CALLSTATS=1` prints, every 10 s, how often per frame the engine
+called each backend entry that returns a value, waits or creates something.
+
+## The window
+
+The present blit used to stretch the 16:9 frame across the whole window. Full
+screen on the 3440x1440 monitor was 21:9 and came out distorted. The frame
+now keeps its shape, centred, with black bars (`PS3RECOMP_VK_STRETCH=1`
+stretches as before). F11 or Alt+Enter switches full screen; the swapchain
+follows the new size through its out-of-date path.
+
 ## Saves
 
 The game loads its save icon once, at boot, through the raw `sys_fs`
