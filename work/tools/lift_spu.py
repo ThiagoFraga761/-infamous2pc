@@ -72,6 +72,10 @@ JOBBIN_IMAGE_BASE = 250     # after the plugins'
 # register to the context at each block (see docs/NOTES.md). SPU_LIFT_EXTRA adds
 # lifter arguments for an experiment.
 LIFT_ARGS = ["--local-regs", "--merge-chunks", "--const-bi"] + os.environ.get("SPU_LIFT_EXTRA", "").split()
+# Lifted functions a native replacement may take over (port/ec5f_native.c): the
+# entry calls spu_native_entry, and returns as `bi $r0` does when it reports the
+# work done. Keyed by the lifted image's directory name.
+NATIVE_ENTRIES = {"jobmod_ec5f11015784_e14F90": [0x12C50]}
 JOBBIN_MAGIC = b"\x44\x01\x28\x50"
 ELF_IMAGE_BASE = 30         # clear of the policy module (2) and the overlays (200+)
 JOBMOD_IMAGE_BASE = 200     # tools/lift_jobmods.py
@@ -162,6 +166,23 @@ def debase(path):
     t2 = t.replace('"../../runtime/spu/', '"')
     if t2 != t:
         p.write_text(t2, encoding="utf-8", newline="\n")
+
+
+def add_native_entries(spu):
+    for name, addrs in NATIVE_ENTRIES.items():
+        p = Path(spu, name, "spu_recomp.c")
+        if not p.exists():
+            continue
+        src = p.read_text(encoding="utf-8")
+        for a in addrs:
+            head = f"void {name}_spu_func_{a:08X}(spu_context* ctx) {{\n"
+            hook = (f"    {{ extern int spu_native_entry(spu_context*, uint32_t); "
+                    f"if (spu_native_entry(ctx, 0x{a:X}u)) SPU_RET(ctx); }}\n")
+            if head not in src:
+                sys.exit(f"{name}: no function at 0x{a:X} for its native entry")
+            if head + hook not in src:
+                src = src.replace(head, head + hook, 1)
+        p.write_text(src, encoding="utf-8", newline="\n")
 
 
 def run(cmd, fatal=True):
@@ -372,6 +393,7 @@ __attribute__((constructor)) static void port_spu_register_all_ctor(void)
          "--out", os.path.join(spu, "spu_elf_workloads.c"), "--register-fn", "port_spu_elf_register_all",
          "--constructor", "--title", "inFAMOUS 2", "--first-image-id", str(ELF_IMAGE_BASE),
          "--eboot", args.eboot, "--relift"] + [f"--lift-arg={a}" for a in LIFT_ARGS])
+    add_native_entries(spu)
 
 
 if __name__ == "__main__":

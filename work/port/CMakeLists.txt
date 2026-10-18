@@ -149,7 +149,10 @@ if(PORT_ENABLE_SPU)
         # header's float fix-ups, so it is built with the same -march.
         list(APPEND SPU_SOURCES ${SPU_LIFTED}
              "${PS3RECOMP_DIR}/runtime/spu/spu_dispatch_mt.c"
-             "${PS3RECOMP_DIR}/runtime/spu/spu_cold.c")
+             "${PS3RECOMP_DIR}/runtime/spu/spu_cold.c"
+             # ec5f_native.c: the render-list job's main, natively. It runs on
+             # the SPU's float helpers, so it is built like a lifted TU.
+             "${CMAKE_CURRENT_SOURCE_DIR}/ec5f_native.c")
         # Generated beside the lift; each is present only once its generator
         # has been run, so each is included only if it is actually here.
         foreach(gen IN ITEMS spu_workloads.c spu_elf_workloads.c jobmods_register.c taskset_policy_bytes.c)
