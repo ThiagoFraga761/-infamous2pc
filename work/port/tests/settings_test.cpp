@@ -92,6 +92,21 @@ int main()
         remove(p3.c_str());
     }
 
+    /* mod list: toggled in order, read back, exported only when on disk */
+    {
+        port_settings a; port_settings_defaults(&a);
+        port_mod_set(&a, "alpha", 1); port_mod_set(&a, "beta", 1); port_mod_set(&a, "alpha", 0);
+        port_mod_set(&a, "alpha", 1);
+        CHECK(!strcmp(a.mods_on, "beta,alpha"));
+        CHECK(port_mod_enabled(&a, "alpha") && port_mod_enabled(&a, "beta") && !port_mod_enabled(&a, "alp"));
+        const std::string p4 = std::string(dir) + "/modlist.ini";
+        CHECK(port_settings_save(&a, p4.c_str()) == 0);
+        port_settings b;
+        CHECK(port_settings_load(&b, p4.c_str()) == 1);
+        CHECK(!strcmp(b.mods_on, "beta,alpha"));
+        remove(p4.c_str());
+    }
+
     /* voices: text-only languages are refused */
     f = fopen(path.c_str(), "w");
     fputs("\xEF\xBB\xBF[language]\nvoice = korean\ntext = korean\n", f);   /* with a BOM */

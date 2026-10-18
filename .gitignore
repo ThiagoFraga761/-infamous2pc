@@ -55,3 +55,6 @@
 !/work/patches/ps3recomp.patch
 
 __pycache__/
+
+# player mods (docs/MODS.md)
+/mods/

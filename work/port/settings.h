@@ -29,6 +29,7 @@ typedef struct port_settings {
     /* [mods]: changes to how the game looks, beyond what the PS3 drew */
     int fullres_particles;  /* PS3RECOMP_FULLRES_PARTICLES */
     int aniso;              /* PS3RECOMP_ANISO: 0 (the game's own), 2, 4, 8, 16 */
+    char mods_on[512];      /* the enabled mod folders, comma-separated, in load order */
 } port_settings;
 
 /* The defaults: today's play.sh -- 720p, a window, mailbox, black bars,
@@ -69,6 +70,22 @@ void port_settings_export(const port_settings* s);
  * Built aside rather than by unsetting: other threads read the environment,
  * and a failed exec keeps it whole. NULL-terminated, from malloc. */
 char** port_settings_restart_env(const char* extra);
+
+/* Player mods: the folders under mods/ (or $PS3_MODS_DIR), each with an
+ * optional mod.ini (name, author, version, description) and files/ mirroring
+ * the game's USRDIR. */
+typedef struct port_mod {
+    char dir[128];          /* folder name */
+    char name[96];
+    char author[64];
+    char version[24];
+    char description[256];
+} port_mod;
+/* Up to `cap`, sorted by folder name. Returns the count. */
+int port_mods_scan(port_mod* out, int cap);
+const char* port_mods_dir(void);
+int port_mod_enabled(const port_settings* s, const char* dir);
+void port_mod_set(port_settings* s, const char* dir, int on);
 
 /* user/settings.ini, or $PS3_USER_DIR/settings.ini. */
 const char* port_settings_path(void);

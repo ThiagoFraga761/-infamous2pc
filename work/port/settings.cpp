@@ -7,6 +7,8 @@
 #include <cstring>
 #include <string>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <algorithm>
 #ifdef _WIN32
 #include <direct.h>
 #include <windows.h>
@@ -111,6 +113,7 @@ int port_settings_load(port_settings* s, const char* path)
         } else if (section == "mods") {
             if (k == "fullres_particles") set_int(&s->fullres_particles, v, 0, 1);
             else if (k == "aniso") set_int(&s->aniso, v, 0, 16);
+            else if (k == "enabled") snprintf(s->mods_on, sizeof s->mods_on, "%s", v.c_str());
         }
     }
     fclose(f);
@@ -168,10 +171,11 @@ int port_settings_save(const port_settings* in, const char* path)
             "skip = %d\n"
             "\n[mods]\n"
             "fullres_particles = %d ; fire, sparks, smoke at the picture's resolution\n"
-            "aniso = %d             ; 0 = the game's own, 2..16\n",
+            "aniso = %d             ; 0 = the game's own, 2..16\n"
+            "enabled = %s ; mod folders under mods/, in load order (later wins)\n",
             s->scale, s->fullscreen, s->vsync, s->stretch, s->display,
             s->voice, s->text, s->fps_limit, s->fps_counter, s->record_thread,
-            s->skip_launcher, s->fullres_particles, s->aniso);
+            s->skip_launcher, s->fullres_particles, s->aniso, s->mods_on);
     const int ok = fclose(f) == 0;
 #ifdef _WIN32
     /* The CRT's rename() refuses an existing target. */
@@ -280,6 +284,97 @@ void port_settings_export(const port_settings* s)
     snprintf(b, sizeof b, "%d", s->aniso);         put("PS3RECOMP_ANISO", b);
     put("PS3RECOMP_FULLRES_PARTICLES", s->fullres_particles ? "1" : "0");
     if (s->skip_launcher) put("PS3_SKIP_LAUNCHER", "1");
+    /* The enabled mods that are there, as the paths the filesystem overlays
+     * (runtime/ppu/ppu_fs.cpp, mod_overlay). */
+    std::string mods;
+    const std::string list = s->mods_on;
+    for (size_t p = 0; p < list.size();) {
+        size_t q = list.find(',', p);
+        if (q == std::string::npos) q = list.size();
+        const std::string d = trim(list.substr(p, q - p));
+        p = q + 1;
+        if (d.empty() || d.find('/') != std::string::npos || d.find('\\') != std::string::npos || d[0] == '.') continue;
+        const std::string full = std::string(port_mods_dir()) + "/" + d;
+        struct stat st;
+        if (stat((full + "/files").c_str(), &st) != 0) continue;
+        if (!mods.empty()) mods += "|";
+        mods += full;
+    }
+    if (!mods.empty()) {
+        static std::string keep;
+        keep = mods;
+        put("PS3_MODS", keep.c_str());
+    }
+}
+
+const char* port_mods_dir(void)
+{
+    static std::string p;
+    if (p.empty()) {
+        const char* d = getenv("PS3_MODS_DIR");
+        p = d && *d ? d : "mods";
+    }
+    return p.c_str();
+}
+
+int port_mods_scan(port_mod* out, int cap)
+{
+    int n = 0;
+    DIR* d = opendir(port_mods_dir());
+    if (!d) return 0;
+    while (struct dirent* e = readdir(d)) {
+        if (e->d_name[0] == '.' || n >= cap) continue;
+        const std::string base = std::string(port_mods_dir()) + "/" + e->d_name;
+        struct stat st;
+        if (stat(base.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        port_mod* m = &out[n++];
+        memset(m, 0, sizeof *m);
+        snprintf(m->dir, sizeof m->dir, "%s", e->d_name);
+        snprintf(m->name, sizeof m->name, "%s", e->d_name);
+        if (FILE* f = fopen((base + "/mod.ini").c_str(), "r")) {
+            char line[512];
+            while (fgets(line, sizeof line, f)) {
+                std::string l = line;
+                const size_t eq = l.find('=');
+                if (eq == std::string::npos) continue;
+                const std::string k = trim(l.substr(0, eq)), v = trim(l.substr(eq + 1));
+                if (k == "name" && !v.empty()) snprintf(m->name, sizeof m->name, "%s", v.c_str());
+                else if (k == "author") snprintf(m->author, sizeof m->author, "%s", v.c_str());
+                else if (k == "version") snprintf(m->version, sizeof m->version, "%s", v.c_str());
+                else if (k == "description") snprintf(m->description, sizeof m->description, "%s", v.c_str());
+            }
+            fclose(f);
+        }
+    }
+    closedir(d);
+    std::sort(out, out + n, [](const port_mod& a, const port_mod& b) { return strcmp(a.dir, b.dir) < 0; });
+    return n;
+}
+
+int port_mod_enabled(const port_settings* s, const char* dir)
+{
+    const std::string list = std::string(",") + s->mods_on + ",";
+    std::string needle = std::string(",") + dir + ",";
+    std::string norm;
+    for (char c : list) if (c != ' ') norm += c;
+    return norm.find(needle) != std::string::npos;
+}
+
+void port_mod_set(port_settings* s, const char* dir, int on)
+{
+    std::string out;
+    const std::string list = s->mods_on;
+    for (size_t p = 0; p < list.size();) {
+        size_t q = list.find(',', p);
+        if (q == std::string::npos) q = list.size();
+        const std::string d = trim(list.substr(p, q - p));
+        p = q + 1;
+        if (d.empty() || d == dir) continue;
+        if (!out.empty()) out += ",";
+        out += d;
+    }
+    if (on) { if (!out.empty()) out += ","; out += dir; }
+    snprintf(s->mods_on, sizeof s->mods_on, "%s", out.c_str());
 }
 
 const char* port_settings_path(void)

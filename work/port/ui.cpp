@@ -353,7 +353,31 @@ void page_mods(port_settings& s)
     if (ImGui::Combo("Filtro anisotrópico", &ai, k_aniso_names, 5)) { s.aniso = k_aniso[ai]; save(); }
     pin_end(PORT_PIN_ANISO);
     hint("Chão e paredes nítidos à distância e em ângulo. O PS3 quase não usava.");
-    hint("As opções desta aba valem a partir da próxima vez que o jogo abrir.");
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Mods instalados");
+    static port_mod mods[64];
+    static int nmods = -1;
+    if (nmods < 0 || ImGui::Button("Procurar de novo")) nmods = port_mods_scan(mods, 64);
+    if (!nmods) {
+        hint("Nenhum mod na pasta mods/. Cada mod é uma pasta com files/ espelhando o USRDIR do "
+             "jogo e, se quiser, um mod.ini (name, author, version, description). "
+             "Detalhes em docs/MODS.md.");
+    }
+    for (int i = 0; i < nmods; i++) {
+        bool on = port_mod_enabled(&s, mods[i].dir);
+        char label[200];
+        snprintf(label, sizeof label, "%s%s%s##%s", mods[i].name, mods[i].version[0] ? "  v" : "",
+                 mods[i].version, mods[i].dir);
+        if (ImGui::Checkbox(label, &on)) { port_mod_set(&s, mods[i].dir, on); save(); }
+        if (mods[i].description[0] || mods[i].author[0]) {
+            char d[400];
+            snprintf(d, sizeof d, "%s%s%s", mods[i].description, mods[i].author[0] ? "  -- " : "", mods[i].author);
+            hint(d);
+        }
+    }
+    hint("Os mods ligados por último têm prioridade quando dois trocam o mesmo arquivo. "
+         "As opções desta aba valem a partir da próxima vez que o jogo abrir.");
 }
 
 void page_controller(port_settings& s)
