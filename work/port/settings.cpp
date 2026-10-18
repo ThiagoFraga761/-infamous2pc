@@ -7,6 +7,10 @@
 #include <cstring>
 #include <string>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>
+#include <windows.h>
+#endif
 
 static const char* const k_langs[] = {
     "brazilian", "english", "latino", "spanish", "french", "german", "italian",
@@ -123,10 +127,14 @@ int port_settings_save(const port_settings* in, const char* path)
     if (s_pinned & PORT_PIN_FPS_LIMIT)     out.fps_limit = s_file.fps_limit;
     if (s_pinned & PORT_PIN_RECORD_THREAD) out.record_thread = s_file.record_thread;
     std::string dir = path;
-    const size_t slash = dir.find_last_of('/');
+    const size_t slash = dir.find_last_of("/\\");
     if (slash != std::string::npos) {
         dir.resize(slash);
+#ifdef _WIN32
+        if (!dir.empty()) _mkdir(dir.c_str());
+#else
         if (!dir.empty()) mkdir(dir.c_str(), 0755);
+#endif
     }
     /* Written beside and renamed into place: a crash mid-write leaves the
      * old file, not half of a new one. */
@@ -155,7 +163,12 @@ int port_settings_save(const port_settings* in, const char* path)
             s->voice, s->text, s->fps_limit, s->fps_counter, s->record_thread,
             s->skip_launcher);
     const int ok = fclose(f) == 0;
+#ifdef _WIN32
+    /* The CRT's rename() refuses an existing target. */
+    if (!ok || !MoveFileExA(tmp.c_str(), path, MOVEFILE_REPLACE_EXISTING)) { remove(tmp.c_str()); return -1; }
+#else
     if (!ok || rename(tmp.c_str(), path)) { remove(tmp.c_str()); return -1; }
+#endif
     return 0;
 }
 
@@ -165,7 +178,11 @@ static int s_nexported;
 static void put(const char* name, const char* value)
 {
     if (getenv(name)) return;
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
     setenv(name, value, 1);
+#endif
     if (s_nexported < 32) s_exported[s_nexported++] = name;
 }
 
@@ -249,6 +266,7 @@ void port_settings_export(const port_settings* s)
      * where most geometry is rebuilt by the SPUs every frame. */
     put("PS3RECOMP_ENG_VPULL", "1");
     put("PS3RECOMP_ANISO", "16");   /* sharper ground and walls at an angle */
+    put("PS3RECOMP_FULLRES_PARTICLES", "1");   /* fire, sparks and smoke at the picture's resolution */
     if (s->skip_launcher) put("PS3_SKIP_LAUNCHER", "1");
 }
 

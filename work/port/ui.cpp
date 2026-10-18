@@ -29,6 +29,14 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <shellapi.h>
+#include <filesystem>
+#endif
 
 extern "C" void rsx_vulkan_backend_set_fullscreen(int on);
 extern "C" void rsx_vulkan_backend_set_vsync(int on);
@@ -171,10 +179,59 @@ const char* saves_dir()
     return (e && *e) ? e : "gamedata/dev_hdd0/home/00000001/savedata";
 }
 
+#ifdef _WIN32
+/* One argument onto a CreateProcess command line, quoted the way the CRT's
+ * argv parser takes it apart again. */
+void win_quote_arg(std::string& cmd, const char* a)
+{
+    if (!cmd.empty()) cmd += ' ';
+    if (*a && !strpbrk(a, " \t\n\v\"")) { cmd += a; return; }
+    cmd += '"';
+    for (const char* p = a;; p++) {
+        size_t bs = 0;
+        while (*p == '\\') { p++; bs++; }
+        if (!*p) { cmd.append(bs * 2, '\\'); break; }
+        cmd.append(*p == '"' ? bs * 2 + 1 : bs, '\\');
+        cmd += *p;
+    }
+    cmd += '"';
+}
+
+/* What execve does on Linux: the same binary, the same arguments, the new
+ * environment. Windows has no exec, so a new process and this one exits.
+ * Returns only on failure. */
+void win_restart(char** argv, char** env)
+{
+    char self[4096];
+    const DWORD n = GetModuleFileNameA(NULL, self, sizeof self);
+    if (!n || n >= sizeof self) return;
+    std::string cmd;
+    for (char** a = argv; *a; a++) win_quote_arg(cmd, *a);
+    std::string block;
+    for (char** e = env; *e; e++) { block += *e; block += '\0'; }
+    block += '\0';
+    STARTUPINFOA si = {};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessA(self, &cmd[0], NULL, NULL, TRUE, 0, &block[0], NULL, &si, &pi)) return;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    _Exit(0);
+}
+#endif
+
 void open_folder(const char* path)
 {
+#ifdef _WIN32
+    char full[MAX_PATH];
+    if (!GetFullPathNameA(path, sizeof full, full, NULL)) snprintf(full, sizeof full, "%s", path);
+    for (char* p = full; *p; p++) if (*p == '/') *p = '\\';
+    if ((INT_PTR)ShellExecuteA(NULL, "open", full, NULL, NULL, SW_SHOWNORMAL) <= 32)
+        fprintf(stderr, "[ui] could not open %s\n", path);
+#else
     const std::string cmd = "xdg-open " + sh_quote(path) + " >/dev/null 2>&1 &";
     if (system(cmd.c_str()) != 0) fprintf(stderr, "[ui] could not open %s\n", path);
+#endif
 }
 
 std::string g_last_backup;
@@ -188,9 +245,16 @@ bool backup_saves()
     strftime(ts, sizeof ts, "%Y%m%d-%H%M%S", localtime(&t));
     const char* u = getenv("PS3_USER_DIR");
     const std::string dst = std::string(u && *u ? u : "user") + "/backups/" + ts;
+#ifdef _WIN32
+    std::error_code ec;
+    std::filesystem::create_directories(dst, ec);
+    if (!ec) std::filesystem::copy(saves_dir(), dst, std::filesystem::copy_options::recursive, ec);
+    const bool ok = !ec;
+#else
     const std::string cmd = "mkdir -p " + sh_quote(dst) + " && cp -a " + sh_quote(std::string(saves_dir()) + "/.") +
                             " " + sh_quote(dst + "/");
     const bool ok = system(cmd.c_str()) == 0;
+#endif
     g_last_backup = ok ? "Backup em " + dst : "O backup dos saves falhou";
     return ok;
 }
@@ -471,10 +535,14 @@ void play()
         if (char** env = port_settings_restart_env(extra.empty() ? nullptr : extra.c_str())) {
             /* The binary's own path, not /proc/self/exe: the process keeps
              * its name (MyGameRecomp), which play.sh and the scripts look for. */
+#ifdef _WIN32
+            win_restart(g_argv, env);
+#else
             char self[4096];
             const ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
             if (n > 0) { self[n] = 0; execve(self, g_argv, env); }
             execve("/proc/self/exe", g_argv, env);
+#endif
             free(env);
         }
         fprintf(stderr, "[ui] could not start again: the old settings stay for this run\n");

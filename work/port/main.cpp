@@ -58,6 +58,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 extern char** environ;
+#else
+#include <direct.h>     /* _mkdir */
+#include <errno.h>
+#include <string>
 #endif
 
 #ifdef _WIN32
@@ -123,13 +127,26 @@ unsigned long long ps3_qpc_us(void);          /* monotonic microseconds */
 /* ---------------------------------------------------------------------------
  * RSX present backend
  * -----------------------------------------------------------------------*/
-/* D3D12 on Windows, Metal on Apple, Vulkan on Linux when built with it, and
+/* Vulkan when built with it (Linux, and the MinGW build on Windows), else
+ * D3D12 on Windows, Metal on Apple, and
  * the null backend's headless software path anywhere else -- the same
  * selection runtime/host/host_posix.c and the toolkit's boot harness make. All
  * four expose the same three entry points, so the frame clock below is
  * backend-agnostic. */
 extern "C" int  spu_workload_replay_stuck(const char* path);   /* runtime/spu */
-#if defined(_WIN32)
+#if defined(PS3RECOMP_RSX_VULKAN) && !defined(__APPLE__)
+/* Opt-in (-DPS3RECOMP_RSX_VULKAN=ON), ahead of D3D12: the launcher and the
+ * menu (ui.cpp) draw through it. rsx_vulkan_backend.h lists the
+ * PS3RECOMP_VK_* switches -- PS3RECOMP_VK_WINDOW=1 to see the frames,
+ * PS3RECOMP_VK_GUEST_PROGRAMS=1 to run the title's own shaders. */
+extern "C" int  rsx_vulkan_backend_init(uint32_t w, uint32_t h, const char* title);
+extern "C" void rsx_vulkan_backend_present(void);
+extern "C" int  rsx_vulkan_backend_pump_messages(void);
+#  define rsx_backend_init    rsx_vulkan_backend_init
+#  define rsx_backend_present rsx_vulkan_backend_present
+#  define rsx_backend_pump    rsx_vulkan_backend_pump_messages
+#  define RSX_BACKEND_NAME    "Vulkan"
+#elif defined(_WIN32)
 extern "C" int  rsx_d3d12_backend_init(uint32_t w, uint32_t h, const char* title);
 extern "C" void rsx_d3d12_backend_present(void);
 extern "C" int  rsx_d3d12_backend_pump_messages(void);
@@ -145,17 +162,6 @@ extern "C" int  rsx_metal_backend_pump_messages(void);
 #  define rsx_backend_present rsx_metal_backend_present
 #  define rsx_backend_pump    rsx_metal_backend_pump_messages
 #  define RSX_BACKEND_NAME    "Metal"
-#elif defined(PS3RECOMP_RSX_VULKAN)
-/* Linux, opt-in (-DPS3RECOMP_RSX_VULKAN=ON): rsx_vulkan_backend.h lists the
- * PS3RECOMP_VK_* switches -- PS3RECOMP_VK_WINDOW=1 to see the frames,
- * PS3RECOMP_VK_GUEST_PROGRAMS=1 to run the title's own shaders. */
-extern "C" int  rsx_vulkan_backend_init(uint32_t w, uint32_t h, const char* title);
-extern "C" void rsx_vulkan_backend_present(void);
-extern "C" int  rsx_vulkan_backend_pump_messages(void);
-#  define rsx_backend_init    rsx_vulkan_backend_init
-#  define rsx_backend_present rsx_vulkan_backend_present
-#  define rsx_backend_pump    rsx_vulkan_backend_pump_messages
-#  define RSX_BACKEND_NAME    "Vulkan"
 #else
 extern "C" int  rsx_null_backend_init(uint32_t w, uint32_t h, const char* title);
 extern "C" void rsx_null_backend_present(void);
@@ -591,6 +597,16 @@ static void log_pump_start(void)
 }
 #endif
 
+/* A default the environment can override. */
+static void env_default(const char* name, const char* value)
+{
+#ifdef _WIN32
+    if (!getenv(name)) _putenv_s(name, value);
+#else
+    setenv(name, value, 0);
+#endif
+}
+
 int main(int argc, char** argv)
 {
 #ifndef _WIN32
@@ -620,57 +636,42 @@ int main(int argc, char** argv)
      * jobs' own throw_event, so a job must not also get a synthetic "job done"
      * from the chain -- lifted (SPURS_JOB_LIFTED_RAN) or, for one with no lift,
      * on the interpreter (SPU_JOB_INTERP). An environment override still wins. */
-#ifdef _WIN32
-    if (!getenv("SPU_JOB_INTERP")) _putenv_s("SPU_JOB_INTERP", "1");
-    if (!getenv("SPURS_JOB_LIFTED_RAN")) _putenv_s("SPURS_JOB_LIFTED_RAN", "1");
-#else
-    setenv("SPU_JOB_INTERP", "1", 0);
-    setenv("SPURS_JOB_LIFTED_RAN", "1", 0);
+    env_default("SPU_JOB_INTERP", "1");
+    env_default("SPURS_JOB_LIFTED_RAN", "1");
     /* The Wwise audio thread notifies its chain's job guard in bursts; a
      * notify on an open guard must be lost, as on hardware, or the chain runs
      * laps over descriptors the title is still writing (libs/spurs/cellSpurs.c). */
-    setenv("SPURS_GUARD_CAP", "1", 0);
+    env_default("SPURS_GUARD_CAP", "1");
     /* An idle SPU polls for work 200 us before it sleeps: the title hands
      * work over with its own atomics, which wake nobody, and a sleeping SPU
      * saw them only at its 1 ms timeout (libs/spurs/spurs_kernel.c). */
-    setenv("SPURS_IDLE_SPIN_US", "200", 0);
+    env_default("SPURS_IDLE_SPIN_US", "200");
     /* A Wwise job that ran and did not finish (the title had already refilled
      * its descriptor) gets no synthetic completion either: the WWS handlers
      * read one as a message and call through NULL. */
-    setenv("SPURS_JC_NO_SYNTH", "1", 0);
-#endif
+    env_default("SPURS_JC_NO_SYNTH", "1");
     /* Its frames are built on the SPU: the FIFO parks at the end of what is
      * ready and the title patches the park with the rest. Wait at a park the
      * way the RSX does instead of following the write head. */
-#ifdef _WIN32
-    if (!getenv("GCM_PARK_PATIENCE_MS")) _putenv_s("GCM_PARK_PATIENCE_MS", "-1");
-#else
-    setenv("GCM_PARK_PATIENCE_MS", "-1", 0);
-#endif
+    env_default("GCM_PARK_PATIENCE_MS", "-1");
     /* The lighting composite waits on label 0x890, the frame number the SPU
      * lighting job writes when it is done: without the wait the RSX read
      * half-lit tiles. Bounded (GCM_SEMA_TIMEOUT_MS, 1 s) so a label nothing
      * writes cannot wedge the drain. */
-#ifdef _WIN32
-    if (!getenv("GCM_SEMA_ACQUIRE")) _putenv_s("GCM_SEMA_ACQUIRE", "1");
-#else
-    setenv("GCM_SEMA_ACQUIRE", "1", 0);
-#endif
+    env_default("GCM_SEMA_ACQUIRE", "1");
     /* The GPU does the work of two SPU jobs, the ambient occlusion and the
      * lighting (native_passes.c); each falls back to the SPU on any frame the
      * GPU cannot do. =0 turns one off, =2 compares the GPU's result with the
      * SPU's instead. */
-#ifdef _WIN32
-    if (!getenv("PS3RECOMP_NATIVE_SSAO")) _putenv_s("PS3RECOMP_NATIVE_SSAO", "1");
-    if (!getenv("PS3RECOMP_NATIVE_LIGHTING")) _putenv_s("PS3RECOMP_NATIVE_LIGHTING", "1");
-#else
+#ifndef _WIN32
     /* RSX local memory write tracking (runtime/memory/guest_wtrack.h): a
      * texture whose pages nobody wrote is not hashed again. =2 verifies it
-     * (hashes anyway and logs "[wtrack] MISSED"), =0 turns it off. */
-    setenv("PS3RECOMP_WTRACK", "1", 0);
-    setenv("PS3RECOMP_NATIVE_SSAO", "1", 0);
-    setenv("PS3RECOMP_NATIVE_LIGHTING", "1", 0);
+     * (hashes anyway and logs "[wtrack] MISSED"), =0 turns it off. Linux
+     * only: it is built on mprotect and SIGSEGV. */
+    env_default("PS3RECOMP_WTRACK", "1");
 #endif
+    env_default("PS3RECOMP_NATIVE_SSAO", "1");
+    env_default("PS3RECOMP_NATIVE_LIGHTING", "1");
     /* Before any SPU runs: it may gate lifted SPU functions. */
     port_native_passes_init();
 
@@ -711,22 +712,40 @@ int main(int argc, char** argv)
         cellGame_init_from_paramsfo(sfo);
     }
 
-#ifndef _WIN32
     /* inFAMOUS 2 installs to /dev_hdd0 on its first boot: keep that beside the
      * disc tree, not inside it (the parent taken lexically -- "../" would
      * resolve through a symlinked disc dir). Firmware reads (/dev_flash) come
-     * from RPCS3's install of the user's own PUP, Flatpak or native; the
-     * runtime's own fallback is a Windows path. The environment wins for both. */
+     * from RPCS3's install of the user's own PUP, Flatpak or native; on
+     * Windows, where RPCS3 keeps it beside rpcs3.exe, from a dev_flash beside
+     * the disc tree. The environment wins for both. */
     if (!getenv("PS3_HDD0_ROOT")) {
         static char hdd0[1024];
         snprintf(hdd0, sizeof hdd0, "%s", ppu_vfs_root);
         char* slash = strrchr(hdd0, '/');
         if (slash && slash != hdd0) *slash = 0; else snprintf(hdd0, sizeof hdd0, ".");
         strncat(hdd0, "/hdd0", sizeof hdd0 - strlen(hdd0) - 1);
+#ifdef _WIN32
+        if (_mkdir(hdd0) != 0 && errno != EEXIST)
+            fprintf(stderr, "[boot] WARNING: cannot create %s (%s)\n", hdd0, strerror(errno));
+        _putenv_s("PS3_HDD0_ROOT", hdd0);
+#else
         if (mkdir(hdd0, 0755) != 0 && errno != EEXIST)
             fprintf(stderr, "[boot] WARNING: cannot create %s (%s)\n", hdd0, strerror(errno));
         setenv("PS3_HDD0_ROOT", hdd0, 1);
+#endif
     }
+#ifdef _WIN32
+    if (!getenv("PS3_DEV_FLASH")) {
+        static char flash[1024];
+        snprintf(flash, sizeof flash, "%s", ppu_vfs_root);
+        char* slash = strrchr(flash, '/');
+        if (slash && slash != flash) *slash = 0; else snprintf(flash, sizeof flash, ".");
+        strncat(flash, "/dev_flash", sizeof flash - strlen(flash) - 1);
+        const DWORD at = GetFileAttributesA(flash);
+        if (at != INVALID_FILE_ATTRIBUTES && (at & FILE_ATTRIBUTE_DIRECTORY))
+            _putenv_s("PS3_DEV_FLASH", flash);
+    }
+#else
     if (!getenv("PS3_DEV_FLASH") && getenv("HOME")) {
         static const char* rel[] = { ".var/app/net.rpcs3.RPCS3/config/rpcs3/dev_flash",
                                      ".config/rpcs3/dev_flash" };
@@ -740,9 +759,9 @@ int main(int argc, char** argv)
             }
         }
     }
+#endif
     printf("[boot] /dev_hdd0 -> %s, /dev_flash -> %s\n",
            getenv("PS3_HDD0_ROOT"), getenv("PS3_DEV_FLASH") ? getenv("PS3_DEV_FLASH") : "(runtime default)");
-#endif
 
     uint32_t entry = ppu_load_elf(argv[1]);
     if (!entry) {

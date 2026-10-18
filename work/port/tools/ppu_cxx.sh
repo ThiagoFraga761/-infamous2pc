@@ -12,6 +12,11 @@ for a in "$@"; do
     esac
 done
 if [ "$ppu" = 1 ] && [ -z "${PORT_PPU_GCC:-}" ]; then
+    # A MinGW-w64 cross build (tools/mingw64.cmake): the same clang, aimed at
+    # the MinGW target, so the objects link with the rest of the GCC build.
+    # GCC is not an option there anyway: it needs over 6 GB per lifted unit.
+    target=()
+    case "$1" in *-w64-mingw32-g++) target=(--target="$(basename "$1" | sed 's/-g++$//')") ;; esac
     shift
     args=()
     for a in "$@"; do
@@ -20,6 +25,6 @@ if [ "$ppu" = 1 ] && [ -z "${PORT_PPU_GCC:-}" ]; then
     # Whether a call can reach the context depends on whether the pointer was
     # handed to a call before it (noalias + "captured before"); LLVM gives up
     # past 32 blocks, and every inline store is several.
-    exec clang++ -mllvm -dom-tree-reachability-max-bbs-to-explore=1000 "${args[@]}"
+    exec clang++ "${target[@]}" -mllvm -dom-tree-reachability-max-bbs-to-explore=1000 "${args[@]}"
 fi
 exec "$@"
