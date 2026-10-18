@@ -5942,10 +5942,10 @@ index f039abf..828ecf4 100644
  
 diff --git a/libs/video/rsx_be_thread.c b/libs/video/rsx_be_thread.c
 new file mode 100644
-index 0000000..f02ca9f
+index 0000000..f3c2014
 --- /dev/null
 +++ b/libs/video/rsx_be_thread.c
-@@ -0,0 +1,929 @@
+@@ -0,0 +1,967 @@
 +/*
 + * ps3recomp - the draw engine's backend calls, recorded on a thread of their own
 + *
@@ -6005,6 +6005,7 @@ index 0000000..f02ca9f
 +#define BQ_CAP        (128u << 20)            /* the queue, bytes */
 +#define BQ_MAX_INLINE (BQ_CAP / 8u)           /* a larger payload goes direct */
 +#define BQ_HDR        16u
++#define BQ_PULL_SEGS  64u                     /* segments of a queued pulled draw */
 +
 +enum {
 +    OP_WRAP = 1,
@@ -6014,6 +6015,7 @@ index 0000000..f02ca9f
 +    OP_DRAW, OP_DRAW_GEO, OP_CLEAR_COLOR, OP_CLEAR_DS, OP_PRESENT,
 +    OP_TEX_UPLOAD, OP_TEX_RELEASE, OP_COLOR_RELEASE, OP_DEPTH_RELEASE,
 +    OP_PIPE_RELEASE, OP_GEO_DROP, OP_SNAP_COLOR, OP_SNAP_DEPTH, OP_SNAP_RGBA8,
++    OP_DRAW_PULLED,
 +};
 +
 +typedef struct { u32 op, size, pad[2]; } bq_hdr;
@@ -6106,6 +6108,21 @@ index 0000000..f02ca9f
 +        const u8* v = p + 32;
 +        const u8* i = v + (((size_t)a[1] * a[2] + 15u) & ~(size_t)15u);
 +        be->draw(u, (rsx_topology)a[0], v, a[1], a[2], a[4] ? (const u32*)i : NULL, a[3]);
++        break; }
++    case OP_DRAW_PULLED: {
++        /* topology, nsegs, index_count, has_indices; nsegs sizes; the
++         * indices; the segments, each at a 16-byte boundary. */
++        const u32* a = (const u32*)p;
++        const u32 ns = a[1];
++        rsx_be_pull_seg segs[BQ_PULL_SEGS];
++        const u8* q = p + ((16u + ns * 4u + 15u) & ~15u);
++        const u32* idx = a[3] ? (const u32*)q : NULL;
++        if (a[3]) q += ((size_t)a[2] * 4u + 15u) & ~(size_t)15u;
++        for (u32 k = 0; k < ns; k++) {
++            segs[k].p = q; segs[k].bytes = a[4 + k];
++            q += ((size_t)a[4 + k] + 15u) & ~(size_t)15u;
++        }
++        be->draw_pulled(u, (rsx_topology)a[0], segs, ns, idx, a[2]);
 +        break; }
 +    case OP_DRAW_GEO: {
 +        const u32* a = (const u32*)p;
@@ -6718,11 +6735,32 @@ index 0000000..f02ca9f
 +    bq_publish();
 +}
 +
++/* Queued like t_draw, the guest bytes copied in: the draw used to wait for
++ * the worker to drain and record itself, which serialised the two threads
++ * on every pulled draw. */
 +static void t_draw_pulled(void* user, rsx_topology topology, const rsx_be_pull_seg* segs, u32 nsegs,
 +                          const u32* indices, u32 index_count)
 +{
 +    (void)user;
-+    bq_direct_begin(); Q.be->draw_pulled(U, topology, segs, nsegs, indices, index_count); bq_direct_end();
++    const u64 head = (16u + (u64)nsegs * 4u + 15u) & ~15ull;
++    const u64 ib = indices ? ((u64)index_count * 4u + 15u) & ~15ull : 0u;
++    u64 sb = 0;
++    for (u32 k = 0; k < nsegs; k++) sb += ((u64)segs[k].bytes + 15u) & ~15ull;
++    if (!bq_async() || nsegs > BQ_PULL_SEGS || head + ib + sb > BQ_MAX_INLINE) {
++        bq_direct_begin(); Q.be->draw_pulled(U, topology, segs, nsegs, indices, index_count); bq_direct_end();
++        return;
++    }
++    u8* p = BQ_P(bq_reserve(OP_DRAW_PULLED, (u32)(head + ib + sb)));
++    u32* a = (u32*)p;
++    a[0] = (u32)topology; a[1] = nsegs; a[2] = index_count; a[3] = indices != NULL;
++    for (u32 k = 0; k < nsegs; k++) a[4 + k] = segs[k].bytes;
++    u8* q = p + head;
++    if (indices) { memcpy(q, indices, (size_t)index_count * 4u); q += ib; }
++    for (u32 k = 0; k < nsegs; k++) {
++        memcpy(q, segs[k].p, segs[k].bytes);
++        q += ((size_t)segs[k].bytes + 15u) & ~(size_t)15u;
++    }
++    bq_publish();
 +}
 +
 +static u32 t_geo_put(void* user, const void* v, u32 vbytes, const u32* idx, u32 icount)

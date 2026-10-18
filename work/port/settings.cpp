@@ -244,6 +244,10 @@ void port_settings_export(const port_settings* s)
                       : !strcmp(t, "latino") || !strcmp(t, "spanish") ? "es" : "pt");
     snprintf(b, sizeof b, "%d", s->fps_limit);     put("PS3RECOMP_FPS_LIMIT", b);
     put("PS3RECOMP_BE_THREAD", s->record_thread ? "1" : "0");
+    /* The GPU reads the guest's vertex bytes itself: the CPU fetch it
+     * replaces was what made turning the camera drop to ~40 fps in the city,
+     * where most geometry is rebuilt by the SPUs every frame. */
+    put("PS3RECOMP_ENG_VPULL", "1");
     if (s->skip_launcher) put("PS3_SKIP_LAUNCHER", "1");
 }
 

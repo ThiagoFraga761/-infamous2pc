@@ -756,7 +756,7 @@ the poll path publishes. 0 hangs the boot: the loading screens have
 equality waiters. In game there is only one fence a frame, so the pacing
 does not matter there.
 
-### Vertex pulling (`PS3RECOMP_ENG_VPULL=1`, experimental, off)
+### Vertex pulling (`PS3RECOMP_ENG_VPULL`, on by default in the port)
 
 The vertex shader can read the guest's vertex bytes itself:
 
@@ -772,7 +772,18 @@ The vertex shader can read the guest's vertex bytes itself:
 - `dc_pull_raw` / `dc_pull` / `dc_pull_ranges` in `rsx_draw_engine.c`, and
   `vk_eng_draw_pulled` in the Vulkan backend.
 
-Status: it renders New Marais and the pier correctly. It uploads ~9 MB of raw
+**2026-10-18: on by default** (the port exports `PS3RECOMP_ENG_VPULL=1`;
+set it to 0 to go back). A pulled draw used to call the backend directly,
+waiting for the recording thread to drain first, so every pulled draw
+serialised the two threads: 35-40 fps in the city against 58. Queued like any
+other draw (`OP_DRAW_PULLED`, the guest bytes copied in), it ties the CPU
+fetch with the camera still, and turning the camera it holds 55-59 where the
+fetch drops to 37-43: the geometry cache misses ~74% of draws there (Edge
+output the SPUs rebuild every frame), and the fetch, remap and index rebuild
+were ~7.5 ms of the RSX thread's frame. No dropped draws or depth fighting
+seen at 2x.
+
+Status before: it renders New Marais and the pier correctly. It uploads ~9 MB of raw
 bytes a frame there, against 22 MB of expanded vertices. It bypasses the
 geometry cache, though: in New Marais it is ~3% slower than the cache. It
 stays off until it wins somewhere. Known gaps before it can be the default:
