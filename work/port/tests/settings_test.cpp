@@ -56,6 +56,7 @@ int main()
         setenv("PS3RECOMP_RES_SCALE", "3", 1); unsetenv("PS3_VOICE_LANG"); unsetenv("PS3_TEXT_LANG");
         unsetenv("PS3RECOMP_VK_FULLSCREEN"); unsetenv("PS3RECOMP_VK_PRESENT"); unsetenv("PS3RECOMP_VK_STRETCH");
         unsetenv("PS3RECOMP_VK_DISPLAY"); unsetenv("PS3RECOMP_FPS_LIMIT"); setenv("PS3RECOMP_BE_THREAD", "0", 1);
+        unsetenv("PS3RECOMP_FULLRES_PARTICLES"); unsetenv("PS3RECOMP_ANISO");
         port_settings b;
         CHECK(port_settings_load(&b, p2.c_str()) == 1);
         const unsigned pin = port_settings_from_env(&b);
@@ -71,6 +72,24 @@ int main()
         port_settings_from_env(&c);                           /* nothing pinned again */
         CHECK(port_settings_pinned() == 0);
         remove(p2.c_str());
+    }
+
+    /* mods: saved, read back, clamped */
+    {
+        const std::string p3 = std::string(dir) + "/mods.ini";
+        port_settings a; port_settings_defaults(&a);
+        CHECK(a.fullres_particles == 1 && a.aniso == 16);
+        a.fullres_particles = 0; a.aniso = 4;
+        CHECK(port_settings_save(&a, p3.c_str()) == 0);
+        port_settings b;
+        CHECK(port_settings_load(&b, p3.c_str()) == 1);
+        CHECK(b.fullres_particles == 0 && b.aniso == 4);
+        FILE* g = fopen(p3.c_str(), "w");
+        fputs("[mods]\naniso = 64\nfullres_particles = 7\n", g);
+        fclose(g);
+        CHECK(port_settings_load(&b, p3.c_str()) == 1);
+        CHECK(b.aniso == 16 && b.fullres_particles == 1);   /* out of range: the defaults */
+        remove(p3.c_str());
     }
 
     /* voices: text-only languages are refused */

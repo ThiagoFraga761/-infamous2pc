@@ -48,6 +48,8 @@ void port_settings_defaults(port_settings* s)
     s->fps_counter = 0;
     s->record_thread = 1;
     s->skip_launcher = 0;
+    s->fullres_particles = 1;
+    s->aniso = 16;
 }
 
 static std::string trim(const std::string& t)
@@ -106,6 +108,9 @@ int port_settings_load(port_settings* s, const char* path)
             else if (k == "record_thread") set_int(&s->record_thread, v, 0, 1);
         } else if (section == "launcher") {
             if (k == "skip") set_int(&s->skip_launcher, v, 0, 1);
+        } else if (section == "mods") {
+            if (k == "fullres_particles") set_int(&s->fullres_particles, v, 0, 1);
+            else if (k == "aniso") set_int(&s->aniso, v, 0, 16);
         }
     }
     fclose(f);
@@ -126,6 +131,8 @@ int port_settings_save(const port_settings* in, const char* path)
     if (s_pinned & PORT_PIN_TEXT)          memcpy(out.text, s_file.text, sizeof out.text);
     if (s_pinned & PORT_PIN_FPS_LIMIT)     out.fps_limit = s_file.fps_limit;
     if (s_pinned & PORT_PIN_RECORD_THREAD) out.record_thread = s_file.record_thread;
+    if (s_pinned & PORT_PIN_PARTICLES)     out.fullres_particles = s_file.fullres_particles;
+    if (s_pinned & PORT_PIN_ANISO)         out.aniso = s_file.aniso;
     std::string dir = path;
     const size_t slash = dir.find_last_of("/\\");
     if (slash != std::string::npos) {
@@ -158,10 +165,13 @@ int port_settings_save(const port_settings* in, const char* path)
             "fps_counter = %d\n"
             "record_thread = %d\n"
             "\n[launcher]\n"
-            "skip = %d\n",
+            "skip = %d\n"
+            "\n[mods]\n"
+            "fullres_particles = %d ; fire, sparks, smoke at the picture's resolution\n"
+            "aniso = %d             ; 0 = the game's own, 2..16\n",
             s->scale, s->fullscreen, s->vsync, s->stretch, s->display,
             s->voice, s->text, s->fps_limit, s->fps_counter, s->record_thread,
-            s->skip_launcher);
+            s->skip_launcher, s->fullres_particles, s->aniso);
     const int ok = fclose(f) == 0;
 #ifdef _WIN32
     /* The CRT's rename() refuses an existing target. */
@@ -210,6 +220,8 @@ unsigned port_settings_from_env(port_settings* s)
     }
     if ((v = getenv("PS3RECOMP_FPS_LIMIT")))     { s->fps_limit = atoi(v) < 0 ? 0 : atoi(v); pin |= PORT_PIN_FPS_LIMIT; }
     if ((v = getenv("PS3RECOMP_BE_THREAD")))     { s->record_thread = env_on(v); pin |= PORT_PIN_RECORD_THREAD; }
+    if ((v = getenv("PS3RECOMP_FULLRES_PARTICLES"))) { s->fullres_particles = env_on(v); pin |= PORT_PIN_PARTICLES; }
+    if ((v = getenv("PS3RECOMP_ANISO")))         { s->aniso = atoi(v) < 0 ? 0 : atoi(v) > 16 ? 16 : atoi(v); pin |= PORT_PIN_ANISO; }
     s_pinned = pin;
     return pin;
 }
@@ -265,8 +277,8 @@ void port_settings_export(const port_settings* s)
      * replaces was what made turning the camera drop to ~40 fps in the city,
      * where most geometry is rebuilt by the SPUs every frame. */
     put("PS3RECOMP_ENG_VPULL", "1");
-    put("PS3RECOMP_ANISO", "16");   /* sharper ground and walls at an angle */
-    put("PS3RECOMP_FULLRES_PARTICLES", "1");   /* fire, sparks and smoke at the picture's resolution */
+    snprintf(b, sizeof b, "%d", s->aniso);         put("PS3RECOMP_ANISO", b);
+    put("PS3RECOMP_FULLRES_PARTICLES", s->fullres_particles ? "1" : "0");
     if (s->skip_launcher) put("PS3_SKIP_LAUNCHER", "1");
 }
 

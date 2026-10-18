@@ -336,6 +336,26 @@ void page_performance(port_settings& s)
     hint("A thread de gravação vale a partir da próxima vez que o jogo abrir.");
 }
 
+void page_mods(port_settings& s)
+{
+    ImGui::TextUnformatted("Além do PS3");
+    bool b = s.fullres_particles;
+    pin_begin(PORT_PIN_PARTICLES);
+    if (ImGui::Checkbox("Partículas em resolução cheia", &b)) { s.fullres_particles = b; save(); }
+    pin_end(PORT_PIN_PARTICLES);
+    hint("Fogo, faíscas, fumaça e raios: o jogo os desenha em 512x288 e estica; "
+         "ligado, saem na resolução do resto da imagem.");
+    static const char* const k_aniso_names[] = { "Do jogo", "2x", "4x", "8x", "16x" };
+    static const int k_aniso[] = { 0, 2, 4, 8, 16 };
+    int ai = 0;
+    for (int i = 0; i < 5; i++) if (k_aniso[i] == s.aniso) ai = i;
+    pin_begin(PORT_PIN_ANISO);
+    if (ImGui::Combo("Filtro anisotrópico", &ai, k_aniso_names, 5)) { s.aniso = k_aniso[ai]; save(); }
+    pin_end(PORT_PIN_ANISO);
+    hint("Chão e paredes nítidos à distância e em ângulo. O PS3 quase não usava.");
+    hint("As opções desta aba valem a partir da próxima vez que o jogo abrir.");
+}
+
 void page_controller(port_settings& s)
 {
     SDL_GameController* gc = nullptr;
@@ -400,6 +420,7 @@ void draw_menu()
         if (ImGui::BeginTabItem("Vídeo")) { page_video(s); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Idioma")) { page_language(s); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Desempenho")) { page_performance(s); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Mods")) { page_mods(s); ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Controle e saves")) { page_controller(s); ImGui::EndTabItem(); }
         ImGui::EndTabBar();
     }
@@ -709,6 +730,7 @@ void draw_start()
             if (ImGui::BeginTabItem("Vídeo")) { page_video(s); ImGui::EndTabItem(); }
             if (ImGui::BeginTabItem("Idioma")) { page_language(s); ImGui::EndTabItem(); }
             if (ImGui::BeginTabItem("Desempenho")) { page_performance(s); ImGui::EndTabItem(); }
+            if (ImGui::BeginTabItem("Mods")) { page_mods(s); ImGui::EndTabItem(); }
             if (ImGui::BeginTabItem("Controle e saves")) { page_controller(s); ImGui::EndTabItem(); }
             ImGui::EndTabBar();
         }

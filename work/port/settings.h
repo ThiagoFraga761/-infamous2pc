@@ -26,6 +26,9 @@ typedef struct port_settings {
     int record_thread;  /* PS3RECOMP_BE_THREAD */
     /* [launcher] */
     int skip_launcher;  /* open the game without the start screen */
+    /* [mods]: changes to how the game looks, beyond what the PS3 drew */
+    int fullres_particles;  /* PS3RECOMP_FULLRES_PARTICLES */
+    int aniso;              /* PS3RECOMP_ANISO: 0 (the game's own), 2, 4, 8, 16 */
 } port_settings;
 
 /* The defaults: today's play.sh -- 720p, a window, mailbox, black bars,
@@ -46,6 +49,7 @@ enum {
     PORT_PIN_SCALE = 1 << 0, PORT_PIN_FULLSCREEN = 1 << 1, PORT_PIN_VSYNC = 1 << 2,
     PORT_PIN_STRETCH = 1 << 3, PORT_PIN_DISPLAY = 1 << 4, PORT_PIN_VOICE = 1 << 5,
     PORT_PIN_TEXT = 1 << 6, PORT_PIN_FPS_LIMIT = 1 << 7, PORT_PIN_RECORD_THREAD = 1 << 8,
+    PORT_PIN_PARTICLES = 1 << 9, PORT_PIN_ANISO = 1 << 10,
 };
 
 /* Before port_settings_export: each field whose variable is set takes the
