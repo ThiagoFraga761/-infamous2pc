@@ -31222,7 +31222,7 @@ index 0000000..9dee71d
 +}
 +#endif
 diff --git a/runtime/spu/spu_coherency.c b/runtime/spu/spu_coherency.c
-index 7ac619f..d42c1c9 100644
+index 7ac619f..6a6f20d 100644
 --- a/runtime/spu/spu_coherency.c
 +++ b/runtime/spu/spu_coherency.c
 @@ -12,6 +12,10 @@
@@ -31432,7 +31432,7 @@ index 7ac619f..d42c1c9 100644
  
  /* The SPU contexts that have reserved a line. Sized to match the MFC engine
   * registry in spu_channels.c, which is the ceiling on live SPU contexts. */
-@@ -88,16 +222,201 @@ static spu_context* s_coh_ctxs[SPU_COH_MAX_CTX];
+@@ -88,16 +222,205 @@ static spu_context* s_coh_ctxs[SPU_COH_MAX_CTX];
  
  unsigned long g_spu_lr_raise = 0;
  
@@ -31442,6 +31442,10 @@ index 7ac619f..d42c1c9 100644
 + * asymmetric half of the store-then-check handshake in VM_WRITE_COH, which
 + * keeps the PPU's common store path free of a hardware fence. */
 +#if defined(_WIN32)
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#include <windows.h>
 +void spu_process_barrier(void) { FlushProcessWriteBuffers(); }
 +#elif defined(__APPLE__)
 +#include <mach/mach.h>
@@ -31639,7 +31643,7 @@ index 7ac619f..d42c1c9 100644
      }
      /* More live SPU contexts than the registry holds. The ones already in it
       * still get their events; this one would silently never wake, so say so. */
-@@ -129,7 +448,8 @@ void spu_coh_unregister(spu_context* ctx)
+@@ -129,7 +452,8 @@ void spu_coh_unregister(spu_context* ctx)
       * spu_coh_notify_write, reading a freed thread stack. */
      spu_lockline_lock();
      for (int i = 0; i < SPU_COH_MAX_CTX; i++)
@@ -31649,7 +31653,7 @@ index 7ac619f..d42c1c9 100644
      spu_lockline_unlock();
  }
  
-@@ -143,13 +463,13 @@ void spu_coh_forget_range(uintptr_t lo, uintptr_t hi)
+@@ -143,13 +467,13 @@ void spu_coh_forget_range(uintptr_t lo, uintptr_t hi)
  {
      spu_lockline_lock();
      for (int i = 0; i < SPU_COH_MAX_CTX; i++) {
@@ -31667,7 +31671,7 @@ index 7ac619f..d42c1c9 100644
          }
      }
      spu_lockline_unlock();
-@@ -157,9 +477,9 @@ void spu_coh_forget_range(uintptr_t lo, uintptr_t hi)
+@@ -157,9 +481,9 @@ void spu_coh_forget_range(uintptr_t lo, uintptr_t hi)
  
  int spu_coh_is_reserved(uint32_t addr)
  {
@@ -31679,7 +31683,7 @@ index 7ac619f..d42c1c9 100644
  }
  
  /* A DMA PUT is issued BY an SPU, and hardware does not take that SPU's own
-@@ -175,37 +495,50 @@ int spu_coh_is_reserved(uint32_t addr)
+@@ -175,37 +499,50 @@ int spu_coh_is_reserved(uint32_t addr)
  void spu_coh_notify_write_except(uint32_t ea, const void* self)
  {
      uint32_t line = ea & ~127u;

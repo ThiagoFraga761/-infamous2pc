@@ -34,7 +34,6 @@ void (*spu_lookup(uint32_t addr, int image_id))(spu_context*);
 
 #define EC5F_IMAGE 225
 #define EC5F_MAIN  0x12C50u
-#define EC5F_RET   0x13F9Cu
 #define F1 0x3F800000u
 
 static inline uint32_t R32(const uint8_t* p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
@@ -49,7 +48,7 @@ static inline u128 SPLW(uint32_t x) { return V4(x, x, x, x); }
 /* Fallback reasons (bits of J.fallback). */
 enum { FB_SRGB = 1, FB_CONST = 2, FB_OP11B = 4, FB_OP4 = 8, FB_OP = 16, FB_KIND2 = 32, FB_KIND10 = 64,
        FB_KIND11 = 128, FB_SIDE = 256, FB_IN1_9 = 512, FB_FPUPLOAD = 1024, FB_OP5 = 2048,
-       FB_TYPE = 4096, FB_EA = 8192, FB_MEM = 16384 };
+       FB_TYPE = 4096, FB_EA = 8192, FB_MEM = 16384, FB_STALE = 32768 };
 
 typedef struct {
     uint32_t ea, used;
@@ -62,7 +61,7 @@ typedef struct {
     const uint8_t *IN, *IN1, *IN2;
     int fallback;
     uint32_t bad_ea, bad_size;
-    uint32_t matsz, ndc;
+    uint32_t matsz;
     uint32_t rec[8];
     /* command buffer (0x14160 and the emitters' room checks) */
     uint32_t cursor, has_block, ring_ea, delta, limit, done, nblocks;
@@ -74,10 +73,6 @@ typedef struct {
     /* kept */
     Block* blocks; uint32_t cap;
     uint8_t spill[4096];
-    /* Words the SPU job takes from local store past the material it fetched:
-     * stale bytes of an earlier one, which no native pass can reproduce. The
-     * compare skips them (block index << 12 | byte offset). */
-    uint32_t dc[256];
 } J;
 
 /* ---------------- guest memory ---------------- */
@@ -88,7 +83,7 @@ static inline int ea_ok(uint32_t ea, uint32_t size)
 }
 static const uint8_t* G(J* j, uint32_t ea, uint32_t size)
 {
-    static const uint8_t zero[0x4000];
+    static const uint8_t zero[0x10000];     /* the largest read: 100 queue records */
     if (__builtin_expect(!ea_ok(ea, size), 0)) {
         if (!(j->fallback & FB_EA)) { j->bad_ea = ea; j->bad_size = size; }
         j->fallback |= FB_EA; return zero;
@@ -103,12 +98,27 @@ static void guest_put(J* j, uint32_t ea, const uint8_t* src, uint32_t size)
     const uint32_t a0 = ea & ~127u, a1 = (ea + size - 1u) & ~127u;
     int reserved = 0;
     for (uint32_t a = a0; ; a += 128u) { if (spu_coh_is_reserved(a)) { reserved = 1; break; } if (a == a1) break; }
-    if (!reserved) { memcpy(vm_base + ea, src, size); return; }
-    const uint64_t m = spu_lockline_mask_range(ea, size);
-    spu_lockline_lock_mask(m);
-    memcpy(vm_base + ea, src, size);
-    for (uint32_t a = a0; ; a += 128u) { if (spu_coh_is_reserved(a)) spu_coh_notify_write_except(a, j->ctx); if (a == a1) break; }
-    spu_lockline_unlock_mask(m);
+    if (reserved) {
+        const uint64_t m = spu_lockline_mask_range(ea, size);
+        spu_lockline_lock_mask(m);
+        memcpy(vm_base + ea, src, size);
+        for (uint32_t a = a0; ; a += 128u) { if (spu_coh_is_reserved(a)) spu_coh_notify_write_except(a, j->ctx); if (a == a1) break; }
+        spu_lockline_unlock_mask(m);
+    } else {
+        memcpy(vm_base + ea, src, size);
+        /* a reservation taken during the copy still has to hear of it */
+        for (uint32_t a = a0; ; a += 128u) {
+            if (spu_coh_is_reserved(a)) {
+                const uint64_t m = spu_lockline_mask_ea(a);
+                spu_lockline_lock_mask(m);
+                spu_coh_notify_write_except(a, j->ctx);
+                spu_lockline_unlock_mask(m);
+            }
+            if (a == a1) break;
+        }
+    }
+    extern void (*g_spu_put_hook)(uint32_t ea, uint32_t size);   /* cellGcmSys: SPU-written pushbuffers */
+    if (g_spu_put_hook) g_spu_put_hook(ea, size);
 }
 
 /* 0x190D8: atomic add on a guest word, returning the old value. Under the
@@ -118,9 +128,11 @@ static uint32_t guest_atomic_add(J* j, uint32_t ea, uint32_t v)
 {
     const uint64_t m = spu_lockline_mask_ea(ea);
     spu_lockline_lock_mask(m);
-    uint8_t* p = vm_base + ea;
-    const uint32_t old = R32(p);
-    P32(p, old + v);
+    /* CAS as well: a plain PPU store to the word takes no lock */
+    uint32_t* p = (uint32_t*)(vm_base + ea);
+    uint32_t raw = __atomic_load_n(p, __ATOMIC_RELAXED), old;
+    do old = __builtin_bswap32(raw);
+    while (!__atomic_compare_exchange_n(p, &raw, __builtin_bswap32(old + v), 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED));
     if (spu_coh_is_reserved(ea & ~127u)) spu_coh_notify_write_except(ea, j->ctx);
     spu_lockline_unlock_mask(m);
     return old;
@@ -131,7 +143,7 @@ static void W(J* j, uint32_t v) { P32(j->cb + j->cursor, v); j->cursor += 4; }
 /* 0x14160, without the ring: publish() places the blocks once the job is done */
 static void next_block(J* j)
 {
-    if (j->has_block) j->blocks[j->nblocks - 1].used = j->cursor;
+    if (j->has_block && j->nblocks) j->blocks[j->nblocks - 1].used = j->cursor;
     j->done += 4096; j->cursor = 0; j->has_block = 1;
     if (j->nblocks == j->cap) {
         uint32_t nc = j->cap ? 2 * j->cap : 16;
@@ -180,22 +192,19 @@ static inline void room(J* j, uint32_t bytes)
 #define IN2 (j->IN2)
 #define SLOT(kind) S16(IN1 + 0x110 + 2 * (kind))
 
-static void emit_vec_dc(J* j, int slot, const uint32_t* w, int nvec, uint32_t stale)   /* 0x1EFC burst */
+static void emit_vec(J* j, int slot, const uint32_t* w, int nvec)   /* 0x1EFC burst */
 {
     room(j, 8 + 16 * nvec);
     W(j, ((1 + 4 * nvec) << 18) | 0x1EFC); W(j, (uint32_t)slot);
-    for (int i = 0; i < 4 * nvec; i++) {
-        if ((stale >> i & 1) && j->ndc < sizeof j->dc / sizeof *j->dc)
-            j->dc[j->ndc++] = (j->nblocks - 1) << 12 | j->cursor;
-        W(j, w[i]);
-    }
+    for (int i = 0; i < 4 * nvec; i++) W(j, w[i]);
 }
-static void emit_vec(J* j, int slot, const uint32_t* w, int nvec) { emit_vec_dc(j, slot, w, nvec, 0); }
-/* A material word: 0, and marked stale, past what the job fetched. */
-static inline uint32_t MW(J* j, const uint8_t* mat, const uint8_t* p, uint32_t* stale, int bit)
+/* Is [p, p+n) inside the material the job fetched? Past it the SPU reads
+ * stale local store, which no native pass can reproduce: the job falls back. */
+static inline int inmat(J* j, const uint8_t* mat, const uint8_t* p, uint32_t n)
 {
-    if (p + 4 > mat + j->matsz) { *stale |= 1u << bit; return 0; }
-    return R32(p);
+    if (p >= mat && (uint64_t)(p - mat) + n <= j->matsz) return 1;
+    j->fallback |= FB_STALE;
+    return 0;
 }
 
 /* 0x143F0: textures */
@@ -206,7 +215,8 @@ static void f_143F0(J* j, const uint8_t* mat)
     if (n > 14) n = 14;
     for (uint32_t i = 0; i < n; i++) {
         int unit = S16(D + 4 * i) & 15; uint16_t ti = R16(D + 4 * i + 2);
-        const uint8_t* t = mat + 8 + 44 * ti;
+        const uint8_t* t = mat + 8 + 44 * (uint32_t)ti;
+        if (!inmat(j, mat, t, 36)) return;
         uint32_t w0 = R32(t), w4 = R32(t + 4), w8 = R32(t + 8), w12 = R32(t + 12), w16 = R32(t + 16),
                  w20 = R32(t + 20), w24 = R32(t + 24), w28 = R32(t + 28), w32 = R32(t + 32);
         u128* c = &j->tex[unit];
@@ -227,42 +237,43 @@ static void f_15E78(J* j, const uint8_t* mat, const uint8_t* old)
 {
     uint32_t n = R32(IN1 + 0x9C), ntex = R32(IN1 + 0xB4);
     if (n > 17) n = 17;
+    if (ntex > 16) { j->fallback |= FB_STALE; return; }
     const uint8_t* nb = mat + 8 + 44 * ntex; const uint8_t* ob = old ? old + 8 + 44 * ntex : 0;
     for (uint32_t i = 0; i < n; i++) {
         uint32_t e = R32(IN1 + 0x58 + 4 * i); int slot = (int16_t)(e >> 16);
         uint32_t type = (e >> 10) & 31, off = e & 1023;
         const uint8_t* np = nb + 4 * off; const uint8_t* op = ob ? ob + 4 * off : 0;
         if (type > 11) continue;
+        if (!inmat(j, mat, np, 16)) return;
         if (type == 0) {
             if (op && spu_fceq(LQ(np), LQ(op))._u32[0]) continue;      /* first word only */
             if (e & 0x8000) { j->fallback |= FB_SRGB; continue; }
-            uint32_t st = 0;
-            uint32_t w[4] = { MW(j, mat, np, &st, 0), MW(j, mat, np + 4, &st, 1), MW(j, mat, np + 8, &st, 2), MW(j, mat, np + 12, &st, 3) };
-            emit_vec_dc(j, slot, w, 1, st);
+            uint32_t w[4] = { R32(np), R32(np + 4), R32(np + 8), R32(np + 12) };
+            emit_vec(j, slot, w, 1);
         } else if (type == 4) {
             if (op) { u128 m = spu_fceq(LQ(np), LQ(op));
                 if (m._u32[0] && m._u32[1] && m._u32[2] && m._u32[3]) continue; }
-            uint32_t st = 0;
-            uint32_t w[8] = { MW(j, mat, np, &st, 0), MW(j, mat, np + 4, &st, 1), 0, F1,
-                              MW(j, mat, np + 8, &st, 4), MW(j, mat, np + 12, &st, 5), 0, F1 };
-            emit_vec_dc(j, slot, w, 2, st);
+            uint32_t w[8] = { R32(np), R32(np + 4), 0, F1, R32(np + 8), R32(np + 12), 0, F1 };
+            emit_vec(j, slot, w, 2);
         } else j->fallback |= FB_CONST;
     }
 }
 
 /* 0x7C18: per-object constants */
-static void f_7C18(J* j, const uint8_t* mat, const uint8_t* H, const uint8_t* E, const uint8_t* extra)
+static void f_7C18(J* j, const uint8_t* mat, const uint8_t* E, const uint8_t* extra, uint32_t nx)
 {
     uint32_t nops = R32(IN1 + 0xC0);
     if (nops > 20) nops = 20;
+    if (R32(IN1 + 0xB4) > 16 || R32(IN1 + 0xB8) > 0x100) { j->fallback |= FB_STALE; return; }
     const uint8_t* d = mat + 8 + 44 * R32(IN1 + 0xB4) + 4 * R32(IN1 + 0xB8);
     for (uint32_t i = 0; i < nops; i++) {
         uint32_t op = R32(IN1 + 0xC4 + 4 * i);
         if (op > 14) continue;
         if (op == 5) {
+            if (!inmat(j, mat, d, 8)) return;
             int slot = S16(IN1 + 0xA8); int32_t a = (int32_t)R32(d), b = (int32_t)R32(d + 4); d += 8;
             if (slot < 0) continue;
-            int32_t k = E[1], ab = a * b;
+            int32_t k = E[1], ab = (int32_t)((uint32_t)a * (uint32_t)b);
             if (!ab || !a) { j->fallback |= FB_OP5; continue; }
             int32_t frame = k % ab, row = frame / a, col = frame % a;
             u128 fa = spu_csflt(SPLW((uint32_t)a), 155), fb = spu_csflt(SPLW((uint32_t)b), 155);
@@ -276,13 +287,14 @@ static void f_7C18(J* j, const uint8_t* mat, const uint8_t* H, const uint8_t* E,
             j->op5cache = V4(w[0], w[1], w[2], w[3]);
             emit_vec(j, slot, w, 1);
         } else if (op == 11) {
+            if (!inmat(j, mat, d, 40)) return;
             int s3 = S16(IN1 + 0xAE), sB0 = S16(IN1 + 0xB0); uint32_t flag = R32(d); const uint8_t* dd = d; d += 40;
             if (s3 < 0 && sB0 < 0) continue;
             uint32_t m[12];
             const uint8_t* src = dd;
             if (flag != 0) {
-                uint32_t n = R32(H + 0x20), key = R32(mat); const uint8_t* hit = 0;
-                for (uint32_t q = 0; q < n && extra; q++) {
+                uint32_t key = R32(mat); const uint8_t* hit = 0;
+                for (uint32_t q = 0; q < nx && extra; q++) {
                     uint32_t k0 = R32(extra + 64 * q);
                     if (k0 == key) { hit = extra + 64 * q; break; }
                     if (k0 == 0xFFFFFFFFu) hit = extra + 64 * q;
@@ -438,17 +450,52 @@ static void f_6FE0(J* j, const uint8_t* E)
     j->stencil = ref;
 }
 
-/* The job's main, 0x12C50. */
-static void run(J* j)
+/* The branches the model lacks that IN1 alone decides, checked before any
+ * work (section 10.2). Conservative: a job that might never reach one of
+ * them still goes to the SPU. */
+static void precheck(J* j, uint32_t type, int mat_on)
 {
-    uint32_t type = R32(IN1 + 4);
-    if (type != 0 && type != 2) { j->fallback |= FB_TYPE; return; }
+    if (mat_on) {
+        uint32_t n = R32(IN1 + 0x9C);
+        if (n > 17) n = 17;
+        for (uint32_t i = 0; i < n; i++) {
+            uint32_t e = R32(IN1 + 0x58 + 4 * i), t = (e >> 10) & 31;
+            if (t > 11) continue;
+            if (t == 0 && (e & 0x8000)) j->fallback |= FB_SRGB;
+            else if (t != 0 && t != 4) j->fallback |= FB_CONST;
+        }
+        if ((int32_t)R32(IN1 + 0xC0) > 0) {
+            uint32_t nops = R32(IN1 + 0xC0);
+            if (nops > 20) nops = 20;
+            for (uint32_t i = 0; i < nops; i++) {
+                uint32_t op = R32(IN1 + 0xC4 + 4 * i);
+                if (op > 14 || op == 5) continue;
+                if (op == 11) { if (S16(IN1 + 0xB0) >= 0) j->fallback |= FB_OP11B; }
+                else if (op == 4) { if (S16(IN1 + 0xA6) >= 0) j->fallback |= FB_OP4; }
+                else j->fallback |= FB_OP;
+            }
+        }
+    }
     if (type == 0) {
         static const int ks[] = { 43, 12, 4, 17, 13, 45, 7, 6, 5, 9, 8 };
         for (unsigned i = 0; i < sizeof ks / sizeof *ks; i++) if (SLOT(ks[i]) >= 0) j->fallback |= FB_SIDE;
         if (IN1[9]) j->fallback |= FB_IN1_9;
         if (IN1[0xD4] ? 1 : IN1[0x17A]) j->fallback |= FB_FPUPLOAD;
-    }
+        if (SLOT(2) >= 0) j->fallback |= FB_KIND2;
+        if (SLOT(10) >= 0 || SLOT(11) >= 0) j->fallback |= FB_KIND10;
+    } else if (SLOT(11) >= 0) j->fallback |= FB_KIND11;
+}
+
+/* The job's main, 0x12C50. */
+static void run(J* j)
+{
+    uint32_t type = R32(IN1 + 4);
+    if (type != 0 && type != 2) { j->fallback |= FB_TYPE; return; }
+    const uint8_t* D = IN1 + 0x1C;
+    const int mat_on = R32(D + 0x38) || R32(D + 0x80) || S16(IN1 + 0xA4) >= 0 || S16(IN1 + 0xA6) >= 0 ||
+                       S16(IN1 + 0xA8) >= 0 || S16(IN1 + 0xAC) >= 0 || S16(IN1 + 0xAA) >= 0 ||
+                       S16(IN1 + 0xAE) >= 0 || S16(IN1 + 0xB0) >= 0;
+    precheck(j, type, mat_on);
     if (j->fallback) return;
 
     /* 0x4328: range selection */
@@ -456,6 +503,7 @@ static void run(J* j)
     uint32_t n = (uint32_t)((int32_t)(cur - R32(IN + 0)) >> 9);
     if (n > 100) n = 100;
     const uint8_t* Q = n ? G(j, R32(IN + 0), n * 512) : 0;
+    if (j->fallback) return;
     uint32_t rb[100], re[100]; int front = 0, back = (int)n;
     uint32_t b = R32(IN1 + 0) & 0xFF;
     for (uint32_t k = 0; k < n; k++) {
@@ -465,8 +513,8 @@ static void run(J* j)
         if (IN1[0x0A] == 0) {
             int32_t N = (int32_t)R32(IN2), i = (int32_t)R32(IN2 + 4);
             if (N <= 0) { j->fallback |= FB_TYPE; return; }
-            int32_t c = (e - s + N - 1) / N; int32_t s2 = s + c * i; if (!(e > s2)) s2 = e;
-            int32_t e2 = s2 + c; if (!(e > e2)) e2 = e; s = s2; e = e2;
+            int32_t c = (e - s + N - 1) / N; int32_t s2 = (int32_t)((uint32_t)s + (uint32_t)c * (uint32_t)i); if (!(e > s2)) s2 = e;
+            int32_t e2 = (int32_t)((uint32_t)s2 + (uint32_t)c); if (!(e > e2)) e2 = e; s = s2; e = e2;
         }
         if (s == e) continue;
         int idx = r[12] ? --back : front++;
@@ -478,10 +526,6 @@ static void run(J* j)
 
     j->ring_ea = R32(IN + 8); j->delta = R32(IN + 0xC); j->limit = R32(IN + 0x10);
     if (!ea_ok(j->ring_ea, 4) || j->limit < 4096) { j->bad_ea = j->ring_ea; j->bad_size = 0xF1; j->fallback |= FB_EA; return; }
-    const uint8_t* D = IN1 + 0x1C;
-    int mat_on = R32(D + 0x38) || R32(D + 0x80) || S16(IN1 + 0xA4) >= 0 || S16(IN1 + 0xA6) >= 0 ||
-                 S16(IN1 + 0xA8) >= 0 || S16(IN1 + 0xAC) >= 0 || S16(IN1 + 0xAA) >= 0 ||
-                 S16(IN1 + 0xAE) >= 0 || S16(IN1 + 0xB0) >= 0;
     j->op5cache = SPLW(F1); j->streams[0] = j->streams[1] = j->streams[2] = 0x7FFFFFFF; j->stencil = 0xFFFFFFFF;
     j->need_mat = SLOT(0) >= 0 || SLOT(1) >= 0 || SLOT(2) >= 0 || SLOT(3) >= 0 || SLOT(10) >= 0 || SLOT(11) >= 0;
     const uint32_t matsz = (R32(IN1 + 0xBC) + 15) & ~15u;
@@ -511,7 +555,7 @@ static void run(J* j)
             if (j->fallback) return;
             if (mat_on) {
                 if (changed) { f_143F0(j, mat); f_15E78(j, mat, old_mat); old_mat = mat; }
-                if ((int32_t)R32(IN1 + 0xC0) > 0) f_7C18(j, mat, H, E, extra);
+                if ((int32_t)R32(IN1 + 0xC0) > 0) f_7C18(j, mat, E, extra, nx);
             }
             u128 M[4]; object_matrix(j, M, rec, T, S);
             if (type == 0) {
@@ -542,7 +586,8 @@ static void job_init(J* j, spu_context* ctx)
 {
     memset(j, 0, offsetof(J, blocks));
     j->ctx = ctx;
-    const uint32_t in = ctx->gpr[3]._u32[0] & SPU_LS_MASK & ~15u;
+    uint32_t in = ctx->gpr[3]._u32[0] & SPU_LS_MASK & ~15u;
+    if (in > SPU_LS_SIZE - 0x520) { j->fallback |= FB_EA; in = 0; }
     j->IN = ctx->ls + in; j->IN1 = j->IN + 0x380; j->IN2 = j->IN + 0x500;
 }
 
@@ -586,12 +631,7 @@ static int compare(J* j, spu_context* ctx, const uint8_t* rec_ls)
         const Block* b = &j->blocks[k];
         if (!ea_ok(ea, 4096)) return 2;
         const uint8_t* g = vm_base + ea;
-        uint8_t want[4096];
-        memcpy(want, b->data, b->used);
-        for (uint32_t q = 0; q < j->ndc; q++)
-            if (j->dc[q] >> 12 == k && (j->dc[q] & 4095) + 4 <= b->used)
-                memcpy(want + (j->dc[q] & 4095), g + (j->dc[q] & 4095), 4);
-        if (memcmp(g, want, b->used) != 0) {
+        if (memcmp(g, b->data, b->used) != 0) {
             static int nd;
             const char* dir = getenv("PS3RECOMP_EC5F_DUMP");
             if (dir && __atomic_fetch_add(&nd, 1, __ATOMIC_RELAXED) < 12) {
@@ -640,14 +680,15 @@ static int ec5f_main(spu_context* ctx)
         return 0;
     }
     const uint32_t out = ctx->gpr[9]._u32[0] & SPU_LS_MASK & ~15u;
+    if (out > SPU_LS_SIZE - 32) return 0;
     if (s_mode == 2) {
         /* Run the SPU job as its wrapper would, then compare. */
         void (*fn)(spu_context*) = spu_lookup(EC5F_MAIN, ctx->resident_ovl);
         if (!fn) return 0;
         const int32_t si = (int32_t)ctx->image_id;
         t_bypass = 1;
-        ctx->gpr[0]._u32[0] = EC5F_RET;
-        ctx->host_depth++; fn(ctx); spu_drain_call(ctx, EC5F_RET); ctx->host_depth--;
+        const uint32_t r0 = ctx->gpr[0]._u32[0];
+        ctx->host_depth++; fn(ctx); spu_drain_call(ctx, r0); ctx->host_depth--;
         spu_img_restore(ctx, si);
         t_bypass = 0;
         __atomic_fetch_add(&s_ns_nat, t1 - t0, __ATOMIC_RELAXED);
