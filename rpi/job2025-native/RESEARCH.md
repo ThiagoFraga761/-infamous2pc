@@ -296,3 +296,233 @@ Total: 57 functions, 6,952 distinct pcs executed out of ~27k.
 - A city area with characters or vehicles, to see whether the other graph
   opcodes, 2 layers or the list PUT are ever used. If they are, they are the
   fallback set until modelled.
+
+## 8. Implemented: a cache in front of main, plus the native tail (2026-10-18)
+
+### 8.0 Why a cache and not a port of the decoders
+
+- The decode path is ~3,500 dense SIMD instructions:
+  - 0x1B5F0, 0x1C510 and 0x1D4D0 are bit-field readers that build floats from
+    sign/exponent/mantissa fields, decode smallest-three quaternions and use
+    polynomial sin/cos;
+  - 0x18F08 drives them per track category (header flags at clip+0x24:
+    bit 1, bit 2, bit 3 = float channels, then 0x1CBB0).
+  - A byte-exact port of that is a long project.
+- Its result does not depend on the object: in a frame every instance of a
+  rig has the same rig, clips and times. Only the root matrix
+  (desc+0x40..0x7F) and the output EAs (desc+0x80..0x8B) differ.
+- The capture has 19 distinct animation keys in 289 jobs. Run in capture
+  order with a cache, 272 of 293 jobs take the native path.
+
+### 8.1 Key (`j_make_key`)
+
+All of these must match byte for byte:
+
+- desc+0x00..0x3F and desc+0x8C..0x9F;
+- the LS layout of section 1.3 (buffer 1/2/3 LS and sizes, list LS and size);
+- buffer 1 (the rig) and buffer 2 (clip entries with their times, blend
+  parameters);
+- per clip entry, from guest memory:
+  - the clip header (entry EA, size u16 at entry+4; its 4-byte format tag must match);
+  - every segment of the segment table (count = lo16 at hdr+0x10, table at
+    hdr + 0x38 + u32(hdr+0x38), entries {u32 size & 0x7FFF, u32 offset from
+    the entry EA}). Hashing all segments makes the key independent of which
+    segment the time selects (0x15494);
+  - the frame block: EA = u32(hdr+0x2C) if nonzero, else entry EA +
+    u32(hdr+0x34); size u32(hdr+0x28) (0x16044).
+- Supported shapes: layers (desc+0x8C hi16) <= 1, entries (lo16) 1 or 2.
+  Anything else (and any range that is not committed) runs on the SPU,
+  unrecorded.
+- Checked on the capture: every GET at 0x15270, 0x155DC and 0x16118 of
+  every job lies inside the keyed ranges. The `key_*` differential tests
+  patch the time, the frame block, a segment and the layer count: each
+  patched job turns into a miss.
+
+### 8.2 Miss: run the SPU job, record, validate (`j_record`)
+
+1. Snapshot the LS window [buffer 3, buffer 3 + 0x8000).
+2. Run the lifted main (as ec5f mode 2 does).
+   - The native entry at 0x17280 (the float blend) snapshots the window and
+     r0..r15 when the blend starts.
+3. Read main's frame (r1 at entry - 0x2A0) once main has returned:
+
+   | frame slot | content |
+   |------------|---------|
+   | +0x1D4 | N |
+   | +0x214 | op-3 pose |
+   | +0x218 | 3x4 / 4x4 buffer |
+   | +0x21C | palette |
+   | +0x90 / +0x94 | vector LS and size |
+   | +0x48 | float channels (vector source) |
+   | +0x40 / +0x44 | entry-0 pose buffer start / its last quad |
+
+4. Refuse the entry if main took a path the tail does not model:
+
+   | check | what it rules out |
+   |-------|-------------------|
+   | +0x1D0 != +0x1D4 | 0x5C58 path |
+   | +0x188 != 0 | list PUT / 0x5CFC path |
+   | +0x220/+0x224 not equal to +0x90/+0x94 | another vector path |
+
+   It is also refused if any buffer leaves the window.
+5. The entry holds:
+   - the op-3 pose (N x 48 B);
+   - per clip entry, its pose buffer (one buffer length apart). For two
+     entries the values are taken at the blend's start; for one entry, at
+     the end of main;
+   - the blend's registers.
+6. Validate: run the native tail (8.3) on the window as it was at job
+   start, and compare its three PUTs with what the SPU job just wrote.
+   - The entry is used only if all three are identical.
+   - Otherwise it is kept as "invalid" and that key always runs on the SPU.
+
+### 8.3 Hit: the tail of main (`j_tail`)
+
+1. Make main's job-manager calls in main's order, from main's frame:
+   API+68 (link 0x5078), then getbuf(0, i, 0, i == 3) for i = 1..3 (links
+   0x50B8, 0x5240, 0x5320). The result is checked against the layout the
+   key assumed, and a mismatch is logged.
+2. Pose buffers. Of the float block [vector source, + vector size), entry i
+   writes only the first `fw[i]` words, with
+   fw = u32(hdr+0x30) + ((u32(hdr+0x24) >> 3) & 1):
+   - the clear loop 0x158A0 writes hdr[0x30] words;
+   - the float decoder writes one more.
+
+   Those words come from the entry; the other float words keep whatever LS
+   holds, as on the SPU. The last quad (the frame block GET) is always
+   written. Any other word is written if the job changed it.
+3. Two entries: run the lifted float blend 0x17280 with the recorded
+   registers (link 0x147DC) on the live LS. It is a leaf, about 150
+   instructions, and it carries the never-written lanes into the vector the
+   way the SPU does.
+4. Restore the op-3 pose. Copy the float channels to the vector buffer
+   (0x1D8E8), and place the inverse bind table there from guest rig+0x24
+   (the GET at 0x564C).
+5. 0x17780, pose to 3x4, in groups of four bones; the next group is loaded
+   before the current one is stored. Per bone (q, t, s), with
+   sx2 = fm(sx, 2.0) etc.:
+   - row 0 = (fm(fnms(qz,qz,fnms(qy,qy,0.5)),sx2), fm(fnms(qw,qz,fm(qx,qy)),sy2), fm(fma(qw,qy,fm(qx,qz)),sz2), tx)
+   - row 1 = (fm(fma(qw,qz,fm(qx,qy)),sx2), fm(fnms(qz,qz,fnms(qx,qx,0.5)),sy2), fm(fnms(qw,qx,fm(qy,qz)),sz2), ty)
+   - row 2 = (fm(fnms(qw,qy,fm(qx,qz)),sx2), fm(fma(qw,qx,fm(qy,qz)),sy2), fm(fnms(qy,qy,fnms(qx,qx,0.5)),sz2), tz)
+6. The root loop 0x5814, N bones, with R = desc+0x40.. and w = (0,0,0,1):
+   out_i[c] = fma(R3[i], w[c], fma(R2[i], X2[c], fma(R1[i], X1[c], fm(R0[i], X0[c])))).
+7. 0x18B80, in place over the inverse bind table B:
+   out_i[c] = fma(w[c], X_i[c], fma(B2[c], X_i[2], fma(B1[c], X_i[1], fm(B0[c], X_i[0])))).
+   Then PUT the palette (desc+0x84, N x 48).
+8. 0x4F60, in place, last bone first: 3x4 rows to a 4x4 whose rows are the
+   columns (w = 0 for rows 0-2, 1.0 for row 3). Then PUT the vector
+   (desc+0x88, if nonzero) and PUT the matrices (desc+0x80, N x 64).
+
+### 8.4 Validation
+
+- **Capture, in capture order, LS chained per SPU context**
+  (`natdrv`, `j2025_core.h`):
+  - 272 jobs native, 21 on the SPU, 19 entries recorded, none invalid;
+  - **867/867 PUTs byte-exact, 810 of them native.**
+  - The two jobs cut off by the end of the capture cannot be recorded.
+- **Function-level differential** (`unittest`): 0x17780, 0x18B80 and 0x4F60
+  on the interpreter against the native versions, on random inputs (unit and
+  random quaternions, N = 1..33, -0, denormals, huge values):
+  2000/2000 identical for each.
+- **Job-level differential** (`difftest2.py`, native+cache against
+  every-job-on-the-SPU on the same patched capture): 13/13.
+  - Random roots, rotated roots, special floats in the root, random
+    inverse bind tables.
+  - Output EAs moved, vector EA 0.
+  - Buffer 3 poisoned (0x7F) and the pose buffers poisoned (0xC1), which
+    exercises the never-written float words.
+  - Key changes (time, frame block, segment data, layer count) and a time
+    change shared by several jobs.
+- **Mutation checks** (`-DJMUT=n`):
+
+  | mutant | caught by |
+  |--------|-----------|
+  | quaternion term sign | unittest (identity rotations only in the captures) |
+  | root w | recording validation (all 19 entries invalid) |
+  | palette without the w term | recording validation |
+  | 4x4 w | recording validation |
+  | fw+1 | capture and root differential |
+  | fw-1 | validation under the poisoned LS |
+  | mask quad not written | capture |
+  | vector copy skipped | capture |
+  | blend skipped | validation on 9 of 19 keys, the others need no blend |
+
+  An operand swap in fm (commutative) passes, as it should.
+
+### 8.5 What the coordinator must check in-game (not testable offline)
+
+- **getbuf before/after API+68.** The hit path calls API+68 and then the
+  three getbufs, as main does. It does not run the SPU job afterwards, so a
+  layout mismatch can only be logged ("buffer i is ..."). Mode 2 shows
+  whether that ever happens.
+- **Lifted calls from native.** The blend (0x17280) and the API functions
+  are called with the lift's own call patterns (direct for 0x17280,
+  `spu_indirect_branch` for the API). Mode 2 compares every hit against the
+  SPU job.
+- **Concurrency.** Several SPUs can miss on the same key in the first
+  frame they see it; each records, the duplicate is dropped. The cache
+  holds 128 entries, oldest-first eviction, refcounted.
+- **Expected gain.**
+  - Per hit: the key (~0.7 to 2.6 KB of memcmp + hash), five guest calls
+    (the API and the 150-instruction blend) and the tail (~25 vector ops per
+    bone). That replaces about 9,700 SPU instructions.
+  - A miss costs the SPU job plus about 0.1 MB of memcpy.
+  - Measure with PS3RECOMP_NATIVE_J2025=2 (prints per-job native vs SPU
+    time) and the 10 s stats line.
+
+### 8.6 Erratum: LS layout in game (2026-10-18)
+
+- In game, LS 0xC00..0xC4F (the manager header of section 1.3) is zero, so
+  every job fell back with JF_LAYOUT. The real manager keeps its input DMA
+  list in its own tables (0xEB0, indexed through 0xDF0 and the slot at
+  0x12E0), in a different encoding, and getbuf (0x2EB0) also allocates DMA
+  tags, so it cannot be called early.
+- `j_layout_of` now uses only the module side:
+  - buffer 1 is at the first 1 KB after .bss (0x1EC00). Its format tag is at
+    +0x30 and its size is the u16 at rig+0x1C;
+  - buffer 2 starts at the next 1 KB;
+  - its 16-byte DMA list is the last 16 bytes of buffer 2's region, and the
+    region size is the list's total rounded up to 1 KB;
+  - buffer 3 starts right after the list.
+- Checked on the game's LS dump (a 32-bone rig: layout found, then the job is
+  refused as JF_DESC, 5 layers / 6 entries) and on the oracle (unchanged:
+  867/867, differential tests pass).
+
+### 8.7 Second in-game round: fallback reasons (2026-10-18)
+
+- **What the live-LS dumps at the hook show:**
+  - JF_LAYOUT and JF_DESC: characters, a 268-bone rig with 8 to 11 layers
+    and 9 to 12 entries;
+  - JF_DESC: a 32-bone rig with 5 layers and 6 entries;
+  - JF_KEY: a 268-bone rig with 1 layer and 2 entries (rig 0x32C0 bytes,
+    larger than the key buffer);
+  - JF_CLIP: a 269-bone rig with 1 layer and 2 entries, whose second clip
+    header is 0x440 bytes.
+  - In all of them the times differ per instance and advance every frame,
+    so a cache cannot hit.
+- **The layout derivation of 8.6 was fragile.** It looked for the buffer-2
+  list by trying region sizes, and on unknown shapes it could match data
+  that only looked like a list.
+- **Order of checks in `j_make_key` now:**
+  1. descriptor pointer;
+  2. shape (layers <= 1, entries 1..2), otherwise JF_DESC;
+  3. rig tag and size;
+  4. rig bones <= 64, otherwise JF_BIG (0x40, new);
+  5. buffer 2 = 16 x entries (+16 with two entries), with its one-element
+     DMA list exactly in the last 16 bytes of its 1 KB region, otherwise
+     JF_LAYOUT.
+
+  Clip headers may now be up to 0x1000 bytes.
+- **`j_layout.shape`:** a hash of the time-independent inputs (descriptor
+  minus root/EAs, layout, rig, clip header bytes).
+  - The in-game glue counts recording failures and invalid entries per
+    shape. After two, with no success, the shape skips recording and runs on
+    the SPU directly (JF_SHAPE, 0x80).
+  - `PS3RECOMP_J2025_INVDUMP=prefix` dumps the LS at entry (window) and at
+    main's return for the first 8 failed or invalid recordings.
+- **Cost of the old path:** JF_ENTRY jobs paid the recording (32 KB
+  snapshot, frame read) and still ran on the SPU, every time. Big rigs no
+  longer get that far. Invalid entries mean the native tail and the SPU
+  differ on the same input, which is a model gap, not a key problem. The
+  likely candidates are graph programs with opcodes other than 3, or tail
+  paths the frame checks do not see. Dumps are needed to say which.

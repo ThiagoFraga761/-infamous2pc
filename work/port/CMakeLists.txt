@@ -152,7 +152,8 @@ if(PORT_ENABLE_SPU)
              "${PS3RECOMP_DIR}/runtime/spu/spu_cold.c"
              # ec5f_native.c: the render-list job's main, natively. It runs on
              # the SPU's float helpers, so it is built like a lifted TU.
-             "${CMAKE_CURRENT_SOURCE_DIR}/ec5f_native.c")
+             "${CMAKE_CURRENT_SOURCE_DIR}/ec5f_native.c"
+             "${CMAKE_CURRENT_SOURCE_DIR}/job2025_native.c")
         # Generated beside the lift; each is present only once its generator
         # has been run, so each is included only if it is actually here.
         foreach(gen IN ITEMS spu_workloads.c spu_elf_workloads.c jobmods_register.c taskset_policy_bytes.c)
@@ -277,9 +278,16 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 find_package(PNG QUIET)
 if(PNG_FOUND)
     target_link_libraries(${PROJECT_NAME} PRIVATE ${PNG_LIBRARIES})
+    # A cross sysroot's own include dir (MinGW: <root>/include, where zlib.h
+    # and png.h sit) must not be passed again: as a later -isystem it reorders
+    # the search and libstdc++'s #include_next <stdlib.h> finds nothing.
+    set(_png_inc ${PNG_INCLUDE_DIRS})
+    foreach(_root ${CMAKE_FIND_ROOT_PATH})
+        list(REMOVE_ITEM _png_inc "${_root}/include")
+    endforeach()
     set_source_files_properties(ui.cpp PROPERTIES
         COMPILE_DEFINITIONS PORT_HAVE_PNG=1
-        INCLUDE_DIRECTORIES "${PNG_INCLUDE_DIRS}")
+        INCLUDE_DIRECTORIES "${_png_inc}")
 endif()
 
 # The runtime is C++, and on Apple also Objective-C. Letting CMake infer the

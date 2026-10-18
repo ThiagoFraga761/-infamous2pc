@@ -25,6 +25,7 @@
 !/work/port/port_cpu_check.c
 !/work/port/native_passes.c
 !/work/port/ec5f_native.c
+!/work/port/job2025_native.c
 !/work/port/config.toml
 !/work/port/settings.cpp
 !/work/port/settings.h
