@@ -595,6 +595,13 @@ static void log_pump_start(void)
     }
     atexit(port_log_drain);
 }
+#else
+/* Windows has no log pump: stdout and stderr go straight to their target, so
+ * draining them is a flush. */
+extern "C" void port_log_drain(void)
+{
+    fflush(stdout); fflush(stderr);
+}
 #endif
 
 /* A default the environment can override. */

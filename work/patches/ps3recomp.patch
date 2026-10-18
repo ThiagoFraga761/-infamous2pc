@@ -10,7 +10,7 @@ index d320252..a075898 100644
 +# SPU differential test build products (runtime/spu/tests/build_diff_test.sh)
 +runtime/spu/tests/build_diff/
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index f843504..2d91a35 100644
+index f843504..705523d 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -26,7 +26,7 @@ option(PS3RECOMP_BUILD_TESTS "Build unit tests" OFF)
@@ -64,7 +64,7 @@ index f843504..2d91a35 100644
      "runtime/*.c"
      "runtime/*.cpp"
  )
-@@ -128,6 +143,17 @@ target_include_directories(ps3recomp_runtime PRIVATE
+@@ -128,11 +143,35 @@ target_include_directories(ps3recomp_runtime PRIVATE
      "${CMAKE_CURRENT_SOURCE_DIR}/include"
  )
  
@@ -77,12 +77,31 @@ index f843504..2d91a35 100644
 +        "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/runtime/platform/mingw_posix.h")
 +    find_package(SDL2 REQUIRED)
 +    target_link_libraries(ps3recomp_runtime PUBLIC SDL2::SDL2 winpthread)
++    # The D3D12 paths (rsx_live_draw.c, rsx_d3d12_backend.c) name their import
++    # libraries with #pragma comment(lib), which GCC ignores.
++    target_link_libraries(ps3recomp_runtime PUBLIC d3d12 dxgi d3dcompiler)
++endif()
++
++# XInput: the Windows SDK's xinput.lib imports xinput1_4.dll, part of Windows
++# 8 and later. MinGW's libxinput.a imports xinput1_3.dll instead, which only
++# the legacy DirectX redistributable installs, so the .exe would not start on
++# a clean Windows 10/11.
++if(MINGW)
++    set(PS3RECOMP_XINPUT_LIB xinput1_4)
++else()
++    set(PS3RECOMP_XINPUT_LIB xinput)
 +endif()
 +
  # Platform-specific link libraries
  if(WIN32)
      target_link_libraries(ps3recomp_runtime PRIVATE
-@@ -180,6 +206,13 @@ if(PS3RECOMP_RSX_VULKAN)
+         ws2_32      # Winsock for network modules
+-        xinput      # XInput for gamepad
++        ${PS3RECOMP_XINPUT_LIB}   # XInput for gamepad
+         ole32       # COM for WASAPI audio
+         bcrypt      # BCryptGenRandom for SSL RNG
+     )
+@@ -180,6 +219,13 @@ if(PS3RECOMP_RSX_VULKAN)
      target_include_directories(ps3recomp_runtime PRIVATE "${PS3RECOMP_VULKAN_INCLUDE_DIR}")
      # PUBLIC: ps3recomp_host selects its backend on this definition.
      target_compile_definitions(ps3recomp_runtime PUBLIC PS3RECOMP_RSX_VULKAN)
@@ -96,7 +115,7 @@ index f843504..2d91a35 100644
      target_link_libraries(ps3recomp_runtime PUBLIC ${CMAKE_DL_LIBS})
      message(STATUS "  Vulkan:       RSX backend enabled (rsx_vulkan_backend.c, headers in ${PS3RECOMP_VULKAN_INCLUDE_DIR})")
  endif()
-@@ -272,6 +305,10 @@ endif()
+@@ -272,6 +318,10 @@ endif()
  # libs/video/rsx_shader_spirv.cpp is a stub and the Vulkan backend stays on
  # its fixed-function path.
  if(PS3RECOMP_RSX_VULKAN)
@@ -107,7 +126,7 @@ index f843504..2d91a35 100644
      if(glslang_FOUND AND TARGET glslang::glslang AND TARGET glslang::SPIRV)
          set_source_files_properties(
              "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_shader_spirv.cpp"
-@@ -449,6 +486,9 @@ if(UNIX)
+@@ -449,6 +499,9 @@ if(UNIX)
                      "${CMAKE_CURRENT_SOURCE_DIR}/tools/ppu_lifter.py"
              COMMENT "Generating the smoke title's image and ppu_recomp.h")
  
@@ -117,7 +136,7 @@ index f843504..2d91a35 100644
          add_custom_command(
              OUTPUT "${SMOKE_GEN}/ppu_hle_nids.cpp"
              COMMAND "${Python3_EXECUTABLE}"
-@@ -456,6 +496,7 @@ if(UNIX)
+@@ -456,6 +509,7 @@ if(UNIX)
                      --out "${SMOKE_GEN}/ppu_hle_nids.cpp" --all
              DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_hle_nids.py"
                      "${CMAKE_CURRENT_SOURCE_DIR}/tools/nid_database.py"
@@ -6082,10 +6101,10 @@ index f039abf..828ecf4 100644
  
 diff --git a/libs/video/rsx_be_thread.c b/libs/video/rsx_be_thread.c
 new file mode 100644
-index 0000000..d2e9fda
+index 0000000..c30270c
 --- /dev/null
 +++ b/libs/video/rsx_be_thread.c
-@@ -0,0 +1,1034 @@
+@@ -0,0 +1,1037 @@
 +/*
 + * ps3recomp - the draw engine's backend calls, recorded on a thread of their own
 + *
@@ -7118,6 +7137,9 @@ index 0000000..d2e9fda
 +#else   /* not Linux: the engine records itself */
 +
 +const rsx_draw_backend* rsx_be_thread_wrap(const rsx_draw_backend* be) { return be; }
++
++/* Nothing is ever queued: the backend is called directly. */
++int rsx_be_thread_presents_queued(void) { return 0; }
 +
 +#endif
 diff --git a/libs/video/rsx_be_thread.h b/libs/video/rsx_be_thread.h
@@ -24932,7 +24954,7 @@ index acbaf12..03159da 100644
  }
  
 diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
-index e73a151..de6ed59 100644
+index e73a151..f4c748e 100644
 --- a/runtime/ppu/ppu_loader.cpp
 +++ b/runtime/ppu/ppu_loader.cpp
 @@ -20,6 +20,11 @@
@@ -25745,7 +25767,26 @@ index e73a151..de6ed59 100644
      if (!en) return;
      static int n = 0; if (n++ >= 4) return;
      const flow_alloc_rec* best = 0;
-@@ -1968,7 +2212,7 @@ extern "C" void ppu_register_function(uint64_t addr, ppu_fn fn)
+@@ -1921,8 +2165,17 @@ void flow_lookup_alloc(unsigned int p) {
+     else      fprintf(stderr, "[alloc-tag] garbage obj 0x%08X is in NO live alloc -> use-after-free or pool/untracked\n", p);
+ }
+ 
+-/* Cross-fragment trampoline pointer (matches the lifted header's TLS decl). */
++/* Cross-fragment trampoline pointer (matches the lifted header's TLS decl).
++ * MinGW: defined in ppu_trampoline_tls.cpp, built by the lifted code's
++ * compiler, because MinGW GCC's emulated TLS and clang's native TLS do not
++ * link. This unit reaches it by address; the slot is per thread and fixed,
++ * hence const, so one call serves a whole function. */
++#if defined(__MINGW32__)
++extern "C" __attribute__((const)) void (**ppu_trampoline_slot(void))(void*);
++#  define g_trampoline_fn (*ppu_trampoline_slot())
++#else
+ extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*) = nullptr;
++#endif
+ 
+ /* Per-thread active guest context, for the crash handler to report the guest PC
+  * (ctx->pc, updated by lifted code at block boundaries) of a host AV. */
+@@ -1968,7 +2221,7 @@ extern "C" void ppu_register_function(uint64_t addr, ppu_fn fn)
          i = (i + 1) & PPU_HASH_MASK;
      }
      static int warned = 0;
@@ -25754,7 +25795,7 @@ index e73a151..de6ed59 100644
          fprintf(stderr, "[ppu] function table full (%u/%u) -- raise PPU_HASH_BITS; "
                  "0x%08X dropped\n", g_fn_count, (unsigned)PPU_HASH_SIZE, a);
  }
-@@ -2033,7 +2277,7 @@ extern "C" void ydkj_memmove_0036FA74(ppu_context* ctx)
+@@ -2033,7 +2286,7 @@ extern "C" void ydkj_memmove_0036FA74(ppu_context* ctx)
      if (vm_base && dst <= 0x400240A8u && 0x400240A8u < dst + n) {
          uint32_t soff = 0x400240A8u - dst + src;
          uint32_t sval = __builtin_bswap32(*(volatile uint32_t*)(vm_base + soff));
@@ -25763,7 +25804,7 @@ index e73a151..de6ed59 100644
              fprintf(stderr,"[memfix] copy dst=0x%08X src=0x%08X n=0x%X -> 0x400240A8 gets src[0x%08X]=0x%08X\n",
                      dst, src, n, soff, sval);
      }
-@@ -2078,9 +2322,31 @@ static uint32_t ppu_code_hi(void)
+@@ -2078,9 +2331,31 @@ static uint32_t ppu_code_hi(void)
      return hi;
  }
  
@@ -25795,7 +25836,7 @@ index e73a151..de6ed59 100644
      uint32_t sp = (uint32_t)ctx->gpr[1];
      /* also show cia/lr and a few key regs (r3/r31 = likely 'this'/object) + raw stack */
      /* r13 too: it is the thread pointer, so it says WHICH TLS block this
-@@ -2107,8 +2373,8 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
+@@ -2107,8 +2382,8 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
                                (uint32_t)ctx->gpr[row * 8 + c]);
            fprintf(stderr, "%s\n", gr);
        } }
@@ -25806,7 +25847,7 @@ index e73a151..de6ed59 100644
          fprintf(stderr,"%s\n",rw); }
      /* Identify the worker's dispatched method: func_000750A8 vcalls
       * [[arg+0xC]+0] (code) with toc [[arg+0xC]+4]. Dump for the known thread
-@@ -2116,12 +2382,12 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
+@@ -2116,12 +2391,12 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
       * receive-loop function even though the thread stack has no return addrs. */
      { const uint32_t args[2] = {0x40003450u, 0x40003E80u};
        for (int j=0;j<2;j++){ uint32_t o=args[j];
@@ -25821,7 +25862,7 @@ index e73a151..de6ed59 100644
            memcpy(&t,vm_base+vt+4,4); toc=__builtin_bswap32(t);
            fprintf(stderr,"      ARG[0x%08X] vtbl=0x%08X -> method code=0x%08X toc=0x%08X (worker body?)\n", o, vt, code, toc); }
        } }
-@@ -2140,10 +2406,10 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
+@@ -2140,10 +2415,10 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
      { char bc[900]; int bp = snprintf(bc, sizeof bc, "[GSTACK:%s] chain:", tag ? tag : "?");
        uint32_t f = sp;
        for (int d = 0; d < 24 && bp < 820; d++) {
@@ -25834,7 +25875,7 @@ index e73a151..de6ed59 100644
            memcpy(&t, vm_base + prev + 0x14, 4);         /* low half of the saved lr */
            uint32_t ra = __builtin_bswap32(t);
            if (ra >= 0x10000 && ra < ppu_code_hi()) {
-@@ -2159,7 +2425,7 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
+@@ -2159,7 +2434,7 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
      char gs[1200]; int gp = snprintf(gs, sizeof gs, "[GSTACK:%s] sp=0x%08X:", tag ? tag : "?", sp);
      uint32_t last = 0;
      for (int i = 0; i < 700 && gp < 1100; i++) {
@@ -25843,7 +25884,7 @@ index e73a151..de6ed59 100644
          uint32_t t; memcpy(&t, vm_base + a, 4); uint32_t w = __builtin_bswap32(t);
          if (w < 0x10000 || w >= ppu_code_hi()) continue;
          uint32_t bg = 0;
-@@ -2178,7 +2444,7 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
+@@ -2178,7 +2453,7 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
   * return addresses to identify the caller. Env-gated by ALLOCPROBE. */
  int ppu_alloc_probe(void* vctx, uint32_t size, uint32_t obj, uint32_t sp)
  {
@@ -25852,7 +25893,7 @@ index e73a151..de6ed59 100644
      if (en < 0) en = getenv("ALLOCPROBE") ? 1 : 0;
      if (!en) return 0;
      if (size < 0x40000000u) return 0;            /* sane size -> ignore */
-@@ -2223,7 +2489,7 @@ int ppu_alloc_probe(void* vctx, uint32_t size, uint32_t obj, uint32_t sp)
+@@ -2223,7 +2498,7 @@ int ppu_alloc_probe(void* vctx, uint32_t size, uint32_t obj, uint32_t sp)
  /* General 4-value probe for tracing a specific lifted site (env ALLOCPROBE). */
  void ppu_dbg4(const char* tag, uint32_t a, uint32_t b, uint32_t c, uint32_t d)
  {
@@ -25861,7 +25902,7 @@ index e73a151..de6ed59 100644
      if (en < 0) en = getenv("ALLOCPROBE") ? 1 : 0;
      if (!en) return;
      static int n = 0;
-@@ -2265,7 +2531,7 @@ extern "C" void ppu_dump_bctrl_ring(uint32_t thread_id, const char* tag)
+@@ -2265,7 +2540,7 @@ extern "C" void ppu_dump_bctrl_ring(uint32_t thread_id, const char* tag)
       * from other threads, and a spliced ring is worse than no ring -- the first
       * use of this tool produced a diff that had a [surfsz] log line embedded in
       * the middle of it. */
@@ -25870,7 +25911,7 @@ index e73a151..de6ed59 100644
      if (!tried) { tried = 1;
          const char* e = getenv("BCTRL_RING");
          if (e && *e && e[1]) out = fopen(e, "w");   /* "1" means stderr */
-@@ -2328,7 +2594,7 @@ static void icall_hist(ppu_context* ctx, uint32_t tgt, int phase)
+@@ -2328,7 +2603,7 @@ static void icall_hist(ppu_context* ctx, uint32_t tgt, int phase)
      if (!open_) return;
      const uint32_t t = (uint32_t)ctx->thread_id, z = (uint32_t)ctx->gpr[3] == 0;
      /* PS3_ICALL_TRACE=<tid>: also log every call on that guest thread, in order. */
@@ -25879,7 +25920,7 @@ index e73a151..de6ed59 100644
        if (tt >= 0 && (uint32_t)tt == t) fprintf(stderr, "[ict] %08X %u\n", tgt, (uint32_t)ctx->gpr[3]); }
      AcquireSRWLockExclusive(&lk);
      for (uint32_t i = (tgt * 2654435761u + t) % N, n = 0; n < N; n++, i = (i + 1) % N) {
-@@ -2338,11 +2604,64 @@ static void icall_hist(ppu_context* ctx, uint32_t tgt, int phase)
+@@ -2338,11 +2613,64 @@ static void icall_hist(ppu_context* ctx, uint32_t tgt, int phase)
      ReleaseSRWLockExclusive(&lk);
  }
  
@@ -25946,7 +25987,7 @@ index e73a151..de6ed59 100644
        if (hg) { const uint32_t tgt = (uint32_t)ctx->ctr; icall_hist(ctx, tgt, 0);
                  ps3_indirect_call_impl(ctx); icall_hist(ctx, tgt, 1); return; } }
      if (!on) { ps3_indirect_call_impl(ctx); return; }
-@@ -2374,32 +2693,33 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2374,32 +2702,33 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
       * the disassembly, because nothing calls it with a `bl`. Diffing this ring
       * between the last frame a title drew and the first it did not is the only
       * way to see which way the dispatch went. */
@@ -25986,7 +26027,7 @@ index e73a151..de6ed59 100644
        if (only_lr == -2) { const char* e = getenv("PS3_CALLTRACE_LR");
                             only_lr = e ? (int64_t)strtoul(e, 0, 16) : -1; }
        /* PS3_CALLTRACE_R5=<n>: only calls with this selector in r5. Some lifted
-@@ -2411,11 +2731,11 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2411,11 +2740,11 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
         * when neither lr nor an argument is distinctive. */
        /* PS3_CALLTRACE_TO=<hex>: only calls whose TARGET is this address --
         * the way to catch an entry point that has no direct callers. */
@@ -26000,7 +26041,7 @@ index e73a151..de6ed59 100644
        if (only_from == -2) { const char* e = getenv("PS3_CALLTRACE_FROM");
                               only_from = e ? (int64_t)strtoul(e, 0, 16) : -1; }
        char cf[64];
-@@ -2424,7 +2744,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2424,7 +2753,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
            char want[32]; snprintf(want, sizeof want, "func_%08X", (uint32_t)only_from);
            if (strncmp(cf, want, strlen(want)) != 0) goto skip_calltrace;
        }
@@ -26009,7 +26050,7 @@ index e73a151..de6ed59 100644
        if (only_r5 == -2) { const char* e = getenv("PS3_CALLTRACE_R5");
                             only_r5 = e ? strtol(e, 0, 0) : -1; }
        if (only_r5 >= 0 && (int64_t)(int32_t)ctx->gpr[5] != only_r5) { /* skip */ } else
-@@ -2457,8 +2777,8 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2457,8 +2786,8 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
         * whether the engine then binds a screen target and draws. Scoped to the
         * exact call (target + null arg) so nothing else can be affected. */
        if (addr == 0x000DBD84u && (uint32_t)ctx->gpr[4] == 0 && vm_base) {
@@ -26020,7 +26061,7 @@ index e73a151..de6ed59 100644
            if (_ff < 0) { const char* e = getenv("FLOW_FORCE_RTCFG");
                           _ff = e ? 1 : 0;
                           /* A hex value supplies the config EXPLICITLY, for when
-@@ -2509,7 +2829,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2509,7 +2838,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
           * lr is the last DIRECT call site, not this one (bctrl does not write
           * lr), so it names the neighbourhood rather than the instruction --
           * still the fastest way to the right function. */
@@ -26029,7 +26070,7 @@ index e73a151..de6ed59 100644
            if (s_nc < 0) { const char* e = getenv("PS3_NULL_CALL");
                            s_nc = (e && *e == '0') ? 0 : 1; }
            /* Cap PER THREAD. A global cap lets one noisy thread exhaust it and
-@@ -2553,14 +2873,14 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2553,14 +2882,14 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
           * engine never establishes a screen render-target config.
           *
           * Off by default: a genuinely-null pointer must still return quietly. */
@@ -26046,7 +26087,7 @@ index e73a151..de6ed59 100644
                          fprintf(stderr, "[ppu] OPD-RECOVER: ctr=0 -> dispatching opd[0]=0x%08X\n", _c);
                      addr = _c;
                  }
-@@ -2571,8 +2891,8 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2571,8 +2900,8 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
           * reads its own input back as the return value and reports a nonsense
           * error code. Tokyo Jungle: cellAudioSetNotifyEventQueue(key=0x23A0)
           * "failed" with status 0x23A0 -- the key itself. Say so."*/
@@ -26057,7 +26098,7 @@ index e73a151..de6ed59 100644
          { char who[64]; ppu_guest_caller(who, sizeof who);
            if (n <= 400) {
              /* The lifted import thunk leaves the OPD address it loaded in r12,
-@@ -2593,7 +2913,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2593,7 +2922,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
       * identify the instance-init function (called with &spurs = 0x40009D00) and
       * confirm libsre receives the correct struct pointer. Env SPURS_TRACE. */
      if (addr >= 0x30031200u && addr < 0x30031900u) {
@@ -26066,7 +26107,7 @@ index e73a151..de6ed59 100644
          if (st) fprintf(stderr, "[SPURSTRACE] call libsre 0x%08X  r3=0x%08X r4=0x%08X r5=0x%08X\n",
              addr, (uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[4], (uint32_t)ctx->gpr[5]);
      }
-@@ -2604,7 +2924,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2604,7 +2933,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
       * completes and CreateTaskset (0x30014DC4) / CreateTask (0x30012520) are
       * ever reached, or execution stalls in the SPU bring-up handshake. */
      {
@@ -26075,7 +26116,7 @@ index e73a151..de6ed59 100644
          if (lt && addr>=0x30000000u && addr<0x3001D718u) {
              static uint32_t seen[1024]; static int nseen=0; int found=0;
              for (int i=0;i<nseen;i++) if (seen[i]==addr){ found=1; break; }
-@@ -2629,7 +2949,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2629,7 +2958,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
          ppu_fn fn2 = ppu_lookup(toc_reg);
          if (fn2) {
              static int _n = 0;
@@ -26084,7 +26125,7 @@ index e73a151..de6ed59 100644
              ctx->gpr[2] = addr;        /* callee TOC = the (TOC) value from the code slot */
              addr = toc_reg; ctx->ctr = toc_reg;
              fn = fn2;
-@@ -2642,7 +2962,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2642,7 +2971,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
          static thread_local int s_depth = 0;
          if (s_depth > 4000) {
              static int warned = 0;
@@ -26093,7 +26134,7 @@ index e73a151..de6ed59 100644
                  fprintf(stderr, "[ppu] recursion cap @0x%08X depth=%d -- skipping\n", addr, s_depth);
              return;
          }
-@@ -2655,7 +2975,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2655,7 +2984,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
           * deserializer ran with a wrong TOC -> garbage globals -> abort. Re-pin r2
           * to the dispatched toc before each link so the chain stays consistent. */
          uint32_t _toc0 = (uint32_t)ctx->gpr[2];
@@ -26102,7 +26143,7 @@ index e73a151..de6ed59 100644
          if (g_vcall_sp < 128) g_vcall_stk[g_vcall_sp] = addr;
          g_vcall_sp++;
          fn(ctx);
-@@ -2668,8 +2988,8 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2668,8 +2997,8 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
          if (g_vcall_sp > 0) g_vcall_sp--;
          /* PPU_RETWATCH=<hex>: catch the first vcall(s) whose RETURN value (r3)
           * equals this, pinning the exact virtual method that produces the poison. */
@@ -26113,7 +26154,7 @@ index e73a151..de6ed59 100644
              fprintf(stderr,"[RETWATCH] vcall -> func_%08X returned r3=0x%08X\n", addr, (uint32_t)rw);
  #ifdef _WIN32
              void* bt[16]; unsigned short fr=RtlCaptureStackBackTrace(0,16,bt,0);
-@@ -2705,17 +3025,33 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2705,17 +3034,33 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
           * (0x30000000..0x3FFFFFFF). This lets the boot proceed PAST bad vcalls
           * (diagnostic band-aid — skipped methods leave state incomplete). Default
           * OFF so the boot takes a clean crash-with-backtrace instead. */
@@ -26150,7 +26191,7 @@ index e73a151..de6ed59 100644
  #endif
              ctx->gpr[3] = 0;
              return;
-@@ -2726,7 +3062,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2726,7 +3071,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
       * Detect a long run of identical unresolved targets and bail so the run
       * stays fast and the log readable. */
      static uint32_t last = 0xFFFFFFFFu; static uint32_t streak = 0;
@@ -26159,7 +26200,7 @@ index e73a151..de6ed59 100644
      uint32_t cur = (uint32_t)ctx->ctr;
      if (cur == last) {
          if (++streak == stuckmax) {
-@@ -2784,7 +3120,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2784,7 +3129,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
                "           python tools/ppu_lifter.py EBOOT.elf --functions out/EBOOT.functions.json \\\n"
                "                  --hle-stubs out/EBOOT.imports.json -o src/recomp/\n");
        } }
@@ -26168,7 +26209,7 @@ index e73a151..de6ed59 100644
      if (dumped < 3) {
          dumped++;
          { void* ra = __builtin_return_address(0); HMODULE m=NULL;
-@@ -2826,7 +3162,12 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2826,7 +3171,12 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
           * see where each link points (heap object vs game image vs garbage) and
           * pinpoint how the garbage code field (e.g. 0xC708C708) got there. */
          if (vm_base) {
@@ -26181,7 +26222,7 @@ index e73a151..de6ed59 100644
                  return __builtin_bswap32(*(volatile uint32_t*)(vm_base + ea));
              };
              uint32_t obj = (uint32_t)ctx->gpr[3];
-@@ -2863,6 +3204,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2863,6 +3213,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
                  char gb[1400]; int gp = snprintf(gb, sizeof gb, "      GUEST-STACK(scan):");
                  uint32_t last = 0;
                  for (int i = 0; i < 700 && gp < 1300; i++) {
@@ -26189,7 +26230,7 @@ index e73a151..de6ed59 100644
                      uint32_t w = g32(sp + i*4);
                      if (w < 0x10000 || w >= ppu_code_hi()) continue;
                      uint32_t bg = 0;
-@@ -2932,7 +3274,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2932,7 +3283,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
  extern "C" void ppu_unlifted_stub(uint64_t addr, ppu_context* ctx)
  {
      (void)ctx;
@@ -26198,7 +26239,7 @@ index e73a151..de6ed59 100644
      if (logged < 20) {
          fprintf(stderr, "[ppu] call to unlifted function 0x%08X\n", (uint32_t)addr);
          logged++;
-@@ -2946,7 +3288,7 @@ extern "C" int lv2_try_syscall(ppu_context* ctx);
+@@ -2946,7 +3297,7 @@ extern "C" int lv2_try_syscall(ppu_context* ctx);
   * A few syscalls the CRT needs at boot are handled inline (boot-tuned); the
   * rest are dispatched to the real lv2 table, and only genuinely-unregistered
   * numbers fall through to the return-CELL_OK stub. */
@@ -26207,7 +26248,7 @@ index e73a151..de6ed59 100644
  /* In-flight lv2 syscall per guest thread; 0 = not in a syscall. See the guard
   * in lv2_syscall() below. */
  #define PS3_SC_INFLIGHT_MAX 64
-@@ -2958,7 +3300,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -2958,7 +3309,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
       * waiting for a store watch to fire. Armed here because lv2_syscall runs
       * early and unconditionally; used to measure how far a guest block clear
       * actually runs by guarding the page past its expected end. */
@@ -26216,7 +26257,7 @@ index e73a151..de6ed59 100644
        if (!_ge) { _ge = 1;
            const char* e = getenv("PPU_GUARD_EA");
            if (e && *e) ppu_guard_page((uint32_t)strtoul(e, 0, 16)); } }
-@@ -2982,18 +3324,18 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -2982,18 +3333,18 @@ extern "C" void lv2_syscall(ppu_context* ctx)
      /* Guest-PC breadcrumb for the sampling profiler: record the syscall
       * callsite (lr) in the runtime-side thread info. cia itself is the thread
       * entry OPD (load-bearing for the entry trampoline) -- do not touch it. */
@@ -26239,7 +26280,7 @@ index e73a151..de6ed59 100644
          void* ra=__builtin_return_address(0); char* mb=(char*)GetModuleHandleA(0);
          uintptr_t tgt=(uintptr_t)ra; uint32_t bg=0; uintptr_t bh=0;
          for(uint64_t k=0;k<function_table_count;k++){ uintptr_t h=(uintptr_t)function_table[k].func; if(h<=tgt&&h>bh){bh=h;bg=function_table[k].addr;} }
-@@ -3001,7 +3343,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3001,7 +3352,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
                  bg,(unsigned long long)(tgt-bh),(uint32_t)ctx->gpr[5],(uint32_t)ctx->gpr[7],(uint32_t)ctx->lr); } }
      /* Trace the port_send(port=1) sender (the cri kick): who sends it + the data
       * (data=0 seen -> is the decode-job payload null? a real uninit field?). */
@@ -26248,7 +26289,7 @@ index e73a151..de6ed59 100644
          void* ra=__builtin_return_address(0); char* mb=(char*)GetModuleHandleA(0);
          uintptr_t tgt=(uintptr_t)ra; uint32_t bg=0; uintptr_t bh=0;
          for(uint64_t k=0;k<function_table_count;k++){ uintptr_t h=(uintptr_t)function_table[k].func; if(h<=tgt&&h>bh){bh=h;bg=function_table[k].addr;} }
-@@ -3067,7 +3409,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3067,7 +3418,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
          uint32_t pwl  = (uint32_t)ctx->gpr[6];
          uint32_t wlen = len;
          if (wlen > 0x4000u) {   /* guard against garbage len (divergence dumps memory) */
@@ -26257,7 +26298,7 @@ index e73a151..de6ed59 100644
              if (n < 20) { fprintf(stderr, "[tty] suspicious len=%u (buf=0x%08X) clamped\n", len, buf); n++; }
              wlen = 0x4000u;
          }
-@@ -3082,12 +3424,26 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3082,12 +3433,26 @@ extern "C" void lv2_syscall(ppu_context* ctx)
           *
           * TTY_NO_DEDUPE=1 restores the raw firehose. */
          { static char last[128]; static unsigned long long run_len = 0;
@@ -26285,7 +26326,7 @@ index e73a151..de6ed59 100644
                if (run_len && strcmp(cur, last) == 0) {
                    run_len++;
                    if (run_len > 4 && (run_len % 1000ull) != 0) {
-@@ -3125,7 +3481,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3125,7 +3490,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
                  bt[bn] = 0;
                  if (strstr(bt, pat)) {
                      static int tn = 0;
@@ -26294,7 +26335,7 @@ index e73a151..de6ed59 100644
                          fprintf(stderr, "%c[TTY_BT] \"%.90s\"%c", 10, bt, 10);
                          ppu_log_host_chain("tty-bt");
                      }
-@@ -3144,7 +3500,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3144,7 +3509,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
                  strstr(pt, "sentinel") || strstr(pt, "double-deallocate") ||
                  strstr(pt, "out of memory on request")) {
                  static int pc = 0;
@@ -26303,7 +26344,7 @@ index e73a151..de6ed59 100644
              }
          }
          /* DIAGNOSTIC (FLOW_PSSGTRACE=1): when the title's tty output carries a
-@@ -3195,15 +3551,15 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3195,15 +3560,15 @@ extern "C" void lv2_syscall(ppu_context* ctx)
           * guest thread runs ~42,000 R3000 instructions in 30 ms, then parks in
           * ntdll forever with no further [sc] line. The last ENTER without a
           * matching exit names the call that blocked. */
@@ -26322,7 +26363,7 @@ index e73a151..de6ed59 100644
              static ULONGLONG s_acc[1024]={0}; static uint32_t s_cnt[1024]={0}; static ULONGLONG s_win=0;
              uint32_t _a3=(uint32_t)ctx->gpr[3], _a4=(uint32_t)ctx->gpr[4], _a5=(uint32_t)ctx->gpr[5];
              ULONGLONG _t0 = GetTickCount64();
-@@ -3212,7 +3568,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3212,7 +3577,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
              uint32_t _rv=(uint32_t)ctx->gpr[3];
              if (num < 1024) { s_acc[num]+=_dt; s_cnt[num]++; }
              if (_dt >= 150 || (num==130 && _dt >= 8)) {
@@ -26331,7 +26372,7 @@ index e73a151..de6ed59 100644
                  void* ra=__builtin_return_address(0);
                  uintptr_t tgt=(uintptr_t)ra; uint32_t bg=0; uintptr_t bh=0;
                  for(uint64_t k=0;k<function_table_count;k++){ uintptr_t h=(uintptr_t)function_table[k].func; if(h<=tgt&&h>bh){bh=h;bg=function_table[k].addr;} }
-@@ -3239,7 +3595,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3239,7 +3604,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
                  return;
              }
          }
@@ -26340,7 +26381,7 @@ index e73a151..de6ed59 100644
          if (logged < 30) {
              fprintf(stderr, "[ppu] lv2_syscall %llu (stub)\n", (unsigned long long)num);
              logged++;
-@@ -3303,12 +3659,28 @@ extern "C" uint32_t ppu_load_elf(const char* path)
+@@ -3303,12 +3668,28 @@ extern "C" uint32_t ppu_load_elf(const char* path)
                      g_tls_vaddr, g_tls_filesz, g_tls_memsz);
              continue;
          }
@@ -26369,7 +26410,7 @@ index e73a151..de6ed59 100644
          /* Bounds-check both ends before touching host memory: the source range
           * must lie inside the ELF file, and the destination range inside the
           * guest VM (ppu_vm_size==0 = unchecked, matching the vm accessors).
-@@ -3423,7 +3795,7 @@ extern "C" uint32_t ppu_load_elf(const char* path)
+@@ -3423,7 +3804,7 @@ extern "C" uint32_t ppu_load_elf(const char* path)
                            if (memcmp(vm_base + keep_ea, keep, keep_len)) {
                                memcpy(vm_base + keep_ea, keep, keep_len);
                                static int n = 0;
@@ -26378,7 +26419,7 @@ index e73a151..de6ed59 100644
                            }
                            Sleep(2);
                        } } };
-@@ -3535,7 +3907,7 @@ extern "C" void ppu_install_thread_trampoline(void)
+@@ -3535,7 +3916,7 @@ extern "C" void ppu_install_thread_trampoline(void)
   * it here so ppu_guest_call resolves the clobbered OPD to the real handler. */
  struct PpuOpdFixup { uint32_t opd, code, toc; };
  static PpuOpdFixup s_opd_fixups[16];
@@ -26387,7 +26428,7 @@ index e73a151..de6ed59 100644
  extern "C" void ppu_register_opd_fixup(uint32_t opd, uint32_t code, uint32_t toc)
  {
      if (!opd || !code) return;
-@@ -3545,6 +3917,14 @@ extern "C" void ppu_register_opd_fixup(uint32_t opd, uint32_t code, uint32_t toc
+@@ -3545,6 +3926,14 @@ extern "C" void ppu_register_opd_fixup(uint32_t opd, uint32_t code, uint32_t toc
          s_opd_fixups[s_opd_fixup_n].code = code; s_opd_fixups[s_opd_fixup_n].toc = toc; s_opd_fixup_n++; }
  }
  
@@ -26402,7 +26443,7 @@ index e73a151..de6ed59 100644
  extern "C" uint64_t ppu_guest_call(uint32_t opd_addr,
                                     uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
                                     uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7)
-@@ -3569,10 +3949,11 @@ extern "C" uint64_t ppu_guest_call(uint32_t opd_addr,
+@@ -3569,10 +3958,11 @@ extern "C" uint64_t ppu_guest_call(uint32_t opd_addr,
                  vm_read32(opd_addr + 8), vm_read32(opd_addr + 12));
          return 0; }
  
@@ -26417,7 +26458,7 @@ index e73a151..de6ed59 100644
  
      ppu_context ctx;
      memset(&ctx, 0, sizeof(ctx));
-@@ -3617,7 +3998,7 @@ extern "C" uint64_t ppu_guest_call_ct(uint32_t code, uint32_t toc,
+@@ -3617,7 +4007,7 @@ extern "C" uint64_t ppu_guest_call_ct(uint32_t code, uint32_t toc,
      if (!fn) { fprintf(stderr, "[ppu] guest_call_ct: code 0x%08X not registered\n", code); return 0; }
  
      static PPU_THREAD_LOCAL uint32_t s_cb_sp = 0;
@@ -26426,7 +26467,7 @@ index e73a151..de6ed59 100644
  
      ppu_context ctx;
      memset(&ctx, 0, sizeof(ctx));
-@@ -3644,6 +4025,8 @@ extern "C" uint64_t ppu_guest_call_ct(uint32_t code, uint32_t toc,
+@@ -3644,6 +4034,8 @@ extern "C" uint64_t ppu_guest_call_ct(uint32_t code, uint32_t toc,
      return ctx.gpr[3];
  }
  
@@ -26435,7 +26476,7 @@ index e73a151..de6ed59 100644
  extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
  {
      /* Line-buffer stdout: HLE logs mix printf (stdout) with probe fprintf
-@@ -3653,6 +4036,16 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
+@@ -3653,6 +4045,16 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
      setvbuf(stdout, NULL, _IONBF, 0);
  
      g_ppu_thread_entry_trampoline = ppu_thread_entry_trampoline;
@@ -26452,7 +26493,7 @@ index e73a151..de6ed59 100644
      uint32_t code = 0, toc = 0;
      ppu_opd_resolve(entry_opd, &code, &toc);
      ppu_fn fn = ppu_lookup(code);
-@@ -3690,7 +4083,9 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
+@@ -3690,7 +4092,9 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
      /* Main-thread TLS: copy the PT_TLS template into the TLS image (zeroing the
       * BSS tail) and point r13 at TP. The CRT accesses thread-locals relative to
       * r13; without this they hit address ~0 and corrupt the boot. */
@@ -26463,7 +26504,7 @@ index e73a151..de6ed59 100644
          memcpy(vm_base + PPU_TLS_IMG, vm_base + g_tls_vaddr, g_tls_filesz);
          if (g_tls_memsz > g_tls_filesz)
              memset(vm_base + PPU_TLS_IMG + g_tls_filesz, 0, g_tls_memsz - g_tls_filesz);
-@@ -3736,6 +4131,9 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
+@@ -3736,6 +4140,9 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
          }
  
          uint32_t argv_base = 0x00B00000u;          /* scratch in the .data/heap gap */
@@ -26473,7 +26514,7 @@ index e73a151..de6ed59 100644
          /* argc_n argv pointers, a NULL argv terminator, then a NULL envp. */
          uint32_t slots     = (argc_n + 2u) * 8u;
          uint32_t str_addr  = argv_base + ((slots + 0x1Fu) & ~0x1Fu);
-@@ -3758,6 +4156,8 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
+@@ -3758,6 +4165,8 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
           * an empty boot device before deadlocking on a data.toc it never loaded. */
          ctx.gpr[3] = argc_n;                        /* argc */
          ctx.gpr[4] = argv_base;                     /* argv */
@@ -27384,6 +27425,40 @@ index d857f30..8269e72 100644
      ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_allocate_memory"), "sys_mmapper_allocate_memory", sys_mmapper_allocate_memory);
      ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_allocate_memory_from_container"), "sys_mmapper_allocate_memory_from_container", sys_mmapper_allocate_memory_from_container);
      ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_map_memory"),     "sys_mmapper_map_memory",     crt_ok);
+diff --git a/runtime/ppu/ppu_trampoline_tls.cpp b/runtime/ppu/ppu_trampoline_tls.cpp
+new file mode 100644
+index 0000000..1790f24
+--- /dev/null
++++ b/runtime/ppu/ppu_trampoline_tls.cpp
+@@ -0,0 +1,28 @@
++/* g_trampoline_fn for MinGW-w64 builds, where the lifted PPU code and the
++ * boot scaffold come from different compilers.
++ *
++ * The port compiles the lifted chunks with clang (work/port/tools/ppu_cxx.sh)
++ * and everything else with GCC. On Linux both emit native ELF TLS for
++ * __thread, so ppu_loader.cpp defines the variable and the lifted code reads
++ * it. MinGW GCC emits emulated TLS instead (__emutls_v.g_trampoline_fn, every
++ * access a call to __emutls_get_address) while clang emits native PE TLS
++ * (g_trampoline_fn in .tls), and the two never link against each other.
++ *
++ * So on MinGW the variable is defined here, in a unit the launcher sends to
++ * the same compiler as the lifted code, and the GCC-built scaffold reaches it
++ * through ppu_trampoline_slot() (see ppu_loader.cpp). The hot side, the lifted
++ * code's drain after every call, keeps a plain native TLS access. If the
++ * lifted code is built by GCC instead (PORT_PPU_GCC=1), this unit is too, and
++ * both sides agree on emulated TLS. */
++#if defined(__MINGW32__)
++
++#include "ppu_tls.h"
++
++extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*) = nullptr;
++
++extern "C" void (**ppu_trampoline_slot(void))(void*)
++{
++    return &g_trampoline_fn;
++}
++
++#endif
 diff --git a/runtime/ppu/ppu_vmx.h b/runtime/ppu/ppu_vmx.h
 new file mode 100644
 index 0000000..04336bc
@@ -32130,7 +32205,7 @@ index 0000000..659aa33
 +#endif
 +}
 diff --git a/runtime/spu/spu_context.h b/runtime/spu/spu_context.h
-index 8d8e4aa..9570337 100644
+index 8d8e4aa..58c1643 100644
 --- a/runtime/spu/spu_context.h
 +++ b/runtime/spu/spu_context.h
 @@ -38,20 +38,30 @@ extern "C" {
@@ -32350,7 +32425,7 @@ index 8d8e4aa..9570337 100644
  
  /* The taskset policy module's syscall trampoline. Both the full resolver
   * (spu_channels.c) and the musttail fast path (spu_dispatch_mt.c) must treat a
-@@ -474,32 +547,101 @@ static inline void spu_ls_write32(spu_context* ctx, uint32_t lsa, uint32_t val)
+@@ -474,32 +547,103 @@ static inline void spu_ls_write32(spu_context* ctx, uint32_t lsa, uint32_t val)
  #define SPU_BSWAP32(x) __builtin_bswap32(x)
  #define SPU_LS_FAST 1
  #endif
@@ -32365,8 +32440,10 @@ index 8d8e4aa..9570337 100644
 +/* The diagnostic gates the inline helpers below read. Defined here rather than
 + * in spu_channels.c, as one merged definition per program (selectany / weak),
 + * so every target that includes this header links whether or not it builds
-+ * spu_channels.c -- the SPU unit tests and sync_stress do not. */
-+#if defined(_MSC_VER)
++ * spu_channels.c -- the SPU unit tests and sync_stress do not. Any PE target,
++ * MinGW GCC included, takes selectany: GNU ld does not merge weak COFF data
++ * (each unit's definition clashes as .weak.<name>.<default symbol>). */
++#if defined(_WIN32)
 +#  define SPU_GATE __declspec(selectany)
 +#else
 +#  define SPU_GATE __attribute__((weak))
@@ -32384,25 +32461,6 @@ index 8d8e4aa..9570337 100644
 +#  define SPU_LS_DBG() 0
 +#else
 +#  define SPU_LS_DBG() __builtin_expect(g_spu_ls_dbg != 0, 0)
-+#endif
-+
-+/* ---- the SPU's float environment on the host thread -----------------------
-+ * The SPU has no denormal operands: an exponent-0 single is zero going in.
-+ * Every entry into SPU code (spu_run_with_halt, spu_interp_run_until) sets DAZ
-+ * in MXCSR, and puts the caller's back on the way out, so the float helpers can
-+ * let the hardware read those as zero instead of testing every operand
-+ * (SPU_FP_DAZ, spu_helpers.h). Not FTZ: the single-precision helpers zero a
-+ * result below 2^-126 themselves, and the double-precision ones are IEEE and
-+ * may return a denormal. Rounding stays the caller's: the helpers that need
-+ * truncation carry it in the instruction. */
-+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(SPU_NO_FP_DAZ)
-+#  include <xmmintrin.h>
-+#  define SPU_FP_DAZ 1
-+static inline unsigned spu_fp_enter(void) { const unsigned m = _mm_getcsr(); _mm_setcsr(m | 0x0040u); return m; }
-+static inline void spu_fp_leave(unsigned m) { _mm_setcsr(m); }
-+#else
-+static inline unsigned spu_fp_enter(void) { return 0; }
-+static inline void spu_fp_leave(unsigned m) { (void)m; }
 +#endif
  
 -/* Debug probes of spu_ls_read128, out of line: inlined they kept every LS
@@ -32425,6 +32483,25 @@ index 8d8e4aa..9570337 100644
 -static __attribute__((noinline, cold)) void spu_ls_read_probe(const spu_context* ctx, uint32_t lsa)
 -{
 -    if (g_spu_ls_probe < 0) g_spu_ls_probe = getenv("SPU_LS_LOWREAD") ? 1 : 0;
++/* ---- the SPU's float environment on the host thread -----------------------
++ * The SPU has no denormal operands: an exponent-0 single is zero going in.
++ * Every entry into SPU code (spu_run_with_halt, spu_interp_run_until) sets DAZ
++ * in MXCSR, and puts the caller's back on the way out, so the float helpers can
++ * let the hardware read those as zero instead of testing every operand
++ * (SPU_FP_DAZ, spu_helpers.h). Not FTZ: the single-precision helpers zero a
++ * result below 2^-126 themselves, and the double-precision ones are IEEE and
++ * may return a denormal. Rounding stays the caller's: the helpers that need
++ * truncation carry it in the instruction. */
++#if (defined(__x86_64__) || defined(_M_X64)) && !defined(SPU_NO_FP_DAZ)
++#  include <xmmintrin.h>
++#  define SPU_FP_DAZ 1
++static inline unsigned spu_fp_enter(void) { const unsigned m = _mm_getcsr(); _mm_setcsr(m | 0x0040u); return m; }
++static inline void spu_fp_leave(unsigned m) { _mm_setcsr(m); }
++#else
++static inline unsigned spu_fp_enter(void) { return 0; }
++static inline void spu_fp_leave(unsigned m) { (void)m; }
++#endif
++
 +/* ---- cold paths that leave every register alone (SPU_COLD_THUNK) ----------
 + * The x86-64 SysV ABI has no callee-saved vector register, so a call anywhere
 + * in a lifted function -- even one behind __builtin_expect that never runs --
@@ -32473,7 +32550,7 @@ index 8d8e4aa..9570337 100644
        if (s_lw < 0) s_lw = getenv("SPU_LS_LOWREAD") ? 1 : 0;
        if (s_lw && lsa < 0x200u && ctx->image_id > 0 && !ctx->policy_mode) {
            static uint32_t seen[24]; static int n = 0; int known = 0;
-@@ -528,18 +670,28 @@ static __attribute__((noinline, cold)) void spu_ls_read_probe(const spu_context*
+@@ -528,18 +672,28 @@ static __attribute__((noinline, cold)) void spu_ls_read_probe(const spu_context*
                      off >> 6, (off >> 2) & 0xF, off);
          }
      }
@@ -32512,7 +32589,7 @@ index 8d8e4aa..9570337 100644
      uint32_t w0, w1, w2, w3;
      memcpy(&w0, p,      4); memcpy(&w1, p + 4,  4);
      memcpy(&w2, p + 8,  4); memcpy(&w3, p + 12, 4);
-@@ -556,7 +708,7 @@ static inline u128 spu_ls_read128(const spu_context* ctx, uint32_t lsa)
+@@ -556,7 +710,7 @@ static inline u128 spu_ls_read128(const spu_context* ctx, uint32_t lsa)
      return v;
  }
  
@@ -32521,7 +32598,7 @@ index 8d8e4aa..9570337 100644
  {
      if (lsa == 0x1320 && ctx->image_id == 2 && ctx->policy_mode) {
          extern int g_wws_code_probe;   /* defined in spu_channels.c, capped */
-@@ -584,63 +736,76 @@ static __attribute__((noinline, cold)) void spu_ls_write_probe_pre(spu_context*
+@@ -584,63 +738,76 @@ static __attribute__((noinline, cold)) void spu_ls_write_probe_pre(spu_context*
              #undef _RD32
          }
      }
@@ -32638,7 +32715,7 @@ index 8d8e4aa..9570337 100644
  /* ---------------------------------------------------------------------------
   * Preferred slot extraction
   *
-@@ -673,8 +838,16 @@ static inline uint64_t spu_preferred_u64(const u128* reg)
+@@ -673,8 +840,16 @@ static inline uint64_t spu_preferred_u64(const u128* reg)
  static inline u128 spu_make_preferred_u32(uint32_t val)
  {
      u128 r;
@@ -32655,7 +32732,7 @@ index 8d8e4aa..9570337 100644
      return r;
  }
  
-@@ -691,18 +864,71 @@ static inline u128 spu_make_preferred_u32(uint32_t val)
+@@ -691,18 +866,71 @@ static inline u128 spu_make_preferred_u32(uint32_t val)
   * on 0 with a word still queued, and the PPU waited forever for a reply to a
   * command the SPU never saw. The reader could also see the new count before
   * the new value. Plain reads of `count` elsewhere stay lock-free. */
@@ -32736,7 +32813,7 @@ index 8d8e4aa..9570337 100644
      if (ch->count >= SPU_CHANNEL_CAP) {
          /* Full. Hardware does not accept the write at all -- the sender polls
           * the free-slot count first -- so the NEW word is what is lost.
-@@ -714,31 +940,75 @@ static inline void spu_channel_write(spu_channel* ch, uint32_t val)
+@@ -714,31 +942,75 @@ static inline void spu_channel_write(spu_channel* ch, uint32_t val)
           * looks plausible. The Orange Box sends CB.SPU a five-word descriptor
           * from five consecutive call sites -- one more than the mailbox is
           * deep -- so it meets this on every send. */
@@ -32820,7 +32897,7 @@ index 8d8e4aa..9570337 100644
  }
  
  /* ---------------------------------------------------------------------------
-@@ -759,23 +1029,61 @@ static inline int spu_channel_has_data(const spu_channel* ch)
+@@ -759,23 +1031,61 @@ static inline int spu_channel_has_data(const spu_channel* ch)
  #  define SPU_THREAD_LOCAL __thread
  #endif
  
@@ -32887,7 +32964,7 @@ index 8d8e4aa..9570337 100644
  /* Restore image_id after a call-bracket (adopt-on-serve); re-applies the
   * persistent LS-0xA00 workload module if one is set. */
  void spu_img_restore(spu_context* ctx, int32_t saved_img);
-@@ -789,6 +1097,12 @@ void spu_ch_wake(spu_context* ctx);
+@@ -789,6 +1099,12 @@ void spu_ch_wake(spu_context* ctx);
   * SPU_HOST_DEPTH_MAX overrides the limit. */
  void spu_depth_guard(spu_context* ctx);
  int  spu_tailret_enabled(void);
@@ -32900,7 +32977,7 @@ index 8d8e4aa..9570337 100644
  /* Take a pending SPU interrupt (spu_drain.c): srr0 <- ctx->pc, int_enable <- 0,
   * decode the guest-planted branch at LS 0 into ctx->pc, and return the
   * dispatcher to run instead of the interrupted transfer. Returns `tf`
-@@ -798,6 +1112,26 @@ void (*spu_take_interrupt(spu_context* ctx,
+@@ -798,6 +1114,26 @@ void (*spu_take_interrupt(spu_context* ctx,
  
  /* Drain a translated call up to its explicit architectural return PC. */
  void spu_drain_call(spu_context* ctx, uint32_t return_pc);
@@ -32927,7 +33004,7 @@ index 8d8e4aa..9570337 100644
  /* SPU_PCHIST=1: bucket SPU execution by the GPU module's own symbols.
   *
   * SPU_VRAMPC showed 3.7M VRAM writes from Host2Local_Body and ZERO from
-@@ -812,7 +1146,7 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc);
+@@ -812,7 +1148,7 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc);
   * 0x171100), so they are exact rather than guessed. */
  static inline void spu_pchist_tick(const spu_context* ctx)
  {
@@ -32936,7 +33013,7 @@ index 8d8e4aa..9570337 100644
      if (en < 0) en = getenv("SPU_PCHIST") ? 1 : 0;
      if (!en) return;
      static unsigned long long b[8][8], n;
-@@ -857,7 +1191,7 @@ static inline void spu_pchist_tick(const spu_context* ctx)
+@@ -857,7 +1193,7 @@ static inline void spu_pchist_tick(const spu_context* ctx)
               * matching brsl/bisl never pops and a poll loop nests a frame \
               * per iteration until the host stack dies. Off by default --  \
               * this changes core dispatch for every title. */              \
@@ -32945,7 +33022,7 @@ index 8d8e4aa..9570337 100644
                  (((uint32_t)(ctx)->pc & SPU_LS_MASK) ==                    \
                   ((ctx)->gpr[0]._u32[0] & SPU_LS_MASK))) {                 \
                  g_spu_trampoline_fn = 0;                                   \
-@@ -865,13 +1199,13 @@ static inline void spu_pchist_tick(const spu_context* ctx)
+@@ -865,13 +1201,13 @@ static inline void spu_pchist_tick(const spu_context* ctx)
              }                                                              \
              void (*_tf)(spu_context*) = g_spu_trampoline_fn;    \
              g_spu_trampoline_fn = 0;                            \
@@ -46261,7 +46338,7 @@ index 45235ea..3661d02 100644
  }
  
 diff --git a/runtime/syscalls/sys_event.c b/runtime/syscalls/sys_event.c
-index 4240edf..a716e8f 100644
+index 4240edf..2d6be03 100644
 --- a/runtime/syscalls/sys_event.c
 +++ b/runtime/syscalls/sys_event.c
 @@ -283,9 +283,9 @@ void sys_event_queue_cancel_by_id(uint32_t queue_id)
@@ -46451,7 +46528,7 @@ index 4240edf..a716e8f 100644
         * takes its work-descriptor EA from those, so data2 alone is not enough. */
 -      extern uint32_t g_spu_pending_evt[3];
 -      extern int      g_spu_pending_evt_valid;
-+#ifdef _WIN32
++#ifdef _MSC_VER   /* the same split as SPU_THREAD_LOCAL: MinGW GCC takes __thread */
 +      extern __declspec(thread) uint32_t g_spu_pending_evt[3];
 +      extern __declspec(thread) int      g_spu_pending_evt_valid;
 +#else
@@ -50831,10 +50908,18 @@ index 67dfd3f..3c68616 100644
          # Fallback for opcode 4
          result.mnemonic = f"vmx_x{xo_full}"
 diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
-index b19e240..9aaa60d 100644
+index b19e240..0923d6c 100644
 --- a/tools/ppu_lifter.py
 +++ b/tools/ppu_lifter.py
-@@ -41,6 +41,11 @@ except ImportError:
+@@ -12,6 +12,7 @@ Usage:
+ """
+ 
+ import argparse
++import functools
+ import json
+ import os
+ import re
+@@ -41,6 +42,11 @@ except ImportError:
  # tools/test_ppu_lift.py compiles lifted statements against the runtime's own
  # ppu_context.h rather than against a generated header, and it has to get the
  # macro from here rather than write a second copy of it.
@@ -50846,7 +50931,7 @@ index b19e240..9aaa60d 100644
  FENCE_PREAMBLE = """\
  /* Guest memory barriers: the lowering of sync/lwsync/eieio/isync/ptesync.
   *
-@@ -67,6 +72,14 @@ FENCE_PREAMBLE = """\
+@@ -67,6 +73,14 @@ FENCE_PREAMBLE = """\
  #    define PPU_FENCE(o) atomic_thread_fence(memory_order_##o)
  #  endif
  #endif
@@ -50861,7 +50946,7 @@ index b19e240..9aaa60d 100644
  """
  
  HEADER_PREAMBLE = """\
-@@ -106,6 +119,7 @@ typedef struct ppu_context {
+@@ -106,6 +120,7 @@ typedef struct ppu_context {
      uint64_t reserve_addr;  /* lwarx/stwcx. reservation address */
      uint64_t reserve_value; /* lwarx/stwcx. reservation value   */
      int      reserve_valid; /* lwarx/stwcx. reservation flag    */
@@ -50869,7 +50954,7 @@ index b19e240..9aaa60d 100644
  } ppu_context;
  
  /* Memory access helpers (provided by runtime) */
-@@ -127,10 +141,233 @@ void     vm_write64(uint64_t addr, uint64_t val);
+@@ -127,10 +142,233 @@ void     vm_write64(uint64_t addr, uint64_t val);
   * threads -- a plain conditional write races and corrupts under real concurrency. */
  int      ppu_stwcx32(uint64_t addr, uint32_t expected, uint32_t val);
  int      ppu_stdcx64(uint64_t addr, uint64_t expected, uint64_t val);
@@ -51103,7 +51188,7 @@ index b19e240..9aaa60d 100644
  /* Syscall handler */
  #ifdef __cplusplus
  extern "C"
-@@ -236,16 +473,64 @@ static inline double ppu_fmadd_core(double a, double c, double b, int neg_b, int
+@@ -236,16 +474,64 @@ static inline double ppu_fmadd_core(double a, double c, double b, int neg_b, int
      if (r != r) return ppu_fp_default_qnan();
      return neg_res ? -r : r;
  }
@@ -51171,7 +51256,7 @@ index b19e240..9aaa60d 100644
  
  /* AltiVec register byte order: ctx->vr holds RAW big-endian guest bytes (lvx is
   * a plain 16-byte memcpy). Byte/word MOVE ops (vperm, vmrgh*, vsldoi, vspltw)
-@@ -323,6 +608,8 @@ static inline uint64_t ppc_mulhdu(uint64_t a, uint64_t b) {
+@@ -323,6 +609,8 @@ static inline uint64_t ppc_mulhdu(uint64_t a, uint64_t b) {
  }
  #endif
  
@@ -51180,7 +51265,7 @@ index b19e240..9aaa60d 100644
  /* VM base pointer (defined by game project) */
  extern "C" uint8_t* vm_base;
  
-@@ -330,6 +617,8 @@ extern "C" uint8_t* vm_base;
+@@ -330,6 +618,8 @@ extern "C" uint8_t* vm_base;
   * Looks up the guest address in CTR via a hash table and calls the
   * corresponding host function. Handles OPD resolution. */
  extern "C" void ps3_indirect_call(ppu_context* ctx);
@@ -51189,7 +51274,7 @@ index b19e240..9aaa60d 100644
  
  /* Firmware-import HLE dispatch: a lifted import stub (a .lib.stub trampoline)
   * is replaced with a direct call to the registered HLE handler for its NID
-@@ -495,6 +784,161 @@ def _cr_field_set(bf: int) -> str:
+@@ -495,6 +785,560 @@ def _cr_field_set(bf: int) -> str:
              f"(cr_val << {shift})")
  
  
@@ -51348,10 +51433,409 @@ index b19e240..9aaa60d 100644
 +    return out
 +
 +
++# ---------------------------------------------------------------------------
++# Register localization (--local-regs)
++# ---------------------------------------------------------------------------
++# Every lifted statement reads and writes the guest registers in ctx. Guest
++# memory goes through char pointers (vm_base), so after ctx has been handed to
++# any call the compiler cannot prove a guest store does not reach it: each
++# register value reaches its next use through memory, and dead register stores
++# cannot be dropped. With --local-regs, a function keeps GPRs, CR, XER, LR and
++# CTR in C locals and syncs them with ctx only where something else can look
++# at ctx:
++#   - a "sync" line (a call to a lifted function, an indirect call, a syscall,
++#     an HLE call, anything else handed ctx) runs unchanged against ctx: the
++#     locals that may be dirty are written back before it, and the locals that
++#     are live after it are reloaded;
++#   - an exit (return, trampoline hand-off, the default arm of a jump table)
++#     runs unchanged against ctx after a write-back of the dirty locals.
++# Dirty = may have been written since the last write-back or reload (forward
++# dataflow over the line CFG); live = may be read before the next definite
++# write (backward dataflow, a write-back counting as a read). Clang turns the
++# locals into SSA values (their address only reaches always-inline helpers), so
++# guest memory accesses no longer pin them. FPRs, VRs, FPSCR, VSCR and the
++# reservation stay in ctx. A function with a line shape the pass does not
++# recognise is emitted unchanged (counted in LOCAL_REGS_STATS).
++# Limitation: diagnostics that sample a thread's ctx from inside a guest
++# memory slow path (g_active_ctx) can see registers a few instructions stale.
++_LR_REG_RE = re.compile(r"ctx->(?:gpr\[(\d+)\]|(cr|xer|lr|ctr)\b)")
++_LR_SPECIAL = {"cr": 32, "xer": 33, "lr": 34, "ctr": 35}
++_LR_NAMES = [f"_r{n}" for n in range(32)] + ["_cr", "_xer", "_lr", "_ctr"]
++_LR_CTX = [f"ctx->gpr[{n}]" for n in range(32)] + ["ctx->cr", "ctx->xer", "ctx->lr", "ctx->ctr"]
++_LR_TYPES = ["uint64_t"] * 32 + ["uint32_t", "uint32_t", "uint64_t", "uint64_t"]
++# ctx fields the pass leaves in ctx, and helpers that touch only those.
++_LR_SAFE_CTX_RE = re.compile(
++    r"&?ctx->(?:fpr|vr)\[\d+\]|&?ctx->(?:fpscr|vscr|vrsave|reserve_value|reserve_addr|reserve_valid)\b|"
++    r"PPU_RESV_ADDR\(ctx\)|\bppu_(?:mtfsf|mtfsb|mcrfs)\(ctx,")
++_LR_COMMENT_RE = re.compile(r"/\*.*?\*/")
++_LR_LABEL_RE = re.compile(r"loc_[0-9A-Fa-f]+:")
++_LR_GOTO_RE = re.compile(r"\bgoto (loc_[0-9A-Fa-f]+);")
++_LR_WRITE_RE = re.compile(
++    r"ctx->(?:gpr\[(\d+)\]|(cr|xer|lr|ctr)\b)\s*(?:[-+*/%&|^]|<<|>>)?=(?!=)|"
++    r"(?:\+\+|--)\s*ctx->(?:gpr\[(\d+)\]|(cr|xer|lr|ctr)\b)|"
++    r"ctx->(?:gpr\[(\d+)\]|(cr|xer|lr|ctr)\b)\s*(?:\+\+|--)|"
++    r"&ctx->(?:gpr\[(\d+)\]|(cr|xer|lr|ctr)\b)")
++_LR_SWITCH_RE = re.compile(
++    r"switch \((?P<expr>[^{}]*)\) \{(?P<cases>(?:\s*case [^:;{}]+: (?:goto loc_[0-9A-Fa-f]+;|"
++    r"\{ g_trampoline_fn = \(void\(\*\)\(void\*\)\)func_[0-9A-Fa-f_]+; return; \}))+)"
++    r"\s*default: (?P<dflt>[^{}]*return;) \} return;")
++_LR_KW_RE = re.compile(r"^(?:if|else|for|while|do|switch)\b")
++
++LOCAL_REGS_STATS: Counter = Counter()
++
++
++class _LocalRegsUnsupported(Exception):
++    pass
++
++
++def _lr_idx(m) -> int:
++    return int(m.group(1)) if m.group(1) is not None else _LR_SPECIAL[m.group(2)]
++
++
++def _lr_mask(s: str) -> int:
++    mask = 0
++    for m in _LR_REG_RE.finditer(s):
++        mask |= 1 << _lr_idx(m)
++    return mask
++
++
++_LR_PLAIN_LHS_RE = re.compile(r"ctx->(?:gpr\[\d+\]|(?:cr|xer|lr|ctr)\b)\s*=(?!=)")
++
++
++def _lr_reads(s: str) -> int:
++    """Registers s may read: every mention but the target of a plain `=`."""
++    return _lr_mask(_LR_PLAIN_LHS_RE.sub("=", s))
++
++
++def _lr_maydef(s: str) -> int:
++    mask = 0
++    for m in _LR_WRITE_RE.finditer(s):
++        g = m.groups()
++        for k in range(0, 8, 2):
++            if g[k] is not None:
++                mask |= 1 << int(g[k])
++            elif g[k + 1] is not None:
++                mask |= 1 << _LR_SPECIAL[g[k + 1]]
++    return mask
++
++
++def _lr_split_top(s: str, sep: str = ";") -> list[str]:
++    if s.count(sep) <= 1 and "{" not in s:
++        return s.split(sep)
++    out, depth, cur = [], 0, []
++    for ch in s:
++        if ch in "([{":
++            depth += 1
++        elif ch in ")]}":
++            depth -= 1
++        if ch == sep and depth == 0:
++            out.append("".join(cur))
++            cur = []
++        else:
++            cur.append(ch)
++    out.append("".join(cur))
++    return out
++
++
++def _lr_mustdef(t: str) -> int:
++    """Registers a pure line always writes: plain assignments that are
++    top-level statements of the line (or of a plain `{ ... }` block)."""
++    if _LR_KW_RE.match(t):
++        return 0
++    if t.startswith("{") and t.endswith("}"):
++        t = t[1:-1].strip()
++    mask = 0
++    for st in _lr_split_top(t):
++        st = st.strip()
++        if _LR_KW_RE.match(st):
++            continue
++        m = re.match(r"ctx->(?:gpr\[(\d+)\]|(cr|xer|lr|ctr)\b)\s*=(?!=)", st)
++        if m:
++            mask |= 1 << _lr_idx(m)
++    return mask
++
++
++def _lr_rewrite(s: str) -> str:
++    return _LR_REG_RE.sub(lambda m: _LR_NAMES[_lr_idx(m)], s)
++
++
++@functools.lru_cache(maxsize=1 << 18)
++def _lr_rewrite_cached(line: str) -> str:
++    return _lr_rewrite(line)
++
++
++def _lr_touches_ctx(t: str) -> bool:
++    """t hands ctx (or a ctx register it cannot rewrite) to something."""
++    return re.search(r"\bctx\b", _LR_SAFE_CTX_RE.sub("", _LR_REG_RE.sub("", t))) is not None
++
++
++def _lr_balanced(t: str) -> bool:
++    d = {"(": 0, "[": 0, "{": 0}
++    close = {")": "(", "]": "[", "}": "{"}
++    for ch in t:
++        if ch in d:
++            d[ch] += 1
++        elif ch in close:
++            d[close[ch]] -= 1
++            if d[close[ch]] < 0:
++                return False
++    return not any(d.values())
++
++
++def _lr_split_if(t: str):
++    """`if (COND) REST` -> (COND, REST), or None."""
++    if not t.startswith("if ("):
++        return None
++    i, depth = 4, 1
++    while i < len(t) and depth:
++        depth += {"(": 1, ")": -1}.get(t[i], 0)
++        i += 1
++    if depth:
++        return None
++    return t[4:i - 1], t[i:].strip()
++
++
++def _lr_is_exit_body(t: str) -> bool:
++    """t always leaves the function and does not branch inside it."""
++    if t.startswith("{") and t.endswith("}"):
++        t = t[1:-1].strip()
++    if not t.endswith("return;") or len(re.findall(r"\breturn\b", t)) != 1:
++        return False
++    return re.search(r"\b(?:if|else|goto|for|while|do|switch|break|continue)\b", t) is None
++
++
++def _lr_classify(line: str):
++    t = _LR_COMMENT_RE.sub("", line).strip()
++    if _LR_LABEL_RE.fullmatch(t):
++        return ("label", t[:-1])
++    if not t:
++        return ("pure", [])
++    if "/*" in t or "*/" in t or "//" in t or not _lr_balanced(t):
++        raise _LocalRegsUnsupported("comment/unbalanced: " + t[:120])
++    if t.endswith(")") or t.endswith("else") or (not t.endswith(";") and not t.endswith("}")):
++        raise _LocalRegsUnsupported("dangling statement: " + t[:120])
++    exits = re.search(r"\breturn\b|\bg_trampoline_fn\b|longjmp", t) is not None
++    if not exits:
++        if _lr_touches_ctx(t):
++            if re.search(r"\b(?:goto|break|continue)\b", t):
++                raise _LocalRegsUnsupported("control transfer in a sync line: " + t[:120])
++            return ("sync", None)
++        targets = _LR_GOTO_RE.findall(t)
++        if len(re.findall(r"\bgoto\b", t)) != len(targets) or re.search(r"\b(?:break|continue)\b", t):
++            raise _LocalRegsUnsupported("odd goto: " + t[:120])
++        falls = not re.fullmatch(r"goto loc_[0-9A-Fa-f]+;", t)
++        return ("pure", targets, falls)
++    m = _LR_SWITCH_RE.fullmatch(t)
++    if m:
++        if _lr_touches_ctx(m.group("expr")) or not _lr_is_exit_body(m.group("dflt")):
++            raise _LocalRegsUnsupported("switch: " + t[:120])
++        targets = _LR_GOTO_RE.findall(m.group("cases"))
++        if len(re.findall(r"\bgoto\b", t)) != len(targets):
++            raise _LocalRegsUnsupported("switch: " + t[:120])
++        return ("switch", m.group("expr"), targets)
++    sp = _lr_split_if(t)
++    if sp is not None:
++        cond, rest = sp
++        if (_lr_touches_ctx(cond) or re.search(r"\breturn\b|\bg_trampoline_fn\b|\bgoto\b", cond)
++                or not _lr_is_exit_body(rest)):
++            raise _LocalRegsUnsupported("conditional exit: " + t[:120])
++        return ("cond_exit", cond)
++    if _lr_is_exit_body(t):
++        return ("exit", None)
++    raise _LocalRegsUnsupported("unknown exit: " + t[:120])
++
++
++def _lr_strip_comments(line: str) -> tuple[str, str]:
++    """(code without comments, the comments re-joined as a suffix)."""
++    coms = _LR_COMMENT_RE.findall(line)
++    return _LR_COMMENT_RE.sub("", line).strip(), "".join(" " + c for c in coms)
++
++
++@functools.lru_cache(maxsize=1 << 18)
++def _lr_classify_cached(line: str):
++    return _lr_classify(line)
++
++
++@functools.lru_cache(maxsize=1 << 18)
++def _lr_info(s: str, line: bool) -> tuple[int, int, int, int]:
++    """(reads, may-writes, must-writes, mentions) of a pure line or a condition."""
++    t = _LR_COMMENT_RE.sub("", s).strip() if line else s
++    maydef = _lr_maydef(t)
++    return _lr_reads(t), maydef, (_lr_mustdef(t) & maydef) if line else 0, _lr_mask(t)
++
++
++def _lr_wb(mask: int) -> str:
++    return " ".join(f"{_LR_CTX[n]} = {_LR_NAMES[n]};" for n in range(36) if mask >> n & 1)
++
++
++def _lr_reload(mask: int) -> str:
++    return " ".join(f"{_LR_NAMES[n]} = {_LR_CTX[n]};" for n in range(36) if mask >> n & 1)
++
++
++def localize_ppu_registers(lines: list[str]) -> list[str]:
++    """--local-regs pass over one function body (the lines between the opening
++    and the closing brace, labels unindented). See the comment block above."""
++    try:
++        return _localize_ppu_registers(lines)
++    except _LocalRegsUnsupported as e:
++        LOCAL_REGS_STATS["unsupported"] += 1
++        LOCAL_REGS_STATS["why: " + str(e).split(":")[0]] += 1
++        return lines
++
++
++def _localize_ppu_registers(lines: list[str]) -> list[str]:
++    n = len(lines)
++    kinds = [_lr_classify_cached(line) for line in lines]
++    labels = {k[1]: i for i, k in enumerate(kinds) if k[0] == "label"}
++    for k in kinds:
++        tg = k[1] if k[0] == "pure" else k[2] if k[0] == "switch" else ()
++        if any(x not in labels for x in tg):
++            raise _LocalRegsUnsupported("goto to a missing label: " + str(tg)[:120])
++    END = n
++    succ: list[list[int]] = []
++    use = [0] * n       # registers the line's rewritten part may read
++    maydef = [0] * n
++    mustdef = [0] * n
++    used_all = 0
++    for i, k in enumerate(kinds):
++        kind = k[0]
++        if kind == "label" or kind == "sync":
++            succ.append([i + 1])
++            continue
++        if kind == "exit":
++            succ.append([])
++            continue
++        use[i], maydef[i], mustdef[i], mention = _lr_info(lines[i] if kind == "pure" else k[1], kind == "pure")
++        used_all |= mention
++        if kind == "pure":
++            s = [labels[x] for x in k[1]] if len(k) > 1 else []
++            if len(k) < 3 or k[2]:
++                s.append(i + 1)
++            succ.append(s)
++        elif kind == "cond_exit":
++            succ.append([i + 1])
++        else:  # switch
++            succ.append([labels[x] for x in k[2]])
++    if not used_all:
++        LOCAL_REGS_STATS["no registers"] += 1
++        return lines
++    preds: list[list[int]] = [[] for _ in range(n + 1)]
++    for i, s in enumerate(succ):
++        for j in s:
++            preds[j].append(i)
++
++    # Forward: registers that may be dirty on entry to each line.
++    din = [0] * (n + 1)
++    dout = [0] * n
++    seen = [False] * (n + 1)
++    work = [0]
++    seen[0] = True
++    while work:
++        i = work.pop()
++        if i == END:
++            continue
++        kind = kinds[i][0]
++        out = 0 if kind == "sync" else din[i] | maydef[i]
++        dout[i] = out
++        for j in succ[i]:
++            nv = din[j] | out
++            if nv != din[j] or not seen[j]:
++                din[j] = nv
++                seen[j] = True
++                work.append(j)
++    wb = [0] * (n + 1)
++    for i, k in enumerate(kinds):
++        if not seen[i]:
++            continue
++        if k[0] == "sync" or k[0] == "exit":
++            wb[i] = din[i]
++        elif k[0] in ("cond_exit", "switch"):
++            wb[i] = din[i] | maydef[i]
++    wb[END] = din[END] if seen[END] else 0
++
++    # Backward: registers live on entry to each line.
++    lin = [0] * (n + 1)
++    lin[END] = wb[END]
++    lout = [0] * n
++    work = list(range(n + 1))
++    inq = [True] * (n + 1)
++    while work:
++        i = work.pop()
++        inq[i] = False
++        if i == END:
++            new = wb[END]
++        else:
++            out = 0
++            for j in succ[i]:
++                out |= lin[j]
++            lout[i] = out
++            kind = kinds[i][0]
++            if kind == "sync" or kind == "exit":
++                new = wb[i]
++            elif kind in ("cond_exit", "switch"):
++                new = use[i] | wb[i] | out
++            else:
++                new = use[i] | (out & ~mustdef[i])
++        if new != lin[i]:
++            lin[i] = new
++            for p in preds[i]:
++                if not inq[p]:
++                    inq[p] = True
++                    work.append(p)
++
++    allregs = used_all
++    for i in range(n + 1):
++        allregs |= wb[i]
++    decl = []
++    for ty in ("uint64_t", "uint32_t"):
++        parts = [f"{_LR_NAMES[r]} = {_LR_CTX[r]}" for r in range(36)
++                 if allregs >> r & 1 and _LR_TYPES[r] == ty]
++        if parts:
++            decl.append(f"{ty} " + ", ".join(parts) + ";")
++    out_lines = ["    " + " ".join(decl)]
++    LOCAL_REGS_STATS["localized"] += 1
++    for i, line in enumerate(lines):
++        kind = kinds[i][0]
++        ind = line[:len(line) - len(line.lstrip())]
++        if kind == "label":
++            out_lines.append(line)
++        elif kind == "pure":
++            out_lines.append(_lr_rewrite_cached(line))
++        elif kind == "sync":
++            if wb[i]:
++                out_lines.append(ind + _lr_wb(wb[i]))
++            out_lines.append(line)
++            if lout[i]:
++                out_lines.append(ind + _lr_reload(lout[i]))
++        elif kind == "exit":
++            if wb[i]:
++                out_lines.append(ind + _lr_wb(wb[i]))
++            out_lines.append(line)
++        elif kind == "cond_exit":
++            t, comment = _lr_strip_comments(line)
++            cond, rest = _lr_split_if(t)
++            inner = rest[1:-1].strip() if rest.startswith("{") else rest
++            w = _lr_wb(wb[i])
++            out_lines.append(f"{ind}if ({_lr_rewrite(cond)}) {{ {w + ' ' if w else ''}{inner} }}{comment}")
++        else:  # switch
++            t, comment = _lr_strip_comments(line)
++            m = _LR_SWITCH_RE.fullmatch(t)
++            w = _lr_wb(wb[i])
++            cases = m.group("cases")
++            if w:
++                cases = cases.replace("{ g_trampoline_fn = ", "{ " + w + " g_trampoline_fn = ")
++            new = (t[:m.start("expr")] + _lr_rewrite(m.group("expr")) + t[m.end("expr"):m.start("cases")]
++                   + cases + t[m.end("cases"):m.start("dflt")] + (w + " " if w else "") + t[m.start("dflt"):])
++            out_lines.append(ind + new + comment)
++    if seen[END] and wb[END]:
++        out_lines.append("    " + _lr_wb(wb[END]))
++    return out_lines
++
++
  @dataclass
  class LiftedFunction:
      """A single lifted C function."""
-@@ -539,7 +983,7 @@ def _last_line_is_terminator(body_lines: list[str]) -> bool:
+@@ -539,7 +1383,7 @@ def _last_line_is_terminator(body_lines: list[str]) -> bool:
  class PPULifter:
      """Translates PPU instructions into C source."""
  
@@ -51360,7 +51844,7 @@ index b19e240..9aaa60d 100644
          self.functions: list[LiftedFunction] = []
          self.call_targets: set[int] = set()
          self.branch_targets: set[int] = set()  # all func_X references (b/bc trampolines)
-@@ -599,6 +1043,7 @@ class PPULifter:
+@@ -599,6 +1443,7 @@ class PPULifter:
                  f"underscore; using {prefix + chr(95)!r}"+chr(10))
              prefix += "_"
          self.prefix = prefix
@@ -51368,7 +51852,7 @@ index b19e240..9aaa60d 100644
          # Cache for _range_insns: (instructions, len, ordered, addrs). Keyed by
          # the instruction-list identity so the FULL list (mid-function / serial
          # lift) is sorted+indexed once, not rescanned per call.
-@@ -906,8 +1351,125 @@ class PPULifter:
+@@ -906,8 +1751,125 @@ class PPULifter:
      # (those set CR1), VMX dot-forms (those set CR6), mt*/mf* specials.
      _CR0_SELF_HANDLED = ("stwcx.", "stdcx.")
  
@@ -51495,7 +51979,7 @@ index b19e240..9aaa60d 100644
          mn = insn.mnemonic
          if (mn.endswith(".") and code and not code.startswith("/*")
                  and mn not in self._CR0_SELF_HANDLED
-@@ -919,6 +1481,11 @@ class PPULifter:
+@@ -919,6 +1881,11 @@ class PPULifter:
                           f"uint32_t _c = (_r < 0) ? 8u : (_r > 0) ? 4u : 2u; "
                           f"_c |= (uint32_t)((ctx->xer >> 31) & 1u); "
                           f"ctx->cr = (ctx->cr & 0x0FFFFFFFu) | (_c << 28); }}")
@@ -51507,7 +51991,7 @@ index b19e240..9aaa60d 100644
          return code
  
      def _translate_op(self, insn: Instruction, func: LiftedFunction) -> str:
-@@ -927,6 +1494,11 @@ class PPULifter:
+@@ -927,6 +1894,11 @@ class PPULifter:
          ops = _parse_operands(insn.operands)
          addr = insn.addr
  
@@ -51519,7 +52003,7 @@ index b19e240..9aaa60d 100644
          # ------- Arithmetic -------
          if mn == "li":
              rd = _reg_idx(ops[0])
-@@ -989,8 +1561,10 @@ class PPULifter:
+@@ -989,8 +1961,10 @@ class PPULifter:
              # mulli is the low 64 bits of the full RA * EXTS(SI) product
              # (PowerISA); a 32-bit multiply truncates it.
              rd, ra = _reg_idx(ops[0]), _reg_idx(ops[1])
@@ -51532,7 +52016,7 @@ index b19e240..9aaa60d 100644
  
          if mn in ("mullw", "mullw."):
              # Full 64-bit product of the sign-extended low words (PowerISA);
-@@ -1012,7 +1586,8 @@ class PPULifter:
+@@ -1012,7 +1986,8 @@ class PPULifter:
  
          if mn.startswith("mulhwu"):
              rd, ra, rb = _reg_idx(ops[0]), _reg_idx(ops[1]), _reg_idx(ops[2])
@@ -51542,7 +52026,7 @@ index b19e240..9aaa60d 100644
  
          # PPC integer divide does NOT trap on a zero divisor (or signed
          # INT_MIN/-1 overflow) -- it leaves an undefined result and continues.
-@@ -1021,12 +1596,12 @@ class PPULifter:
+@@ -1021,12 +1996,12 @@ class PPULifter:
          if mn in ("divw", "divw."):
              rd, ra, rb = _reg_idx(ops[0]), _reg_idx(ops[1]), _reg_idx(ops[2])
              return (f"{{ int32_t _a=(int32_t)ctx->gpr[{ra}], _b=(int32_t)ctx->gpr[{rb}]; "
@@ -51557,7 +52041,7 @@ index b19e240..9aaa60d 100644
  
          # ------- Logical -------
          if mn == "ori":
-@@ -1116,8 +1691,8 @@ class PPULifter:
+@@ -1116,8 +2091,8 @@ class PPULifter:
              # (the old (int64_t)(int32_t) cast) corrupted every rlwinm whose bit
              # 31 was set -- e.g. newlib dtoa's exponent-field extraction, which
              # then fed __pow5mult a garbage exponent and spun forever.
@@ -51568,7 +52052,7 @@ index b19e240..9aaa60d 100644
  
          if mn.startswith("rlwimi"):
              ra, rs = _reg_idx(ops[0]), _reg_idx(ops[1])
-@@ -1125,8 +1700,7 @@ class PPULifter:
+@@ -1125,8 +2100,7 @@ class PPULifter:
              # RA = (ROTL32(RS,SH) & m) | (RA & ~m), m = MASK(MB+32,ME+32) which
              # is confined to the low 32 bits -- so RA's HIGH 32 bits are always
              # preserved, and the merged low word is zero-extended.
@@ -51578,7 +52062,7 @@ index b19e240..9aaa60d 100644
  
          if mn in ("slw", "slw."):
              # PPC slw: shift amount is rB[58:63]; if bit 0x20 is set (>= 32) the
-@@ -1387,7 +1961,7 @@ class PPULifter:
+@@ -1387,7 +2361,7 @@ class PPULifter:
              cast = "(int32_t)" if mn == "cmpwi" else "(int64_t)"
              shift = (7 - bf) * 4
              return (f"{{ int64_t a = {cast}ctx->gpr[{ra_i}]; int64_t b = (int64_t){imm}; "
@@ -51587,7 +52071,7 @@ index b19e240..9aaa60d 100644
                      f"ctx->cr = (ctx->cr & ~(0xFu << {shift})) | (cr_val << {shift}); }}")
  
          if mn in ("cmplwi", "cmpldi"):
-@@ -1402,7 +1976,7 @@ class PPULifter:
+@@ -1402,7 +2376,7 @@ class PPULifter:
              cast = "(uint32_t)" if mn == "cmplwi" else "(uint64_t)"
              shift = (7 - bf) * 4
              return (f"{{ uint64_t a = {cast}ctx->gpr[{ra_i}]; uint64_t b = (uint64_t){imm}; "
@@ -51596,7 +52080,7 @@ index b19e240..9aaa60d 100644
                      f"ctx->cr = (ctx->cr & ~(0xFu << {shift})) | (cr_val << {shift}); }}")
  
          if mn in ("cmpw", "cmpd"):
-@@ -1417,7 +1991,7 @@ class PPULifter:
+@@ -1417,7 +2391,7 @@ class PPULifter:
              cast = "(int32_t)" if mn == "cmpw" else "(int64_t)"
              shift = (7 - bf) * 4
              return (f"{{ int64_t a = {cast}ctx->gpr[{ra_i}]; int64_t b = {cast}ctx->gpr[{rb_i}]; "
@@ -51605,7 +52089,7 @@ index b19e240..9aaa60d 100644
                      f"ctx->cr = (ctx->cr & ~(0xFu << {shift})) | (cr_val << {shift}); }}")
  
          if mn in ("cmplw", "cmpld"):
-@@ -1432,7 +2006,7 @@ class PPULifter:
+@@ -1432,7 +2406,7 @@ class PPULifter:
              cast = "(uint32_t)" if mn == "cmplw" else "(uint64_t)"
              shift = (7 - bf) * 4
              return (f"{{ uint64_t a = {cast}ctx->gpr[{ra_i}]; uint64_t b = {cast}ctx->gpr[{rb_i}]; "
@@ -51614,7 +52098,7 @@ index b19e240..9aaa60d 100644
                      f"ctx->cr = (ctx->cr & ~(0xFu << {shift})) | (cr_val << {shift}); }}")
  
          # ------- Branches -------
-@@ -1478,6 +2052,14 @@ class PPULifter:
+@@ -1478,6 +2452,14 @@ class PPULifter:
              except ValueError:
                  return f"goto {target}; /* branch */"
  
@@ -51629,7 +52113,7 @@ index b19e240..9aaa60d 100644
          if mn == "bl":
              target = ops[0]
              try:
-@@ -1503,15 +2085,17 @@ class PPULifter:
+@@ -1503,15 +2485,17 @@ class PPULifter:
          if (mn.endswith("lr") and mn not in ("bl", "blr", "blrl") and
                  mn.startswith("b") and
                  not mn.startswith("blr")):  # guard against "blr" literal
@@ -51651,7 +52135,7 @@ index b19e240..9aaa60d 100644
  
          # Indirect call/jump through CTR in any conditional or named form:
          #   b<cond>ctr / bcctr  (no link) -> tail jump: dispatch, then return
-@@ -1523,9 +2107,10 @@ class PPULifter:
+@@ -1523,9 +2507,10 @@ class PPULifter:
          # (func_00000030). On a real title this is thousands of vtable calls.
          if (mn.startswith("b") and mn not in ("bctr", "bctrl")
                  and (mn.endswith("ctr") or mn.endswith("ctrl"))):
@@ -51664,7 +52148,7 @@ index b19e240..9aaa60d 100644
              return f"if ({cond}) {{ ps3_indirect_call(ctx); DRAIN_TRAMPOLINE(ctx); return; }}"
  
          # Conditional branches
-@@ -1539,19 +2124,19 @@ class PPULifter:
+@@ -1539,19 +2524,19 @@ class PPULifter:
                          and tgt in self.function_entries):
                      # conditional tail call to a function prologue inside this
                      # (merged) range -- trampoline, don't goto (see the `b` case).
@@ -51688,7 +52172,7 @@ index b19e240..9aaa60d 100644
                      # Use trampoline for cross-fragment conditional branches
                      self.branch_targets.add(tgt)
                      return f"if ({cond}) {{ g_trampoline_fn = (void(*)(void*)){self.prefix}func_{tgt:08X}; return; }}"
-@@ -1595,7 +2180,7 @@ class PPULifter:
+@@ -1595,7 +2580,7 @@ class PPULifter:
              # Indirect call through CTR register. The CTR value is a GUEST
              # address (or OPD pointer). We dispatch through a hash table
              # that maps guest addresses to host function pointers.
@@ -51697,7 +52181,7 @@ index b19e240..9aaa60d 100644
  
          # ------- SPR -------
          if mn == "mflr":
-@@ -1612,13 +2197,22 @@ class PPULifter:
+@@ -1612,13 +2597,22 @@ class PPULifter:
  
          if mn == "mtctr":
              rs_i = _reg_idx(ops[0])
@@ -51725,7 +52209,7 @@ index b19e240..9aaa60d 100644
              return f"ctx->gpr[{rd_i}] = ctx->cr;"
  
          if mn in ("mfspr", "mtspr"):
-@@ -1644,17 +2238,32 @@ class PPULifter:
+@@ -1644,17 +2638,32 @@ class PPULifter:
              # left the destination GPR holding whatever happened to be in it, so
              # the guest read a stale register instead of a defined one.
              if s in ("VRSAVE", "256"):
@@ -51762,7 +52246,7 @@ index b19e240..9aaa60d 100644
          if mn == "mtcr":
              return f"ctx->cr = (uint32_t)ctx->gpr[{_reg_idx(ops[-1])}];"
          if mn == "mtcrf":
-@@ -1732,7 +2341,7 @@ class PPULifter:
+@@ -1732,7 +2741,7 @@ class PPULifter:
              helper = fp_binary[mn_base]
              expr = f"{helper}(ctx->fpr[{fra}], ctx->fpr[{frb}])"
              # Book I 4.6.5: the single forms round the result to single
@@ -51771,7 +52255,7 @@ index b19e240..9aaa60d 100644
              if mn_base.endswith("s"):
                  expr = f"ppu_fp_single({expr})"
              return f"ctx->fpr[{frd}] = {expr};"
-@@ -1778,7 +2387,6 @@ class PPULifter:
+@@ -1778,7 +2787,6 @@ class PPULifter:
          if mn_base in ("frsp",):
              frd = _reg_idx(ops[0])
              frb = _reg_idx(ops[1])
@@ -51779,7 +52263,7 @@ index b19e240..9aaa60d 100644
              return f"ctx->fpr[{frd}] = ppu_frsp(ctx->fpr[{frb}]);"
  
          # Book I 4.6.7 float->int: SATURATE (>max => max, <min => min,
-@@ -1792,10 +2400,11 @@ class PPULifter:
+@@ -1792,10 +2800,11 @@ class PPULifter:
              frd = _reg_idx(ops[0])
              frb = _reg_idx(ops[1])
              rn = 0 if mn_base.endswith("z") else 1
@@ -51795,7 +52279,7 @@ index b19e240..9aaa60d 100644
  
          if mn_base in ("fctid", "fctidz"):
              frd = _reg_idx(ops[0])
-@@ -1856,7 +2465,8 @@ class PPULifter:
+@@ -1856,7 +2865,8 @@ class PPULifter:
          # ------- 64-bit multiply / divide -------
          if mn == "mulld":
              rd, ra, rb = _reg_idx(ops[0]), _reg_idx(ops[1]), _reg_idx(ops[2])
@@ -51805,7 +52289,7 @@ index b19e240..9aaa60d 100644
  
          if mn == "mullw":
              rd, ra, rb = _reg_idx(ops[0]), _reg_idx(ops[1]), _reg_idx(ops[2])
-@@ -1995,25 +2605,27 @@ class PPULifter:
+@@ -1995,25 +3005,27 @@ class PPULifter:
              rb = _reg_idx(ops[2])
              mb = int(ops[3])
              me = int(ops[4])
@@ -51849,7 +52333,7 @@ index b19e240..9aaa60d 100644
  
          # ------- Store/load with update indexed -------
          if mn == "stdux":
-@@ -2047,7 +2659,8 @@ class PPULifter:
+@@ -2047,7 +3059,8 @@ class PPULifter:
              ea = f"ctx->gpr[{ra}] + ctx->gpr[{rb}]" if ra != "0" else f"ctx->gpr[{rb}]"
              return (f"{{ uint64_t ea = {ea}; "
                      f"ctx->gpr[{rd}] = vm_read32(ea); "
@@ -51859,7 +52343,7 @@ index b19e240..9aaa60d 100644
  
          if mn == "stwcx" or mn == "stwcx.":
              rs, ra, rb = _reg_idx(ops[0]), _reg_idx(ops[1]), _reg_idx(ops[2])
-@@ -2057,26 +2670,75 @@ class PPULifter:
+@@ -2057,26 +3070,75 @@ class PPULifter:
              # the atomic CAS). A plain conditional write loses concurrent updates
              # (lock-free free-list/refcount corruption under real host threads).
              return (f"{{ uint64_t ea = {ea}; "
@@ -51942,7 +52426,7 @@ index b19e240..9aaa60d 100644
  
          # ------- Trap (tw) — used for assertions, safe to no-op in recomp -------
          if mn == "tw" or mn == "twi" or mn == "td" or mn == "tdi":
-@@ -2086,19 +2748,19 @@ class PPULifter:
+@@ -2086,19 +3148,19 @@ class PPULifter:
          if mn == "lwbrx":
              rd, ra, rb = _reg_idx(ops[0]), _reg_idx(ops[1]), _reg_idx(ops[2])
              return (f"{{ uint64_t ea = {_xea(ra,rb)}; "
@@ -51965,7 +52449,7 @@ index b19e240..9aaa60d 100644
                      f"ctx->gpr[{rd}] = raw; }}")
  
          if mn == "ldbrx":
-@@ -2107,14 +2769,14 @@ class PPULifter:
+@@ -2107,14 +3169,14 @@ class PPULifter:
              # as lhbrx above.
              rd, ra, rb = _reg_idx(ops[0]), _reg_idx(ops[1]), _reg_idx(ops[2])
              return (f"{{ uint64_t ea = {_xea(ra,rb)}; "
@@ -51982,7 +52466,7 @@ index b19e240..9aaa60d 100644
  
          # ------- Load algebraic -------
          if mn == "lwax":
-@@ -2242,14 +2904,14 @@ class PPULifter:
+@@ -2242,14 +3304,14 @@ class PPULifter:
              ra = _reg_idx(ops[1])
              rb = _reg_idx(ops[2])
              return (f"{{ uint64_t ea = ({_xea(ra,rb)}) & ~0xFULL; "
@@ -51999,7 +52483,7 @@ index b19e240..9aaa60d 100644
  
          # Cell unaligned vector loads (CBEA / AltiVec): lvlx loads bytes
          # [EA&15 .. 15] of the aligned quadword left-justified into vD and
-@@ -2280,15 +2942,15 @@ class PPULifter:
+@@ -2280,15 +3342,15 @@ class PPULifter:
              vd = int(ops[0][1:]) if ops[0].startswith("v") else _reg_idx(ops[0])
              ra = _reg_idx(ops[1])
              rb = _reg_idx(ops[2])
@@ -52024,7 +52508,7 @@ index b19e240..9aaa60d 100644
  
          if mn == "stvebx" or mn == "stvehx" or mn == "stvewx":
              vs = int(ops[0][1:]) if ops[0].startswith("v") else _reg_idx(ops[0])
-@@ -2297,8 +2959,8 @@ class PPULifter:
+@@ -2297,8 +3359,8 @@ class PPULifter:
              size = {"stvebx": 1, "stvehx": 2, "stvewx": 4}[mn]
              return (f"{{ uint64_t ea = {_xea(ra,rb)}; "
                      f"ea &= ~{size - 1}ULL; "
@@ -52035,7 +52519,7 @@ index b19e240..9aaa60d 100644
  
          if mn == "lvsl" or mn == "lvsr":
              vd = int(ops[0][1:]) if ops[0].startswith("v") else _reg_idx(ops[0])
-@@ -2320,15 +2982,8 @@ class PPULifter:
+@@ -2320,15 +3382,8 @@ class PPULifter:
              va = int(ops[1][1:])
              vb = int(ops[2][1:])
              vc = int(ops[3][1:])
@@ -52053,7 +52537,7 @@ index b19e240..9aaa60d 100644
  
          # VMX splat (vspltw, vsplth, vspltb) — duplicate one element across vector
          if mn == "vspltw":
-@@ -2469,9 +3124,8 @@ class PPULifter:
+@@ -2469,9 +3524,8 @@ class PPULifter:
              va = int(ops[1][1:])
              vb = int(ops[2][1:])
              sh = int(ops[3])  # numeric shift count (disasm emits plain number)
@@ -52065,7 +52549,7 @@ index b19e240..9aaa60d 100644
  
          # VMX integer multiply-accumulate
          if mn == "vmsumshm":
-@@ -3060,8 +3714,24 @@ class PPULifter:
+@@ -3060,8 +4114,24 @@ class PPULifter:
          # ------- Default: emit as comment -------
          return f"/* TODO: {mn} {insn.operands} */;"
  
@@ -52092,7 +52576,7 @@ index b19e240..9aaa60d 100644
          mn = mnemonic.rstrip("la")  # strip link and absolute bits
          if mn.startswith("b"):
              mn = mn[1:]  # strip leading 'b'
-@@ -3088,8 +3758,8 @@ class PPULifter:
+@@ -3088,8 +4158,8 @@ class PPULifter:
              "le": f"(!((ctx->cr >> {shift}) & 4))",
              "so": f"((ctx->cr >> {shift}) & 1)",
              "ns": f"(!((ctx->cr >> {shift}) & 1))",
@@ -52103,7 +52587,7 @@ index b19e240..9aaa60d 100644
          }
  
          return cond_map.get(mn, f"/* cond: {mnemonic} */ 1")
-@@ -3266,6 +3936,17 @@ class PPULifter:
+@@ -3266,6 +4336,17 @@ class PPULifter:
  
          # Emit helper macros
          lines.append("/* Rotate helpers */")
@@ -52121,7 +52605,7 @@ index b19e240..9aaa60d 100644
          lines.append("static inline uint32_t ppc_rlwinm(uint32_t rs, int sh, int mb, int me) {")
          lines.append("    sh &= 31;")
          lines.append("    uint32_t rotated = sh ? ((rs << sh) | (rs >> (32 - sh))) : rs;")
-@@ -3411,8 +4092,17 @@ class PPULifter:
+@@ -3411,8 +4492,18 @@ class PPULifter:
          label = self.name_map.get(func.start_addr)
          if label:
              lines.append(f"/* {label} */")
@@ -52133,6 +52617,7 @@ index b19e240..9aaa60d 100644
 +        # vm_base) cannot alias it -- which lets the compiler keep guest
 +        # registers in host registers across them (-fno-strict-aliasing is on).
 +        lines.append(f"void {weak}{func.name}(ppu_context* __restrict ctx) {{")
++        body_start = len(lines)
 +        for bline in _fuse_cr(func.body_lines):
 +            # An address computed from r1 is the thread's stack: the stack
 +            # accessors (ppu_recomp.h) skip the range and control-word tests.
@@ -52141,7 +52626,16 @@ index b19e240..9aaa60d 100644
              lines.append(f"    {bline}" if not bline.endswith(":") else bline)
  
          # If a function doesn't end with blr/b/bctr (a return or unconditional
-@@ -3634,11 +4324,12 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts
+@@ -3447,6 +4538,8 @@ class PPULifter:
+                       f"0x{func.fallthrough_to:08X}; emitting halt", flush=True)
+                 lines.append(f"        /* missing continuation 0x{func.fallthrough_to:08X}: halt */ return;")
+ 
++        if getattr(self, "local_regs", False):
++            lines[body_start:] = localize_ppu_registers(lines[body_start:])
+         lines.append("}")
+         lines.append("")
+         return lines
+@@ -3634,11 +4727,12 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts
                  return _k + 1
          return 0
      def _live(lo, i):
@@ -52159,7 +52653,7 @@ index b19e240..9aaa60d 100644
          seg = all_insns[lo:i]
          targets = set()
          for x in seg:
-@@ -3651,9 +4342,43 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts
+@@ -3651,9 +4745,43 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts
                          pass
          def _ends_block(x):     # a branch that does not return to the next insn
              return x.mnemonic.startswith('b') and x.mnemonic not in ('bl', 'bctrl', 'blrl')
@@ -52204,7 +52698,7 @@ index b19e240..9aaa60d 100644
                  # back to the block's first insn: a branch target, or the insn
                  # right after another branch (fallthrough entry)
                  while k > 0 and seg[k].addr not in targets and not _ends_block(seg[k - 1]):
-@@ -4087,6 +4812,9 @@ def main() -> None:
+@@ -4087,6 +5215,9 @@ def main() -> None:
      parser.add_argument("--output", "-o", default=".", help="Output directory")
      parser.add_argument("--header-name", default="ppu_recomp.h", help="Header file name")
      parser.add_argument("--source-name", default="ppu_recomp.c", help="Source file name")
@@ -52214,7 +52708,7 @@ index b19e240..9aaa60d 100644
      parser.add_argument("--single-file", action="store_true",
                          help="Emit one ppu_recomp.c instead of split chunks (for "
                               "single-file post-processing, e.g. flOw's vmx_splice)")
-@@ -4120,6 +4848,10 @@ def main() -> None:
+@@ -4120,12 +5251,20 @@ def main() -> None:
                          help="Prefix for every emitted func_*/function_table "
                               "symbol (e.g. 'libsre_') so a relocated PRX image "
                               "links alongside the main title without collisions")
@@ -52225,7 +52719,17 @@ index b19e240..9aaa60d 100644
      parser.add_argument("--hle-stubs", metavar="FILE", default=None,
                          help="EBOOT.imports.json ([{library,nid,stub}]). Each "
                               "import stub address is lifted as ps3_hle_call(nid) "
-@@ -4535,22 +5267,32 @@ def main() -> None:
+                              "instead of its literal .lib.stub trampoline, and "
+                              "split out as its own 0x20-byte function so direct "
+                              "calls to it dispatch to the HLE handler.")
++    parser.add_argument("--local-regs", action="store_true",
++                        help="Keep GPRs, CR, XER, LR and CTR in C locals inside each "
++                             "lifted function, synced with ctx only around calls and "
++                             "exits (see localize_ppu_registers). Off by default.")
+     args = parser.parse_args()
+ 
+     # Load firmware-import stubs (addr -> NID) up front; applied to func_bounds
+@@ -4535,23 +5674,34 @@ def main() -> None:
      # Firmware-import stub split: the .lib.stub trampolines are usually lumped
      # into one big function by boundary detection. Carve each 0x20-byte stub out
      # as its own function so direct calls land on it and it can be emitted as a
@@ -52263,9 +52767,11 @@ index b19e240..9aaa60d 100644
 -    lifter = PPULifter(prefix=args.symbol_prefix)
 +    lifter = PPULifter(prefix=args.symbol_prefix, weak_emit=args.weak)
      lifter.header_name = args.header_name
++    lifter.local_regs = args.local_regs
      # A single-module executable keeps r2 (TOC) constant, so an `ld r2, N(r1)` TOC
      # restore can be lowered to this literal instead of a stack read (the recomp has
-@@ -4647,7 +5389,7 @@ def main() -> None:
+     # no glink stub writing the save slot, so the stack read returns garbage -> r2
+@@ -4647,12 +5797,14 @@ def main() -> None:
          print(f"Wrote {os.path.basename(src_path)}")
      else:
          print("Writing C source (split into chunks)...", flush=True)
@@ -52274,6 +52780,13 @@ index b19e240..9aaa60d 100644
          print(f"Wrote {header_path}")
          print(f"Wrote {len(paths)} source chunks: "
                f"{os.path.basename(paths[0])} .. {os.path.basename(paths[-1])}")
+     print(f"  {len(lifter.functions)} functions lifted")
+     print(f"  {len(lifter.call_targets)} unique call targets")
++    if args.local_regs:
++        print("  local-regs: " + ", ".join(f"{k} {v}" for k, v in sorted(LOCAL_REGS_STATS.items())))
+ 
+ 
+ if __name__ == "__main__":
 diff --git a/tools/spu_disasm.py b/tools/spu_disasm.py
 index 2630352..9380de3 100644
 --- a/tools/spu_disasm.py
@@ -53043,3 +53556,244 @@ index 096fc3a..2c785a4 100644
  """)
      out.append("int main(void) {")
      out.append("    ppu_context* ctx = &g_ctx;")
+diff --git a/tools/test_ppu_local_regs.py b/tools/test_ppu_local_regs.py
+new file mode 100755
+index 0000000..0e85d92
+--- /dev/null
++++ b/tools/test_ppu_local_regs.py
+@@ -0,0 +1,235 @@
++#!/usr/bin/env python3
++"""Checks for the PPU lifter's --local-regs pass (localize_ppu_registers).
++
++The pass keeps GPRs, CR, XER, LR and CTR in C locals inside a lifted function
++and syncs them with ctx only around the lines that hand ctx to something else
++(calls, syscalls, HLE, indirect calls) and in front of every exit. A missed
++write-back hands a callee a stale register; a missed reload makes the function
++continue on a value the callee replaced. These tests pin the write-back and
++reload sets on hand-written bodies in the shapes the lifter emits, and build
++and run one body both ways against a mock callee.
++
++Usage:  python3 tools/test_ppu_local_regs.py
++"""
++
++import os
++import shutil
++import subprocess
++import sys
++import tempfile
++
++TOOLS = os.path.dirname(os.path.abspath(__file__))
++sys.path.insert(0, TOOLS)
++
++from ppu_lifter import LOCAL_REGS_STATS, localize_ppu_registers
++
++FAILS = []
++
++
++def check(name, cond, detail=""):
++    print(f"{'ok  ' if cond else 'FAIL'} {name}" + ("" if cond else f": {detail}"))
++    if not cond:
++        FAILS.append(name)
++
++
++def body(*lines):
++    return [ln if ln.endswith(":") and ln.startswith("loc_") else "        " + ln for ln in lines]
++
++
++def line_with(out, needle):
++    return next((i for i, ln in enumerate(out) if needle in ln), None)
++
++
++CALL = "ctx->lr = 0x00010040; func_00020000(ctx); DRAIN_TRAMPOLINE(ctx);"
++
++
++def test_call_sync():
++    out = localize_ppu_registers(body(
++        "ctx->gpr[3] = ctx->gpr[4] + (int64_t)(1);",
++        "ctx->gpr[9] = (int64_t)(int32_t)(5);",
++        CALL,
++        "ctx->gpr[5] = ctx->gpr[3] + ctx->gpr[9];",
++        "return;"))
++    check("declaration first", out[0].strip().startswith("uint64_t _r3 = ctx->gpr[3]"), out[0])
++    k = line_with(out, "func_00020000(ctx)")
++    check("call line kept against ctx", out[k].strip() == CALL, out[k])
++    check("write-back = written registers", out[k - 1].strip() == "ctx->gpr[3] = _r3; ctx->gpr[9] = _r9;", out[k - 1])
++    check("reload = registers live after", out[k + 1].strip() == "_r3 = ctx->gpr[3]; _r9 = ctx->gpr[9];", out[k + 1])
++    r = line_with(out, "return;")
++    check("exit writes back only what is dirty", out[r - 1].strip() == "ctx->gpr[5] = _r5;", out[r - 1])
++    check("pure lines rewritten", "_r5 = _r3 + _r9;" in out[k + 2], out[k + 2])
++
++
++def test_loop_and_cond_exit():
++    out = localize_ppu_registers(body(
++        "loc_00010000:",
++        "ctx->gpr[4] = vm_read8(ctx->gpr[3] + 0x0);",
++        "ctx->gpr[3] = ctx->gpr[3] + (int64_t)(1);",
++        "{ int64_t a = (int32_t)ctx->gpr[4]; int64_t b = (int64_t)0; uint32_t cr_val = "
++        "((a < b) ? 8 : (a > b) ? 4 : 2) | ((ctx->xer >> 31) & 1u); "
++        "ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_val << 28); }",
++        "if ((!((ctx->cr >> 29) & 1))) goto loc_00010000;",
++        "if ((--ctx->ctr != 0)) { g_trampoline_fn = (void(*)(void*))func_00030000; return; }",
++        "return;"))
++    text = "\n".join(out)
++    check("no ctx register in the loop", "ctx->gpr[3] +" not in text and "ctx->cr >>" not in text, text)
++    k = line_with(out, "g_trampoline_fn")
++    check("conditional exit writes back r3, r4, cr and the decremented ctr",
++          "ctx->gpr[3] = _r3; ctx->gpr[4] = _r4; ctx->cr = _cr; ctx->ctr = _ctr; g_trampoline_fn" in out[k], out[k])
++    check("ctr decrement on the local", "--_ctr != 0" in out[k], out[k])
++    r = len(out) - 1
++    check("final return writes back ctr too", "ctx->ctr = _ctr;" in out[r - 1], out[r - 1])
++
++
++def test_switch_default():
++    out = localize_ppu_registers(body(
++        "ctx->ctr = ctx->gpr[0];",
++        "switch ((uint32_t)ctx->ctr) { case 0x00010010u: goto loc_00010010;case 0x00010020u: goto loc_00010020;"
++        " default: ps3_indirect_call(ctx); return; } return;",
++        "loc_00010010:",
++        "ctx->gpr[3] = (int64_t)(int32_t)(1);",
++        "return;",
++        "loc_00010020:",
++        "ctx->gpr[3] = (int64_t)(int32_t)(2);",
++        "return;"))
++    k = line_with(out, "switch")
++    check("switch on the local", "switch ((uint32_t)_ctr)" in out[k], out[k])
++    check("default arm writes back first", "default: ctx->ctr = _ctr; ps3_indirect_call(ctx); return;" in out[k], out[k])
++    k2 = line_with(out, "loc_00010010:")
++    check("case target sees ctr dirty", out[k2 + 2].strip() == "ctx->gpr[3] = _r3; ctx->ctr = _ctr;", out[k2 + 2])
++
++
++def test_switch_trampoline_cases():
++    out = localize_ppu_registers(body(
++        "ctx->ctr = ctx->gpr[0];",
++        "switch ((uint32_t)ctx->ctr) { case 0x00010010u: goto loc_00010010;"
++        "case 0x00090000u: { g_trampoline_fn = (void(*)(void*))func_00090000; return; }"
++        " default: ps3_indirect_call(ctx); return; } return;",
++        "loc_00010010:",
++        "return;"))
++    k = line_with(out, "switch")
++    check("trampoline case writes back first",
++          "case 0x00090000u: { ctx->ctr = _ctr; g_trampoline_fn = (void(*)(void*))func_00090000; return; }" in out[k],
++          out[k])
++    check("mixed switch default writes back", "default: ctx->ctr = _ctr; ps3_indirect_call(ctx);" in out[k], out[k])
++
++
++def test_xer_address_and_reads():
++    out = localize_ppu_registers(body(
++        "ctx->gpr[3] = ppc_sraw(&ctx->xer, (int32_t)ctx->gpr[4], 3);",
++        "return;"))
++    check("&ctx->xer becomes &_xer", "ppc_sraw(&_xer, (int32_t)_r4, 3)" in out[1], out[1])
++    check("xer written back after an address-taken use", "ctx->xer = _xer;" in out[2], out[2])
++
++
++def test_unsupported_left_alone():
++    before = LOCAL_REGS_STATS["unsupported"]
++    src = body("ctx->gpr[3] = 1;", "if (ctx->gpr[3])", "    func_00020000(ctx);", "return;")
++    out = localize_ppu_registers(src)
++    check("unknown shape: body unchanged", out == src, out)
++    check("unknown shape: counted", LOCAL_REGS_STATS["unsupported"] == before + 1)
++    src = body("ctx->gpr[3] = 1;", "if (ctx->gpr[3]) { func_00020000(ctx); goto loc_00010000; }", "loc_00010000:", "return;")
++    check("goto out of a sync line: unchanged", localize_ppu_registers(src) == src)
++
++
++def test_no_registers():
++    src = body("vmx_vaddfp(&ctx->vr[0], &ctx->vr[1], &ctx->vr[2], ctx->vscr);", "return;")
++    check("no localizable register: unchanged", localize_ppu_registers(src) == src)
++
++
++# --- build and run one body both ways --------------------------------------
++PRELUDE = r"""
++#include <stdint.h>
++#include <string.h>
++#include <stdio.h>
++typedef struct { uint64_t gpr[32]; uint32_t cr; uint64_t lr, ctr; uint32_t xer; } ppu_context;
++static uint8_t mem[4096];
++static uint8_t vm_read8(uint64_t a) { return mem[a & 4095]; }
++static void vm_write32(uint64_t a, uint32_t v) { memcpy(&mem[a & 4095], &v, 4); }
++static void (*g_trampoline_fn)(void*);
++static uint64_t seen;
++#define DRAIN_TRAMPOLINE(ctx) do { while (g_trampoline_fn) { void(*f)(void*) = g_trampoline_fn; g_trampoline_fn = 0; f(ctx); } } while (0)
++static void func_00020000(ppu_context* c) {
++    for (int i = 0; i < 32; i++) seen = seen * 31 + c->gpr[i];
++    seen = seen * 31 + c->cr + c->xer + c->lr + c->ctr;
++    c->gpr[3] = c->gpr[3] * 3 + 1; c->gpr[4] ^= 0x55; c->gpr[30] += 7; c->cr ^= 0x10000000u; c->ctr = (c->gpr[3] & 1) + 1;
++}
++static void func_00030000(ppu_context* c) { (void)c; }
++"""
++
++BODY = body(
++    "ctx->gpr[30] = ctx->gpr[3] | ctx->gpr[3];",
++    "ctx->ctr = (int64_t)(int32_t)(4);",
++    "loc_00010000:",
++    "ctx->gpr[4] = vm_read8(ctx->gpr[30] + 0x0);",
++    "ctx->gpr[30] = ctx->gpr[30] + (int64_t)(1);",
++    "{ int64_t a = (int32_t)ctx->gpr[4]; int64_t b = (int64_t)128; uint32_t cr_val = "
++    "((a < b) ? 8 : (a > b) ? 4 : 2) | ((ctx->xer >> 31) & 1u); ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_val << 28); }",
++    "if (((ctx->cr >> 31) & 1)) goto loc_00010000;",
++    "vm_write32(ctx->gpr[1] + 0x10, ctx->gpr[4]);",
++    "ctx->gpr[3] = ctx->gpr[4] + ctx->gpr[30];",
++    CALL,
++    "ctx->gpr[5] = ctx->gpr[3] + ctx->gpr[4] + ctx->gpr[30];",
++    "if ((--ctx->ctr != 0)) goto loc_00010000;",
++    "if (((ctx->cr >> 28) & 1)) { g_trampoline_fn = (void(*)(void*))func_00030000; return; }",
++    "ctx->gpr[6] = ctx->gpr[5] ^ ctx->lr;")
++
++MAIN = r"""
++int main(void) {
++    unsigned long long s = 88172645463325252ull;
++    for (int t = 0; t < 2000; t++) {
++        ppu_context c0;
++        for (int i = 0; i < 32; i++) { s ^= s << 13; s ^= s >> 7; s ^= s << 17; c0.gpr[i] = s & 4095; }
++        c0.cr = (uint32_t)s; c0.xer = (uint32_t)(s >> 32) & 0xE0000000u; c0.lr = s >> 3; c0.ctr = s & 7;
++        for (int i = 0; i < 4096; i++) { s ^= s << 13; s ^= s >> 7; s ^= s << 17; mem[i] = (uint8_t)s; }
++        uint8_t m0[4096]; memcpy(m0, mem, 4096);
++        ppu_context a = c0, b = c0;
++        seen = 0; f_base(&a); uint64_t sa = seen; uint8_t ma[4096]; memcpy(ma, mem, 4096); void* ta = (void*)g_trampoline_fn;
++        memcpy(mem, m0, 4096); g_trampoline_fn = 0;
++        seen = 0; f_loc(&b); void* tb = (void*)g_trampoline_fn; g_trampoline_fn = 0;
++        if (memcmp(&a, &b, sizeof a) || sa != seen || memcmp(ma, mem, 4096) || ta != tb) { printf("diff at %d\n", t); return 1; }
++    }
++    printf("same\n");
++    return 0;
++}
++"""
++
++
++def test_build_and_run():
++    cc = shutil.which("clang") or shutil.which("cc") or shutil.which("gcc")
++    if not cc:
++        print("skip build-and-run: no C compiler")
++        return
++    loc = localize_ppu_registers(BODY)
++    src = (PRELUDE
++           + "static void f_base(ppu_context* __restrict ctx) {\n" + "\n".join(BODY) + "\n}\n"
++           + "static void f_loc(ppu_context* __restrict ctx) {\n" + "\n".join(loc) + "\n}\n" + MAIN)
++    with tempfile.TemporaryDirectory() as d:
++        c, exe = os.path.join(d, "t.c"), os.path.join(d, "t")
++        with open(c, "w") as f:
++            f.write(src)
++        r = subprocess.run(check=False, args=[cc, "-O2", "-fwrapv", "-fno-strict-aliasing", "-w", "-o", exe, c],
++                           capture_output=True, text=True)
++        check("build-and-run: compiles", r.returncode == 0, r.stderr[-2000:])
++        if r.returncode:
++            return
++        r = subprocess.run(check=False, args=[exe], capture_output=True, text=True, timeout=60)
++        check("build-and-run: same ctx, memory, callee view and hand-off", r.stdout.strip() == "same",
++              r.stdout + r.stderr)
++
++
++def main() -> int:
++    test_call_sync()
++    test_loop_and_cond_exit()
++    test_switch_default()
++    test_switch_trampoline_cases()
++    test_xer_address_and_reads()
++    test_unsupported_left_alone()
++    test_no_registers()
++    test_build_and_run()
++    print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'all passed'}")
++    return 1 if FAILS else 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())

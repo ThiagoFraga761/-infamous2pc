@@ -117,6 +117,11 @@ set(PS3RECOMP_SCAFFOLD
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_fs.cpp"
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_sysprx.cpp"
 )
+# MinGW: g_trampoline_fn lives in its own unit, which tools/ppu_cxx.sh hands
+# to the lifted code's compiler (see the file for why).
+if(MINGW)
+    list(APPEND PS3RECOMP_SCAFFOLD "${PS3RECOMP_DIR}/runtime/ppu/ppu_trampoline_tls.cpp")
+endif()
 
 # ---------------------------------------------------------------------------
 # Lifted SPU images (optional)
@@ -306,6 +311,14 @@ if(WIN32)
         gdi32
         winmm
     )
+endif()
+
+# MinGW: libgcc, libstdc++ and winpthread linked in, so the .exe does not need
+# libgcc_s_seh-1.dll, libstdc++-6.dll or libwinpthread-1.dll beside it. -static
+# only changes how -l names resolve; the libraries CMake found by full path
+# (SDL2, libpng, zlib: their .dll.a import libraries) stay DLL imports.
+if(MINGW)
+    target_link_options(${PROJECT_NAME} PRIVATE -static)
 endif()
 
 # ---------------------------------------------------------------------------

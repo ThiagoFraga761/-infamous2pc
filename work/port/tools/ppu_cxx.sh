@@ -9,6 +9,9 @@ ppu=0
 for a in "$@"; do
     case "$a" in
         */src/recomp*/ppu_recomp_*.cpp) ppu=1 ;;
+        # Defines the TLS slot the lifted code reads: it must come from the
+        # same compiler (MinGW GCC's TLS is emulated, clang's is native).
+        */runtime/ppu/ppu_trampoline_tls.cpp) ppu=1 ;;
     esac
 done
 if [ "$ppu" = 1 ] && [ -z "${PORT_PPU_GCC:-}" ]; then
