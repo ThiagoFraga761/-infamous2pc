@@ -29,7 +29,8 @@
  * PS3RECOMP_NATIVE_BC11: 1 (default) on; 0 off; 2 runs the SPU worker after
  * the native model and compares the output buffer it leaves in LS (header
  * minus the list EA, and the last list) with the model's, logging any
- * difference. */
+ * difference. PS3RECOMP_BC11_OPHIST=1 adds the op behind each FB_OP fallback
+ * to the 10 s stats line. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,6 +84,7 @@ typedef __m128 F4;
 static inline F4 F4V(u128 u) { return _mm_castsi128_ps(_mm_loadu_si128((const __m128i*)u._u32)); }
 static inline F4 F4W(uint32_t a, uint32_t b, uint32_t c, uint32_t d) { return _mm_castsi128_ps(_mm_setr_epi32((int)a, (int)b, (int)c, (int)d)); }
 #define FLANE(v, i) ((uint32_t)_mm_extract_ps((v), (i)))
+static inline u128 F4U(F4 v) { u128 u; _mm_storeu_si128((__m128i*)u._u32, _mm_castps_si128(v)); return u; }
 #define FSPL(v, i) _mm_shuffle_ps((v), (v), _MM_SHUFFLE(i, i, i, i))
 #define FSET(v, i, x) _mm_insert_ps((v), _mm_castsi128_ps(_mm_cvtsi32_si128((int)(x))), (i) << 4)
 static inline F4 FMUL(F4 a, F4 b) { return _mm_mul_ps(a, b); }
@@ -108,6 +110,7 @@ typedef u128 F4;
 static inline F4 F4V(u128 u) { return u; }
 static inline F4 F4W(uint32_t a, uint32_t b, uint32_t c, uint32_t d) { return V4(a, b, c, d); }
 #define FLANE(v, i) ((v)._u32[i])
+static inline u128 F4U(F4 v) { return v; }
 #define FSPL(v, i) SPL((v), (i))
 #define FSET(v, i, x) LANE((v), (i), (x))
 static inline F4 FMUL(F4 a, F4 b) { return spu_fm(a, b); }
@@ -139,7 +142,8 @@ typedef struct {
     spu_context* ctx;
     const uint8_t* ls;
     int fallback;
-    uint32_t bad_ea, bad_size;
+    uint32_t bad_ea, bad_size, bad_op;
+    unsigned csr0;            /* MXCSR outside the walk (op 10 runs on the SPU helpers under it) */
     /* worker arguments */
     uint32_t hdr, planes, stream, ls3, ls2, ls1;
     /* header fields */
@@ -357,6 +361,24 @@ static int lod_in(J* j, uint32_t b, uint32_t lod, F4 c, const X4* X)
     return GT0(FMUL(t, t), FSPL(dist, 0));
 }
 
+/* op 19 (0x5258): is the center within the radius (+8)? Same distance as
+ * lod_in, no band precondition; radius^2 > dist^2. */
+static int sphere_in(J* j, uint32_t rw, F4 c, const X4* X)
+{
+    F4 w = FMUL(X->x[0], FSPL(c, 0));
+    w = FMA_(X->x[1], FSPL(c, 1), w);
+    w = FMA_(X->x[2], FSPL(c, 2), w);
+    w = FADD(w, X->x[3]);
+    F4 d = FSUB(w, j->cam);
+    d = FSET(d, 2, FLANE(FMUL(FSPL(d, 2), FSPL(j->h70, 0)), 0));
+    const F4 dist = HSUM3(FMUL(d, d));
+#ifdef BC11_HOST_FLOAT
+    if ((rw & 0x7F800000u) >= (191u << 23)) return FLANE(dist, 0) != 0xFFFFFFFFu;   /* as lod_in */
+#endif
+    const F4 t = F4W(rw, rw, rw, rw);
+    return GT0(FMUL(t, t), FSPL(dist, 0));
+}
+
 /* ---------------- the queue (0x4278 push, 0x5EE8 pop and GET) ---------------- */
 static void push(J* j, uint32_t size, uint32_t ea, uint32_t c0, uint32_t c1, const X4* X, uint32_t lod)
 {
@@ -439,6 +461,85 @@ static void emit(J* j, uint32_t r)
     if (j->n > j->maxn) j->maxn = j->n;
 }
 
+/* op 6 / op 14: the 256-bit group mask at hdr+0x10, bit (idx & 127) of quad idx >> 7 */
+static inline int mask_bit(const J* j, uint32_t mb)
+{
+    const uint32_t idx = mb & 127;
+    const uint8_t* mq = QP(j, j->hdr + 0x10 + 16 * (mb >> 7));
+    return (mq[15 - (idx >> 3)] >> (idx & 7)) & 1;
+}
+
+/* op 10 (0x5570): a plane in the node's local space (+8: n, d) taken to world
+ * space with the adjugate of the current transform over its determinant,
+ * normalized, and tested against the camera: with header+0x38 bit 5 set, a
+ * camera behind the plane culls the child. frest/fi/frsqest leave no room for
+ * host floats, so this runs on the SPU float helpers, as literally as the
+ * listing, under the caller's MXCSR. Returns 1 when the child is pushed. */
+static u128 PRM(u128 v) { return V4(v._u32[1], v._u32[2], v._u32[0], v._u32[0]); }     /* the 0x6D00 shuffle */
+static u128 ROT1(u128 v) { return V4(v._u32[1], v._u32[2], v._u32[3], v._u32[0]); }
+static u128 ROT2(u128 v) { return V4(v._u32[2], v._u32[3], v._u32[0], v._u32[1]); }
+static u128 SPLW(u128 v, int i) { return V4(v._u32[i], v._u32[i], v._u32[i], v._u32[i]); }
+static u128 ULANE(u128 v, int i, uint32_t x) { v._u32[i] = x; return v; }
+static int op10_visible(J* j, uint32_t r)
+{
+#ifdef BC11_HOST_FLOAT
+    const unsigned in = _mm_getcsr();
+    _mm_setcsr(j->csr0);
+#endif
+    const u128 C0 = F4U(j->C.x[0]), C1 = F4U(j->C.x[1]), C2 = F4U(j->C.x[2]), C3 = F4U(j->C.x[3]);
+    const u128 one = V4(F1, F1, F1, F1), m3 = V4(~0u, ~0u, ~0u, 0), sgn = V4(0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u);
+    const u128 c1p = PRM(C1), c0p = PRM(C0), c2p = PRM(C2);
+    const u128 r25 = spu_fm(C0, c1p), r13 = spu_fm(C2, c0p), r18 = spu_fm(C1, c2p);
+    const u128 r78 = spu_xor(C3, sgn);
+    const u128 r77 = spu_fnms(C1, c0p, r25), r76 = spu_fnms(C0, c2p, r13), r74 = spu_fnms(C2, c1p, r18);
+    const u128 r92 = PRM(r77), r67 = PRM(r76), r71 = PRM(r74);
+    const u128 r61 = spu_fm(r92, C2);
+    /* the adjugate's rows, transposed out of the three cross products */
+    const u128 r5  = V4(r71._u32[0], r67._u32[0], r92._u32[0], 0);
+    const u128 r36 = V4(r71._u32[1], r67._u32[1], r92._u32[1], 0);
+    const u128 r26 = V4(r71._u32[2], r67._u32[2], r92._u32[2], 0);
+    const u128 det = spu_fa(spu_fa(r61, ROT1(r61)), ROT2(r61));
+    u128 r27 = spu_fm(r5, SPLW(r78, 0));
+    r27 = spu_fma(r36, SPLW(r78, 1), r27);
+    r27 = spu_fma(r26, SPLW(r78, 2), r27);
+    const u128 r32 = SPLW(det, 0);
+    const u128 r31 = spu_fi(r32, spu_frest(r32));
+    const u128 r28 = spu_fnms(r31, r32, one);
+    const u128 inv = spu_and(spu_fma(r28, r31, r31), m3);
+    const u128 r20 = spu_and(spu_fm(r36, inv), m3);
+    const u128 r13b = ULANE(spu_fma(r27, inv, V4(0, 0, 0, F1)), 3, F1);
+    const u128 r14 = spu_and(spu_fm(r5, inv), m3), r23 = spu_and(spu_fm(r26, inv), m3);
+    const u128 r74b = V4(r14._u32[0], r20._u32[0], r23._u32[0], r13b._u32[0]);
+    const u128 r92b = V4(r14._u32[1], r20._u32[1], r23._u32[1], r13b._u32[1]);
+    const u128 r69 = V4(r14._u32[2], r20._u32[2], r23._u32[2], r13b._u32[2]);
+    const uint32_t w8 = WORD(r, 8), w12 = WORD(r, 12), w16 = FW(j, r + 16, r), w20 = WORD(r, 20);
+    u128 r58 = spu_fm(r74b, V4(w8, w8, w8, w8));
+    r58 = spu_fma(r92b, V4(w12, w12, w12, w12), r58);
+    r58 = spu_fma(r69, V4(w16, w16, w16, w16), r58);
+    const u128 r66 = ULANE(C3, 3, F1);
+    const u128 r64 = spu_fm(r66, spu_and(r58, m3));
+    const u128 r61b = spu_fa(spu_fa(r64, ROT1(r64)), ROT2(r64));
+    const u128 r80 = spu_fa(V4(w20, w20, w20, w20), SPLW(r61b, 0));
+    const u128 r15 = ULANE(r58, 3, r80._u32[3]);
+    const u128 r56 = spu_fm(r15, r15);
+    const u128 r22 = SPLW(spu_fa(spu_fa(r56, ROT1(r56)), ROT2(r56)), 0);
+    const u128 r19 = spu_fcgt(r22, V4(0x0DA2425Fu, 0x0DA2425Fu, 0x0DA2425Fu, 0x0DA2425Fu));
+    const u128 r17 = spu_fi(r22, spu_frsqest(r22));
+    const u128 r21 = spu_fm(r17, r17), r49 = spu_fm(r17, V4(FH, FH, FH, FH));
+    const u128 r16 = spu_fnms(r22, r21, one);
+    const u128 r48 = spu_fma(r16, r49, r17);
+    const u128 r46 = spu_and(r19, spu_fm(r15, r48));
+    const u128 r44 = spu_selb(r15, r46, r19);
+    const u128 r38 = spu_fm(r44, F4U(j->cam));
+    const u128 r30 = SPLW(spu_fa(spu_fa(r38, ROT1(r38)), ROT2(r38)), 0);
+    const u128 r31b = spu_fs(r30, SPLW(r44, 3));
+    const int behind = spu_fcgt(V4(0, 0, 0, 0), r31b)._u32[0] != 0;
+#ifdef BC11_HOST_FLOAT
+    _mm_setcsr(in);
+#endif
+    return !(behind && (FW(j, j->hdr + 0x30, 8) & 32));
+}
+
 /* ---------------- the walk (0x4358) ---------------- */
 static __attribute__((noinline)) void walk(J* j)
 {
@@ -497,7 +598,66 @@ static __attribute__((noinline)) void walk(J* j)
                 else r += 12 + (FW(j, r + 8, r + 22) & 0xFFFF);
                 break;
             }
+            case 4: {   /* int16 center x4 (as op 3): in band, push child (+8 size, +12 EA, min lod) */
+                const int32_t x = (int16_t)(FW(j, r + 2, r + 16) & 0xFFFF), y = (int16_t)(FW(j, r + 4, r + 18) & 0xFFFF),
+                              z = (int16_t)(FW(j, r + 6, r + 20) & 0xFFFF);
+                const F4 c = FMUL(FCVT(x, y, z, 0), F4W(0x40800000u, 0x40800000u, 0x40800000u, 0x40800000u));
+                const uint32_t b = FW(j, r + 1, r + 14) & 255;
+                if (lod_in(j, b, lod, c, &j->C)) {
+                    const uint32_t l = lod & 255;
+                    push(j, FW(j, r + 8, r + 22) & 0xFFFF, WORD(r, 12), j->ctx0, j->ctx1, &j->C, l > b ? b : l);
+                }
+                r += 16;
+                break;
+            }
+            case 6:     /* op 5 behind a group bit (+22); clear: the far child */
+                if (!mask_bit(j, FW(j, r + 22, r + 35) & 255)) {
+                    push(j, FW(j, r + 20, r + 34) & 0xFFFF, FW(j, r + 16, r), j->ctx0, j->ctx1, &j->C, lod);
+                    r += 24;
+                    break;
+                }
+                /* fall through */
+            case 5: {   /* LOD switch on an int16 center x4: near (+8 size, +12 EA, min lod) or far (+20 size, +16 EA) */
+                const int32_t x = (int16_t)(FW(j, r + 2, r + 16) & 0xFFFF), y = (int16_t)(FW(j, r + 4, r + 18) & 0xFFFF),
+                              z = (int16_t)(FW(j, r + 6, r + 20) & 0xFFFF);
+                const F4 c = FMUL(FCVT(x, y, z, 0), F4W(0x40800000u, 0x40800000u, 0x40800000u, 0x40800000u));
+                const uint32_t b = FW(j, r + 1, r + 14) & 255;
+                if (lod_in(j, b, lod, c, &j->C)) {
+                    const uint32_t l = lod & 255;
+                    push(j, FW(j, r + 8, r + 22) & 0xFFFF, WORD(r, 12), j->ctx0, j->ctx1, &j->C, l > b ? b : l);
+                } else
+                    push(j, FW(j, r + 20, r + 34) & 0xFFFF, FW(j, r + 16, r), j->ctx0, j->ctx1, &j->C, lod);
+                r += 24;
+                break;
+            }
             case 7: emit(j, r); r += 8; break;
+            case 10:    /* plane facing test, then push child (+2 size, +4 EA) */
+                if (op10_visible(j, r)) push(j, HALF2(r), WORD(r, 4), j->ctx0, j->ctx1, &j->C, lod);
+                r += 24;
+                break;
+            case 15: {  /* push 512 bytes at +8 with lod 7 (EA 0: nothing) */
+                const uint32_t ea = WORD(r, 8);
+                if (ea) push(j, 512, ea, j->ctx0, j->ctx1, &j->C, 7);
+                r += 12;
+                break;
+            }
+            case 16:    /* push child (+2 size, +4 EA) with lod 7 */
+                push(j, HALF2(r), WORD(r, 4), j->ctx0, j->ctx1, &j->C, 7);
+                r += 8;
+                break;
+            case 19: {  /* sphere switch: int16 center x4, radius +8; inside: +12 EA / +20 size, else +16 EA / +22 size */
+                const int32_t x = (int16_t)(FW(j, r + 2, r + 16) & 0xFFFF), y = (int16_t)(FW(j, r + 4, r + 18) & 0xFFFF),
+                              z = (int16_t)(FW(j, r + 6, r + 20) & 0xFFFF);
+                const F4 c = FMUL(FCVT(x, y, z, 0), F4W(0x40800000u, 0x40800000u, 0x40800000u, 0x40800000u));
+                const uint32_t rw = WORD(r, 8);
+                if (FBAD(F4W(rw, 0, 0, 0), 1)) { j->fallback |= FB_FLOAT; return; }
+                if (sphere_in(j, rw, c, &j->C))
+                    push(j, FW(j, r + 20, r + 34) & 0xFFFF, WORD(r, 12), j->ctx0, j->ctx1, &j->C, lod);
+                else
+                    push(j, FW(j, r + 22, r + 36) & 0xFFFF, FW(j, r + 16, r), j->ctx0, j->ctx1, &j->C, lod);
+                r += 24;
+                break;
+            }
             case 8: case 9: r += FW(j, 0x6BE0 + 4 * op, 0x6BE0 + 4 * op); break;
             case 11: {
                 /* instance: local 3x4 at +16..+63, composed with C (row-vector) */
@@ -528,10 +688,7 @@ static __attribute__((noinline)) void walk(J* j)
                 break;
             }
             case 14: {
-                const uint32_t mb = FW(j, r + 26, r + 39) & 255, idx = mb & 127;
-                const uint32_t qa = j->hdr + 0x10 + 16 * (mb >> 7);
-                const uint8_t* mq = QP(j, qa);
-                if (!((mq[15 - (idx >> 3)] >> (idx & 7)) & 1)) {      /* group off: the far child */
+                if (!mask_bit(j, FW(j, r + 26, r + 39) & 255)) {      /* group off: the far child */
                     push(j, FW(j, r + 24, r + 38) & 0xFFFF, WORD(r, 20), j->ctx0, j->ctx1, &j->C, lod);
                     r += 28;
                     break;
@@ -567,7 +724,7 @@ static __attribute__((noinline)) void walk(J* j)
                 break;
             }
             case 20: r += 8; break;
-            default: j->fallback |= FB_OP; return;     /* 4, 5, 6, 10, 15, 16, 19 and > 20: not modelled */
+            default: j->fallback |= FB_OP; j->bad_op = op; return;     /* > 20: a table skip into .bss, not modelled */
             }
         }
         if (j->fallback) return;
@@ -589,6 +746,7 @@ static void run_model(J* j)
 {
 #ifdef BC11_HOST_FLOAT
     const unsigned csr = _mm_getcsr();
+    j->csr0 = csr & ~0x003Fu;
     _mm_setcsr((csr & ~0x003Fu) | 0x6000u | 0x8000u | 0x0040u | 0x1F80u);
     walk(j);
     const unsigned fl = _mm_getcsr();
@@ -644,7 +802,7 @@ static void publish(J* j)
 
 static int job_init(J* j, spu_context* ctx)
 {
-    j->fallback = 0; j->bad_ea = j->bad_size = 0;
+    j->fallback = 0; j->bad_ea = j->bad_size = 0; j->bad_op = 0;
     j->qn = 0; j->n = j->maxn = 0; j->nbatch = 0; j->items_total = 0; j->used_gbuf = 0; j->ticks = 0;
     j->ctx = ctx; j->ls = ctx->ls;
     j->hdr = ctx->gpr[3]._u32[0] & 0x3FFFFu; j->planes = ctx->gpr[4]._u32[0] & 0x3FFFFu;
@@ -682,6 +840,10 @@ static _Thread_local int t_bypass;
 static int s_mode = -1;
 static unsigned long long s_native, s_fallback, s_cmp, s_bad, s_ns_nat, s_ns_spu, s_items;
 static unsigned s_reason[16];
+/* PS3RECOMP_BC11_OPHIST=1: which op sent each FB_OP job back to the SPU,
+ * printed with the 10 s stats line. Off: nothing is counted. */
+static int s_ophist = -1;
+static unsigned s_ops[256];
 static inline uint64_t now_ns(void)
 {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -702,6 +864,12 @@ static void stats(void)
             s_items, s_mode == 2 ? "" : "\n");
     if (s_mode == 2) fprintf(stderr, ", compared %llu, differ %llu; per compared job native %.1f us, SPU %.1f us\n",
                              s_cmp, s_bad, s_cmp ? s_ns_nat / 1e3 / s_cmp : 0.0, s_cmp ? s_ns_spu / 1e3 / s_cmp : 0.0);
+    if (s_ophist > 0) {
+        char ops[600] = ""; int k = 0;
+        for (int i = 0; i < 256 && k < (int)sizeof ops - 16; i++)
+            if (s_ops[i]) k += snprintf(ops + k, sizeof ops - k, " op%d:%u", i, s_ops[i]);
+        fprintf(stderr, "[bc11] FB_OP by op:%s\n", k ? ops : " none");
+    }
 }
 
 /* Mode 2: what the SPU worker left against the model. buf2 (from +4: +0 is
@@ -744,6 +912,8 @@ static int bc11_worker(spu_context* ctx)
         const char* e = getenv("PS3RECOMP_NATIVE_BC11");
         s_mode = e ? atoi(e) : 1;
         fprintf(stderr, "[bc11] native scene walker: %s\n", s_mode == 2 ? "compare with the SPU job" : s_mode ? "on" : "off");
+        const char* h = getenv("PS3RECOMP_BC11_OPHIST");
+        s_ophist = h && atoi(h) > 0;
     }
     if (!s_mode) return 0;
     if (!t_j) { t_j = (J*)calloc(1, sizeof(J)); if (!t_j) return 0; }
@@ -756,6 +926,7 @@ static int bc11_worker(spu_context* ctx)
     if (j->fallback) {
         __atomic_fetch_add(&s_fallback, 1, __ATOMIC_RELAXED);
         for (int i = 0; i < 16; i++) if (j->fallback >> i & 1) __atomic_fetch_add(&s_reason[i], 1, __ATOMIC_RELAXED);
+        if (s_ophist > 0 && (j->fallback & FB_OP)) __atomic_fetch_add(&s_ops[j->bad_op & 255], 1, __ATOMIC_RELAXED);
         if (j->fallback & FB_EA) { static int nl;
             if (nl++ < 6) fprintf(stderr, "[bc11] EA fallback: 0x%08X size 0x%X\n", j->bad_ea, j->bad_size); }
         if (j->fallback & FB_LS) { static int nl;

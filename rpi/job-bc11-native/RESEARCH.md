@@ -213,7 +213,13 @@ All fields big-endian, records 4-aligned.
 | 17 | 16 | +1 band, +2 u16 skip, +4 center | in band: continue; else skip |
 | 18 | 8 | +1 a, +3 b, +4 EA | push child (EA, a*b+8) with lod 7 (EA 0: nothing) |
 | 20 | 8 | | nothing |
-| 4, 5, 6, 10, 15, 16, 19 | | | other variants (box/LOD/push forms; op 10 builds a matrix with frest/frsqest). Never seen |
+| 4 | 16 | +1 band, +2..+7 s16 center x4, +8 u16 size, +12 EA | in band: push child (min lod); else nothing. Not in the captures |
+| 5 | 24 | +1 band, +2..+7 s16 center x4, +8 size near, +12 EA near, +16 EA far, +20 size far | LOD switch as 13, int16 center. Not in the captures |
+| 6 | 24 | as 5, +22 mask index | as 14 over op 5. Not in the captures |
+| 10 | 24 | +2 size, +4 EA, +8 plane (n, d) in local space | plane to world by the adjugate of the current transform over its determinant (frest/fi), normalized (frsqest/fi); with header+0x38 bit 5 set, a camera behind it culls the child; else push (lod kept). Not in the captures |
+| 15 | 12 | +8 EA | push (EA, 512) with lod 7 (EA 0: nothing). Not in the captures |
+| 16 | 8 | +2 size, +4 EA | push with lod 7. Not in the captures |
+| 19 | 24 | +2..+7 s16 center x4, +8 radius, +12 EA A, +16 EA B, +20 size A, +22 size B | distance as the LOD test, no band precondition: radius^2 > dist^2 pushes A, else B (lod kept). Not in the captures |
 
 `qbox` (8 bytes, 0x66F8): byte 0 = center shift, bytes 1..3 signed center,
 byte 4 = extent shift, bytes 5..7 unsigned extent; min/max = c -+ e, local.
@@ -391,7 +397,8 @@ without FMA, or with `BC11_HELPER_FLOAT`, it uses the SPU float helpers instead
 
 ### 7.3 Fallbacks (nothing written, SPU runs)
 
-Ops 0 (size 0), 4, 5, 6, 10, 15, 16, 19, > 20; a bucket key >= 248 (the job
+Op 0 of size 0 (the SPU would loop) and ops above 20 (their skip size is read
+past the 21-entry table at 0x6BE0, into constants and .bss; 21 would loop); a bucket key >= 248 (the job
 would write past its counters into saved registers); a GET over 16 KB or
 outside committed memory (the MFC would refuse it and the job would read stale
 LS), or a 128-byte one that starts like Edge's viewport block (the MFC rewrites
@@ -481,3 +488,43 @@ kinds; 19: two per kind, every kind), over the 20 complete jobs:
   until modelled.
 - The same capture for module 0x85EE00 (image number from the resident-overlay
   log), the sibling walker.
+
+## 9. Follow-up: the other ops (2026-10-18, after the in-game run)
+
+In game (06eef5b, mode 2, heavy city, camera turning): 408,351 jobs compared,
+0 differ, native 10.9 us against 54 us on the SPU; mode 1 took heavy_bench from
+62-66 to 69-82 fps. The only fallback was FB_OP, 29% of jobs: views whose
+streams use ops the captures never had.
+
+- Modelled from the listing: ops 4, 5, 6, 10, 15, 16, 19 (2.3). Op 10 is the
+  only one with reciprocal estimates; it runs on the SPU float helpers
+  (`op10_visible`, a literal transcription of 0x5570..0x57BC) under the caller's
+  MXCSR, restoring the walk's float mode and flags after it. The others reuse
+  the host-float LOD distance; op 19's radius gets the same exponent-255 check
+  and 2^64 shortcut as the LOD radii.
+- What still falls back with FB_OP is ops above 20 and nothing else.
+  `PS3RECOMP_BC11_OPHIST=1` counts the op of every FB_OP fallback and prints
+  `[bc11] FB_OP by op: opN:count ...` with the 10 s line. It costs nothing when
+  unset beyond one store per fallback.
+- Tests: none of these ops is in the captures, so `optest.py` rewrites real
+  records into them in the child streams of every replayed job, keeping their
+  children (op 2 -> op 4 / op 16 + op 20 / op 15 + op 9; op 13/14 -> op 5, 6,
+  19, 10 + op 9; the x variants make the branch decisive by pairing a captured
+  child with an empty one), and runs the model against the interpreter as
+  mut.py does. Results, two campaigns (seed 5: 4 per op per job; seed 9: the x
+  variants and op 4, 6 per job):
+
+  | op | agree | sensitive | fall back | SPU does not finish | **differ** |
+  |----|------:|------:|------:|------:|------:|
+  | 4 | 185 | 59 | 1 | 14 | **0** |
+  | 5 / 5x | 31 / 51 | 1 / 20 | 5 / 1 | 0 / 2 | **0** |
+  | 6 / 6x | 32 / 54 | 1 / 18 | 3 / 0 | 1 / 0 | **0** |
+  | 10 / 10x | 36 / 47 | 11 / 17 | 0 / 7 | 0 / 0 | **0** |
+  | 15 | 65 | 38 | 3 | 8 | **0** |
+  | 16 | 48 | 22 | 10 | 22 | **0** |
+  | 19 / 19x | 33 / 47 | 0 / 19 | 3 / 4 | 0 / 3 | **0** |
+
+  The fallbacks are all EA (a child stream not in the capture). Op 10 culls
+  with header+0x38 bit 5 set and pushes otherwise, both seen.
+- The captured jobs are unchanged: 42 of 42 PUTs and the LS still identical
+  (gcc, clang, helper floats).
