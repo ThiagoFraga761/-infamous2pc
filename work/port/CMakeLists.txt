@@ -160,7 +160,8 @@ if(PORT_ENABLE_SPU)
              "${CMAKE_CURRENT_SOURCE_DIR}/ec5f_native.c"
              "${CMAKE_CURRENT_SOURCE_DIR}/job2025_native.c"
              "${CMAKE_CURRENT_SOURCE_DIR}/edge_kernels_native.c"
-             "${CMAKE_CURRENT_SOURCE_DIR}/jobbc11_native.c")
+             "${CMAKE_CURRENT_SOURCE_DIR}/jobbc11_native.c"
+             "${CMAKE_CURRENT_SOURCE_DIR}/job207_native.c")
         # Generated beside the lift; each is present only once its generator
         # has been run, so each is included only if it is actually here.
         foreach(gen IN ITEMS spu_workloads.c spu_elf_workloads.c jobmods_register.c taskset_policy_bytes.c)
