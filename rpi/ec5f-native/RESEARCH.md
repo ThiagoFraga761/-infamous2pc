@@ -435,7 +435,7 @@ Not exercised in any capture (types 1, 3, 4 and the type-0 side branches):
 | 0x18EB0/0x18EF0/0x18F20/0x18F60 | bit-field float packing (probably float <-> half), constants at 0x19780..0x197D0. A guess from a quick read, not verified |
 | 0x19430 | larger helper used by 0x6AA0 |
 
-## 8. Open questions
+## 8. Open questions (superseded by 10.11)
 
 1. object_filter (0x13218..0x1332C): the exact conditions. It never rejected anything here.
 2. 0x7C18 / c[0x104]: the source of the cyclic 3x4 (a colour/hue matrix?) and of c[0x1CA].
@@ -456,3 +456,543 @@ Not exercised in any capture (types 1, 3, 4 and the type-0 side branches):
 - Job 11 (ctx 8042): object/draw accounting (the extra 0xB0 GET is the item list, not a skipped object).
 - Queue table sample: 00066 (14848 B = 29 records). Item list: 00071. Instance entries: 00075, 00083, 00107, 00125. Header: 00079.
 - Code sites: 0x13964 (type table); 0x136E0..0x13924 and 0x13CA8 (M); 0xC30C (MVP, type 0); 0xB230..0xB4E4 (MVP, type 2); 0xC884 (N); 0x5F20..0x60F4 (draw); 0x5DD8..0x5EBC (vertex offsets); 0x14160..0x14380 (blocks); 0x13FA8..0x13FBC (32-byte PUT); 0x4468..0x46C4 (queue filter).
+
+## 10. Implementation spec (types 0 and 2)
+
+### 10.0 Status and how it was proven
+
+- A native C model of pass types 0 and 2, written from this spec, is in
+  `work/runs/ec5f/oracle/native.c` (my code, no game bytes; ~400 lines).
+  - It reads the job's inputs from the capture files (matched by EA + size) and
+    writes the command blocks and the 32-byte record.
+  - **Result: 44/44 command blocks byte-identical to the captured PUTs (used
+    part) and 52/52 records identical** (`ncmp.py`).
+  - Mutation check: flipping the object filter, one lane of a constant, the
+    END word or the range order makes it fail (28/44, 43/44, 0/44, 20/44), so
+    the comparison is sensitive.
+- **Differential tests on synthetic inputs** (`difftest.py`, `tests.py`). Each test
+  copies a job's capture files into the scratchpad, patches some bytes, runs the
+  SPU oracle and the native model on the same inputs, and compares their PUTs.
+  **25/25 pass.** They cover paths the captures never take:
+  - camera-relative off;
+  - contiguous ring blocks and the ring-limit clamp;
+  - IN2 split with N = 2 and 3;
+  - selector filter (IN1[0x0A] = 1);
+  - header bit 30 and bit 31 rejects;
+  - polygon offset disabled by IN[0x153];
+  - texture border colour;
+  - op-11 identity fallback;
+  - vertex-format ids 1 to 5 and 7;
+  - stencil off and stencil ref changes;
+  - zero-triangle records;
+  - op-5 with cols/rows 3x2, -3x2 and 5x7 and frame bytes up to 0xFF;
+  - matrix kind 0 (world) in a type-0 job;
+  - vertex layouts with n = 0 and n = 2.
+- The oracle `harness.c` got two fixes:
+  - capture paths longer than 128 characters segfaulted;
+  - a GET that is not captured exactly is now served from a capture that contains its range (`GET-SUB` in the log).
+- Rebuild (paths as on this machine):
+  - Build:
+    ```sh
+    gcc -O2 -I$RT/spu -I$RT -I$INC native.c -o native -lm
+    ```
+  - `RT=~/tools/ps3recomp-infamous/runtime`, `INC=~/tools/ps3recomp-infamous/include`.
+  - The harness also needs `$RT/spu/spu_interp.c`, plus `mod.bin` cut from the RAW column of `ec5f.asm` and `funcs.txt`, the function list of section 7.
+
+### 10.1 Conventions
+
+- All LS/EA data is big-endian.
+  - `R32(p)` reads a u32 and `S16(p)` an s16 sign-extended.
+  - "Slot" values are s16. **Negative (0xFFFF) means "not emitted"** everywhere.
+- Floats: use the runtime's `spu_helpers.h` u128 ops, never host float math.
+  - The ops are `spu_fm`, `spu_fma(a,b,c)=a*b+c`, `spu_fnms(a,b,c)=c-a*b`, `spu_fa`, `spu_fs`, `spu_frest`, `spu_frsqest`, `spu_fi(x, est)`, `spu_csflt(v, 155)` (scale 0) and `spu_fceq`.
+  - They implement the SPU rules: truncation, no denormals, saturation.
+  - All change detection uses `fceq`: +0 == -0, every denormal == 0, and NaN is not special.
+  - `splat(x)` means the u128 with x in all 4 lanes.
+  - Vector ops are lane-wise, and only the stated lanes are used.
+- `emit(w)` appends one big-endian word at the cursor.
+- `room(n)` is the emitter's room check (10.4). Each check below is written next to the words it guards.
+
+### 10.2 When the native path must fall back to the SPU job
+
+Fall back if any of these holds. They are the branches no capture runs, and the model does not implement them:
+
+- IN1[4] (type) is not 0 or 2.
+- Type 0 only:
+  - slot[k] >= 0 for k in {4, 5, 6, 7, 8, 9, 12, 13, 17, 43, 45} (D6D8 side branches; slot[k] = S16(IN1+0x110+2k));
+  - IN1[0x09] != 0;
+  - `(IN1[0xD4] ? 1 : IN1[0x17A]) != 0` (fragment-program upload, 10.7.9).
+- Matrix kinds 2 and 10 (type 0) and kind 11 (types 0 and 2) with slot >= 0.
+- Material constants (15E78): a descriptor type not in {0, 4}, or type 0 with bit 15 set (sRGB to linear, see 10.7.3).
+- Per-object ops (7C18) when mat_on: an op not in {4, 5, 11}; op 4 with slot IN1+0xA6 >= 0; op 11 with slot IN1+0xB0 >= 0; op 5 with cols*rows == 0.
+- Optional, but conservative: the ring returned an address whose clamp differs from the SPU's. This cannot happen if the same atomic is used.
+
+### 10.3 Data layouts (new and corrected fields)
+
+**IN (896 B)**, in addition to the table in section 1:
+
+| off | use |
+|---|---|
+| +0x20 | EA of the fragment-program heap cursor (atomic add, 10.7.9). 0x00ABD2AC |
+| +0x24 | EA->offset delta for SET_SHADER_PROGRAM (0xBFC00000) |
+| +0x28 | fragment-program heap limit EA |
+| +0x151 | byte: nonzero enables the "header bit 30" reject |
+| +0x153 | byte: nonzero disables polygon offset in type 2 |
+| +0x340 | k (per-axis fudge), used as `fm(splat(s), k)` |
+
+IN+0x6C is **not** read by types 0 and 2 (section 1 was wrong).
+
+**IN1 (384 B)**, all offsets relative to IN1:
+
+| off | use |
+|---|---|
+| +0x00 | b: index into the queue records' u16 arrays |
+| +0x04 | pass type |
+| +0x09 | byte: nonzero means fallback (type 0) |
+| +0x0A | byte: 0 = split every range among IN2.N jobs; nonzero = no split, filter objects by selector instead |
+| +0x1C + 4i, i < [+0x54] | texture binding i: `{s16 unit; u16 tex}` |
+| +0x54 | number of texture bindings |
+| +0x58 + 4i, i < [+0x9C] | material constant descriptor i: `{s16 slot; u16 d}`. d bits 0..9 = word offset, 10..14 = type, 15 = sRGB flag |
+| +0x9C | number of constant descriptors |
+| +0xA0..+0xB1 | s16 slots for the per-object ops: +0xA6 op 4, +0xA8 op 5, +0xAE op 11 (3x4), +0xB0 op 11 second output. +0xA4/+0xAA/+0xAC are only tested by mat_on. +0xA0/+0xA2 are unused here |
+| +0xB4 | ntex: number of 44-byte texture descriptors in the material |
+| +0xB8 | nparam: number of float words after them |
+| +0xBC | material GET size (rounded up to 16) |
+| +0xC0 | nops; the op codes are at +0xC4 + 4i |
+| +0xD4, +0x17A | initial fragment-program "upload" flag (10.7.9) |
+| +0xD8 | vertex layout: `u8 n; u8 attr[16] @+1; u8 stream[16] @+17; u8 off[16] @+33` |
+| +0x10F | byte: bits 5..7 nonzero = stencil func on; bit 2 = polygon offset allowed |
+| +0x110 + 2k | slot[k] per matrix kind: 0 = M (4x4), 1 = MVP (4x4), 3 = N (3x4). Others: see 10.2 |
+| +0x178 | byte: camera-relative M row 3 |
+
+**Material block** (the GET of IN1[0xBC] bytes from E.w3):
+
+| off | content |
+|---|---|
+| +0x00 | u32 key (op 11 matches it against the extra records) |
+| +0x08 + 44t, t < ntex | texture descriptor t: +0 OFFSET, +4 FORMAT, +8 ADDRESS, +12 CONTROL0, +16 CONTROL1, +20 FILTER, +24 IMAGE_RECT, +28 BORDER_COLOR, +32 CONTROL3. +36..+43 unused |
+| PRM = +0x08 + 44·ntex | nparam float words, read by 15E78 at PRM + 4·off |
+| OPS = PRM + 4·nparam | per-object op data, read sequentially. Op 5: 8 B `{s32 cols, s32 rows}`. Op 11: 40 B `{u32 use_extra; f32 m[3][3]}` (rows). Op 4: 4 B |
+
+Check: job 12 has ntex 8 and nparam 26, so OPS = 0x1D0 and the end is 0x200 = IN1[0xBC]. Job 0 has 3 and 4, so OPS = 0x9C and the end is 0xCC.
+
+**Extra records** (H+0x24, H+0x20 records, 64 B each): `{u32 key; f32 m[3][3] @+4; zeros}`. Key 0xFFFFFFFF is the default record. Every captured key is 0xFFFFFFFF, and the matrices are circulant `(a b c / c a b / b c a)`, i.e. RGB hue/saturation colour matrices.
+
+**Instance entry E (16 B)**:
+- byte 0:
+  - bit 3 (w0 bit 27) = reject;
+  - bit 2 = polygon offset (type 2);
+  - bits 5..7 = stencil ref (type 0).
+- byte 1 = op-5 frame number.
+- (w0 >> 5) & 7 = job selector.
+- w1 & ~15 = drawable record EA; w3 = material EA.
+
+**Header H (48 B)**:
+- w0 bit 31 = reject; w0 bit 30 = reject when IN[0x151] != 0;
+- +0x14 T base; +0x1C S base; +0x20 extra count; +0x24 extra EA.
+
+**Queue record (512 B)**: a record whose byte +0x0C is nonzero is "deferred" (10.5).
+
+**Scratch state** (scr = 0x27000, reset once per job, **not** per range):
+
+| scr+ | init | content |
+|---|---|---|
+| 0x00..0x3F | 0 | previous M (4 rows), shared by BDD8 and B010 |
+| 0x60 | (1,1,1,1) f | op-5 cache |
+| 0x70 + 16u | 0 | texture cache per unit: {OFFSET, ADDRESS, CONTROL0, FILTER} |
+| 0x170 + u | 0 | byte: CONTROL2 (0x0B00) already sent for unit u |
+| 0x180 | 0 | current vertex-format id |
+| 0x184..0x18C | 0x7FFFFFFF | current stream bases rec[0x38/0x3C/0x40] |
+| 0x190 | 0xFFFFFFFF | current stencil ref |
+| 0x19C | need_mat (byte) | need_mat = any(slot[k] >= 0, k in {0,1,2,3,10,11}) (0x41D8) |
+
+**Per-object state P** (main's stack, sp+0xF0, used by 6AA0):
+- +0 = in+0x3510 (LS buffer of a fragment program);
+- +4/+8/+0xC = IN[0x20]/IN[0x24]/IN[0x28];
+- +0x10 = upload flag byte; +0x14 = program id (-1); +0x18 = bound offset (0); +0x1C = wanted offset (0);
+- +0x20 = cache list pointer; +0x24 = cache count (0).
+
+### 10.4 Command buffer
+
+```c
+cb = { first=0, end=0, cursor=0, done=0, cur_ea=0, idx=0, buf={out+0x80,out+0x1080},
+       ring_ea=IN[8], delta=IN[0xC], limit=IN[0x10] };
+room(n_bytes):  if (cursor + n_bytes > end) next_block();   /* unsigned; end = base+4092 */
+```
+
+- **The overflow callback 0x14160 ignores the `need` argument** that 0x18508 passes, and always returns 0 (success).
+  - Block boundaries therefore depend only on the threshold n_bytes of each check. That is always the exact size of the words the emitter is about to write (table 10.8).
+  - Before the first block end = 0, so the first check with n_bytes > 0 allocates. A check with n_bytes = 0 (layout n = 0) does not.
+
+```c
+next_block():                                   /* 0x14160 */
+  off = atomic_add_u32(ring_ea, 4096);          /* returns the old value */
+  if (off + 4096 > limit) off = limit - 4096;
+  done += 4096;
+  if (first == 0) first = off;
+  else {
+    if (off == cur_ea + 4096) zero words cursor..base+4092 (inclusive);
+    else *cursor = 0x20000000 | (off + delta);  /* JUMP, written at the cursor, not at +4092 */
+    PUT(buf[idx] -> cur_ea, 4096);  idx ^= 1;
+  }
+  cur_ea = off; cursor = base = buf[idx]; end = base + 4092;
+```
+
+End of job, only if at least one range was selected:
+
+```c
+rec.w0 = first;  rec.w1 = done + (cursor - base) - 4096;     /* 0xFFFFFFFC if no block */
+if (first) { if (scr.vfmt != 0) f_5B60(0);  emit(0x00020000);  /* RETURN, no room check */
+             PUT(buf[idx] -> cur_ea, 4096); }
+```
+
+Record = `{first, bytes, draws, prog_uploads, prog_bytes, triangles, 0, 0}`.
+- Words 3 and 4 are only changed by the 6AA0 upload path (10.7.9). They are 0 in captures.
+- If no range is selected, the record is all zero.
+
+### 10.5 Main: range selection (0x4328) and the object loop
+
+```c
+cur = R32(GET(IN.w1, 4));
+n = (u32)((s32)(cur - IN.w0) >> 9);  if (n > 100) n = 100;
+Q = GETL(IN.w0, 512*n);                                       /* list GET, 16 KB elements */
+front = 0; back = n;
+for (k = 0; k < n; k++) {
+  q = Q + 512k;
+  if (q.w0 != IN[0x2C] || q.w1 != IN[0x30]) continue;
+  s = u16(q + 0x0E + 2b);  e = u16(q + 0x10 + 2b);
+  if (IN1[0x0A] == 0) {                                       /* signed s32 math */
+    c = (e - s + N - 1) / N;                                  /* N = IN2.w0, i = IN2.w1 */
+    s = min(s + c*i, e);  e = min(s + c, e);
+  }
+  if (s == e) continue;
+  idx = q[0x0C] ? --back : front++;      /* deferred records go to the back */
+  range[idx] = { q.w2 + 8s, q.w2 + 8e };
+}
+ranges = range[0..front) ++ range[back..n)  /* normal in table order, then deferred in REVERSE table order */
+if (nranges == 0) { record = 0; return; }
+mat_on = ntex_bind || ndesc || any(S16(IN1+o) >= 0, o in {A4,A6,A8,AA,AC,AE,B0});   /* 0x4030 */
+reset scratch (10.3); cb_init;
+for each range r {
+  items = GETL(r.begin & ~15, align16(r.end) - (r.begin & ~15)) + (r.begin & 15);
+  last_mat_ea = 0; old_mat = NULL;                 /* per range: material state resets */
+  for (k = 0; k < (r.end - r.begin) >> 3; k++) {
+    E = GET(items[k].w0, 16);  H = GET(items[k].w1, 48);
+    if (object_filter(E, H)) continue;             /* 10.7.1: no fetch, no state change */
+    changed = 0;
+    if (mat_on && E.w3 != last_mat_ea) { mat = GET(E.w3, align16(IN1[0xBC])); last_mat_ea = E.w3; changed = 1; }
+    rec = GET(E.w1 & ~15, 0xB0);  T = GET(H[0x14] + 48*u16(E+8), 48);
+    S = GET(H[0x1C] + 64*u16(E+10), 64);  X = H[0x20] ? GET(H[0x24], 64*H[0x20]) : NULL;
+    if (mat_on) {
+      if (changed) { f_143F0(mat); f_15E78(mat, old_mat); old_mat = mat; }
+      if ((s32)IN1[0xC0] > 0) f_7C18(mat, H, E, X);
+    }
+    M = object_matrix(rec, T, S);
+    if (type == 0) { if (need_mat) f_BDD8(M); f_6FE0(E); /* f_6AA0: no-op, 10.7.9 */ f_5C98(rec); }
+    else           { po = f_B010(M, E); f_5C98(rec); if (po) { room(8); emit(0x00040A68); emit(0); } }
+    rec_out.draws += 1;  rec_out.triangles += u16(rec + 4);
+  }
+}
+```
+
+Notes:
+- The SPU code is software-pipelined: the instance, header and material GETs run one object ahead, with three material buffers.
+- The per-object order above is still exact. The pipeline changes only LS placement, never what is emitted.
+- Rejected objects are never fetched beyond E and H, and they do not touch `last_mat_ea`.
+
+### 10.6 Emission order per object (summary)
+
+1. Material changed: textures (10.7.2), then material constants (10.7.3), in descriptor order.
+2. Per-object ops, in op order (10.7.4).
+3. Type 0: BDD8 matrices (kind 0, kind 1 MVP, kind 3 N, in that order, only when M changed), then stencil, then draw.
+4. Type 2: B010 MVP (when M changed), then polygon offset on (if the object is flagged), then draw, then polygon offset off.
+5. The draw (10.7.8): vertex format (if the id changed), vertex offsets (if the streams changed), then INDEX, BEGIN, DRAW_INDEX_ARRAY batches, END.
+
+### 10.7 Functions
+
+#### 10.7.1 object_filter (0x13218..0x1332C)
+
+```c
+reject = ((H.w0 & 0x40000000) && IN[0x151])
+      ||  (H.w0 & 0x80000000)
+      ||  (E.w0 & 0x08000000)
+      ||  (IN1[0x0A] && ((E.w0 >> 5) & 7) != IN2.w1);
+```
+
+- In the captures, 47 objects (15 jobs) are rejected by E bit 27. Section 2.4 said nothing was rejected; that was wrong.
+- The other three terms were checked by differential tests.
+
+#### 10.7.2 f_143F0: textures
+
+- D = IN1+0x1C. Only the texture cache is used for change detection; the old-material argument is not read.
+
+```c
+for (i = 0; i < R32(IN1+0x54); i++) {
+  u = S16(D+4i);  t = mat + 8 + 44*u16(D+4i+2);
+  if (cache[u] == {t[0], t[8], t[12], t[20]}) continue;        /* u32 compare */
+  cache[u] = {t[0], t[8], t[12], t[20]};
+  if (!sent0B00[u]) { room(8);  emit(0x00040B00 + 4u); emit(0x00002DC4); sent0B00[u] = 1; }
+  room(40); emit(0x001C1A00 + 0x20u);                          /* TEXTURE_OFFSET.. 7 words */
+            emit(t[0]); emit(t[4]); emit(t[8]); emit(t[12]); emit(t[16]); emit(t[20]); emit(t[24]);
+            emit(0x00041840 + 4u); emit(t[32]);                /* TEXTURE_CONTROL3 */
+  if (any of the nibbles (t[8]&15), (t[8]>>8&15), (t[8]>>16&15) == 4)  /* wrap = BORDER */
+    { room(8); emit(0x00041A1C + 0x20u); emit(t[28]); }        /* TEXTURE_BORDER_COLOR */
+}
+```
+
+#### 10.7.3 f_15E78: material constants
+
+- `old` is the previous material of the same range (NULL for the first one in a range).
+- PRM(x) = x + 8 + 44·ntex.
+
+```c
+for (i = 0; i < R32(IN1+0x9C); i++) {
+  e = R32(IN1+0x58+4i);  slot = (s16)(e>>16);  type = (e>>10)&31;  off = e&1023;
+  np = PRM(mat) + 4off;  op = old ? PRM(old) + 4off : NULL;
+  switch (type) {
+  case 0:  if (op && fceq(np[0], op[0])) break;        /* first word only */
+           if (e & 0x8000) FALLBACK;                   /* sRGB->linear, not captured */
+           room(24); emit(0x00141EFC); emit(slot); emit(np[0..3]); break;
+  case 4:  if (op && fceq4(np[0..3], op[0..3])) break; /* all 4 words */
+           room(40); emit(0x00241EFC); emit(slot);
+           emit(np[0], np[1], 0, 0x3F800000, np[2], np[3], 0, 0x3F800000); break;
+  case 1..3, 5..11: FALLBACK;  /* jump table 0x15FB4 */
+  default: break;              /* >11: skipped */
+  }
+}
+```
+
+- The sRGB branch uses the constants 0.04045/12.92/1.055/2.4 at 0x19900..0x199B0. It computes pow() with an exp2/log2 polynomial and is not modelled.
+- Types 1..3 and 5..11 probably include the fragment-program binding, since 15E78 also receives P and E.w3.
+
+#### 10.7.4 f_7C18: per-object ops
+
+- d = OPS(mat), consumed in op order whether or not an op emits.
+
+```c
+for (i = 0; i < R32(IN1+0xC0); i++) switch (op = R32(IN1+0xC4+4i)) {
+case 5:  /* flipbook / sprite-sheet UV offset */
+  slot = S16(IN1+0xA8); a = (s32)d[0]; b = (s32)d[1]; d += 8; if (slot < 0) break;
+  ab = a*b; frame = E[1] % ab; row = frame / a; col = frame % a;   /* C truncating / and % */
+  A = csflt(splat(a)); B = csflt(splat(b)); rA = fi(A, frest(A)); rB = fi(B, frest(B));
+  C = csflt(splat(col)); R = csflt(splat(row));
+  q = fm(C, rA); x = fma(fnms(q, A, C), rA, q);          /* col / cols */
+  q = fm(R, rB); y = fma(fnms(q, B, R), rB, q);          /* row / rows */
+  v = (x, y, y, y);
+  if (fceq(v.x, cache.x) && fceq(v.y, cache.y)) break;   /* cache = scr+0x60, init 1.0f */
+  cache = v; room(24); emit(0x00141EFC); emit(slot); emit(v); break;
+case 11: /* 3x4 colour matrix */
+  s = S16(IN1+0xAE); s2 = S16(IN1+0xB0); D = d; d += 40;
+  if (s < 0 && s2 < 0) break;
+  if (D.w0 == 0) m = D.m;                                 /* the material's own matrix */
+  else { r = lookup(X, H[0x20], mat.w0);                  /* 0x4158 */
+         m = r ? r.m : identity; }
+  rows = { (m[0][0..2],0), (m[1][0..2],0), (m[2][0..2],0) };
+  if (s >= 0) { room(56); emit(0x00341EFC); emit(s); emit(rows); }
+  if (s2 >= 0) FALLBACK;                                  /* 0x152B0 path, not captured */
+  break;
+case 4:  d += 4; if (S16(IN1+0xA6) >= 0) FALLBACK; break;
+case 0..3, 6..10, 12..14: FALLBACK;   /* jump table 0x7D8C; ops 0 and 12 appear in IN1
+                                         lists of jobs 31-35, 54, 58, but mat_on is 0 there */
+default: break;                       /* >14 */
+}
+lookup(X, n, key) { fb = NULL;
+  for (j = 0; j < n; j++) { if (X[j].w0 == key) return &X[j]; if (X[j].w0 == 0xFFFFFFFF) fb = &X[j]; }
+  return fb; }   /* the LAST 0xFFFFFFFF record wins; n == 0 returns NULL */
+```
+
+- c[0x104] is the op-11 colour matrix, and c[0x1CA] is the op-5 UV offset (slot A8 = 0x1CA in jobs 8, 12, 39).
+- csflt is used only for op 5's integer cols, rows and frame.
+
+#### 10.7.5 object_matrix (main 0x136E0..0x13924, 0x13CA8)
+
+Exact operation order, lane-wise on u128:
+
+```c
+T0..T2 = T rows; S0..S3 = S rows; p = (rec[0x28], rec[0x2C], rec[0x30], 0); s = rec[0x34];
+for c in 0..3: A[c] = fma(S2, splat(T2[c]), fma(S1, splat(T1[c]), fm(S0, splat(T0[c]))));
+A[3] = fa(A[3], S3);
+sk = fm(splat(s), LQ(IN+0x340));
+D0 = fm(sk,(1,0,0,0)); D1 = fm(sk,(0,1,0,0)); D2 = fm(sk,(0,0,1,0));   /* keeps the -0 lanes */
+M[r] = fma(A[2], splat(Dr.z), fma(A[1], splat(Dr.y), fm(A[0], splat(Dr.x))))   r = 0,1,2;
+M[3] = fa(A[3], fma(A[2], splat(p.z), fma(A[1], splat(p.y), fm(A[0], splat(p.x)))));  M[3].w = 1.0f;
+if (IN1[0x178]) { M[3] = fs(M[3], LQ(IN+0xC0)); M[3].w = 1.0f; }
+```
+
+- The w lanes of M[0..2] are kept as computed; matrix kind 0 emits them raw.
+- The fma with a 0 factor must stay. Do not simplify it away (signed zeros).
+
+#### 10.7.6 Matrices: f_BDD8 (type 0) and f_B010 (type 2)
+
+Change rule, shared by both: `changed(M)` is true if, for any row r in 0..3, `fceq((M[r].x,y,z,z), (prev[r].x,y,z,z))` fails in any lane.
+- Only xyz are compared.
+- prev = scr+0x00, zero at job start, never reset per range.
+- When changed, prev = M (all 4 lanes).
+
+```c
+MVP(M): for r in 0..3 { w = (r == 3) ? 1.0f : 0;
+          acc = fm(VP0, splat(M[r].x)); acc = fma(VP1, splat(M[r].y), acc);
+          acc = fma(VP2, splat(M[r].z), acc); acc = fma(VP3, splat(w), acc); out[r] = acc; }
+        /* VPi = LQ(IN+0x80+16i) */
+
+f_BDD8(M): if (!changed(M)) return; prev = M;
+  if (slot[0] >= 0) { room(72); emit(0x00441EFC); emit(slot[0]); emit(M[0..3]); }     /* raw M */
+  if (slot[1] >= 0) { room(72); emit(0x00441EFC); emit(slot[1]); emit(MVP(M)); }
+  if (slot[2] >= 0) FALLBACK;
+  if (slot[3] >= 0) { for r in 0..2 { v = M[r]; v.w = 0; sq = fm(v, v);
+                        l = splat(fa(fa(sq.x, sq.y), sq.z));            /* lane 0, then splat */
+                        rs = fi(l, frsqest(l));
+                        n = fma(fnms(l, fm(rs, rs), splat(1.0f)), fm(rs, splat(0.5f)), rs);
+                        N[r] = fm(v, n); N[r].w = 0; }
+                      room(56); emit(0x00341EFC); emit(slot[3]); emit(N[0..2]); }
+  if (slot[10] >= 0 || slot[11] >= 0) FALLBACK;
+
+f_B010(M, E) -> po:
+  if (slot[1] >= 0 || slot[11] >= 0) if (changed(M)) { prev = M;
+      if (slot[1] >= 0) { room(72); emit(0x00441EFC); emit(slot[1]); emit(MVP(M)); }
+      if (slot[11] >= 0) FALLBACK; }
+  if ((E[0] & IN1[0x10F] & 4) && IN[0x153] == 0) {
+      room(8);  emit(0x00040A68); emit(1);                         /* POLY_OFFSET_FILL_ENABLE */
+      room(12); emit(0x00080A78); emit(0x3F800000); emit(0x44FA0000);  /* factor 1.0, units 2000.0 */
+      return 1; }
+  return 0;
+/* after the draw, if po: room(8); emit(0x00040A68); emit(0); */
+```
+
+- The polygon-offset words are not change-detected: they are emitted around every flagged draw (141 of 426 type-2 draws).
+- BDD8 also computes a cofactor (cross-product) matrix before its change test. That result is used only by the unexecuted kind 2/10/11 paths.
+
+#### 10.7.7 f_6FE0: stencil (type 0)
+
+```c
+if ((IN1[0x10F] & 0xE0) == 0) return;
+ref = E[0] & 0xE0;  if (ref == scr.stencil) return;        /* u32 compare, init 0xFFFFFFFF */
+room(32); emit(0x000C0330, 0x207, ref, 0xFF, 0x000C0350, 0x207, ref, 0xFF);   /* front, back: ALWAYS */
+scr.stencil = ref;
+```
+
+#### 10.7.8 f_5C98 / f_5B60: draw
+
+```c
+f_5B60(id): v = id==0||id==2 ? 0x0C32 : id==1||id==3||id==5 ? 0x0630|id : NONE;   /* jump table 0x5BA4 */
+            if (v != NONE) { room(8); emit(0x00041740); emit(v); }               /* VERTEX_DATA_ARRAY_FORMAT[0] */
+f_5C98(rec):
+  if (scr.vfmt != rec[0x4C]) { f_5B60(rec[0x4C]); scr.vfmt = rec[0x4C]; }   /* stored even when nothing is emitted */
+  if (scr.streams != {rec[0x38], rec[0x3C], rec[0x40]}) {
+    n = L[0]; room(8n);
+    for j < n: { emit(0x00040000 | (0x1680 + 4*L.attr[j])); emit(rec[0x38 + 4*L.stream[j]] + L.off[j]); }
+    scr.streams = {rec[0x38], rec[0x3C], rec[0x40]};
+  }
+  ni = 3*u16(rec+4);  if (ni == 0) return;                 /* no index/draw words at all */
+  nw = (ni + 255) >> 8;  room(4*(nw + 8));
+  emit(0x0008181C); emit(rec[0x44] & 0x7FFFFFFF); emit(0x10 | rec[0x44] >> 31);
+  emit(0x00041808); emit(5); emit(0x40001824 | nw << 18);
+  for (i = 0; i < ni >> 8; i++) emit(0xFF000000 + 256*i);
+  if (ni & 255) emit(((ni & 255) - 1) << 24 | ((256*(ni >> 8)) & 0x00FFFF00));
+  emit(0x00041808); emit(0);
+```
+
+- 0x5B60 emits a single word, the format of attribute 0. Section 6 called it a "burst"; that was wrong.
+- The "format table" is the code itself: the jump table at 0x5BA4. Id 4 or id > 5 emits nothing.
+- The value is stride<<8 | size<<4 | type: id 0/2 = (12, 3, float); ids 1/3/5 = (6, 3, type id).
+
+#### 10.7.9 f_6AA0: fragment program (type 0)
+
+`f_6AA0(P, cb, tag, out)`:
+
+- **flag = P[0x10] == 0** (the case in every capture):
+  - if P[0x18] != P[0x1C]: room(8); emit(0x000408E4) (SET_SHADER_PROGRAM); emit((IN[0x24] + P[0x1C]) | 2); then P[0x18] = P[0x1C].
+  - In captures both are 0, so it is a no-op.
+- **flag != 0**:
+  - Clear the flag. If P[0x14] (program id, init -1) != 0, P[0x11] == 0 and P[0x24] > 0, look the id up in the cache list `{u32 id, u32 offset}[P[0x24]]` at P[0x20].
+  - On a hit: if the offset != P[0x1C], emit SET_SHADER_PROGRAM. Either way P[0x18] = P[0x1C] = offset.
+  - Otherwise (no lookup, or a miss), upload:
+    - size = align128(*(u32*)P.w0);
+    - `off = atomic_add(IN[0x20], size)` (the 0x190D8 GETLLAR/PUTLLC);
+    - if `off && off + size <= IN[0x28]`: **PUT** `size` bytes from P.w0+0x100 to EA off (cmd 0x20, tag = the scratch tag);
+    - out.w3 += 1; out.w4 += size;
+    - emit SET_SHADER_PROGRAM (off + IN[0x24]) | 2, then P[0x18] = P[0x1C] = off;
+    - insert {id, off} at index count++. When count > 31, the index is 0x19430() % count instead (a pseudo-random replacement).
+- So the atomic and DMA are an **on-demand fragment-program upload** into a heap at IN[0x20..0x28].
+- The flag starts as `IN1[0xD4] ? 1 : IN1[0x17A]`. P[0x14], P[0x1C] and the ucode at in+0x3510 are only set by the unexecuted 15E78/7C18 branches. That is why native type 0 must fall back when the flag can be set (10.2).
+
+### 10.8 Room-check thresholds (bytes; need = bytes/4 is what is passed to 0x18508, but ignored)
+
+| emitter | check | words written |
+|---|---|---|
+| 1 constant vector (15E78 type 0, op 5, 0x5A38) | 24 | 6 |
+| 2 vectors (15E78 type 4) | 40 | 10 |
+| 3x4 (op 11, N, 0x5838) | 56 | 14 |
+| 4x4 (M, MVP) | 72 | 18 |
+| CONTROL2 / border / format / poly-offset enable or disable | 8 each | 2 |
+| texture burst (0x1A00 + 0x1840) | 40 | 10 |
+| polygon offset factors | 12 | 3 |
+| stencil | 32 | 8 |
+| vertex offsets | 8·L.n (one check for all) | 2·L.n |
+| index + draw | 4·(nw + 8) | nw + 8 |
+| RETURN | none | 1 |
+
+### 10.9 Validation coverage
+
+- **Exercised by the 52 captured jobs (byte-exact):**
+  - range split with N = 1;
+  - deferred-range ordering (18 deferred, 60 normal ranges);
+  - E bit-27 reject;
+  - per-range material reset;
+  - textures: 201 emits, 9 cache hits, 32 CONTROL2;
+  - constant type 0: 72 emits with no old material, 54 changed, 114 skipped;
+  - constant type 4: 29 emits, 15 skipped;
+  - op 5: 12 emits, 101 cache hits;
+  - op 11: 21 own matrices, 20 0xFFFFFFFF records, 1 identity;
+  - BDD8: 106 changed, 127 unchanged; kind 0 in job 11; N;
+  - B010: 186 unchanged; polygon offset 141;
+  - stencil: 8 emits, 105 skips;
+  - vertex format ids 0 and 2;
+  - 570 vertex-offset bursts;
+  - multi-batch draws (258); an exact multiple of 256 (1);
+  - JUMP chaining (11);
+  - camera-relative on.
+- **Exercised only by the differential tests (10.0):**
+  - contiguous blocks and the clamp;
+  - split with N > 1;
+  - selector filter;
+  - H bit 30/31;
+  - IN[0x153];
+  - border colour;
+  - vertex format ids 1, 3, 4, 5, 7;
+  - stencil changes and stencil off;
+  - ni = 0;
+  - op 5 with non-trivial and negative cols;
+  - kind 0 in a 48-draw job;
+  - L.n = 0 and 2;
+  - camera-relative off.
+- **Read but never executed (no oracle check):**
+  - the op-11 key match `X[j].w0 == mat.w0`: every captured record count is 1, so a key hit and the 0xFFFFFFFF fallback cannot be told apart;
+  - 6AA0's upload path;
+  - the room checks that land exactly on a block edge for emitters other than texture, vector and draw. The rule is uniform, so this is low risk.
+
+### 10.10 Errata to sections 1-8
+
+- 2: the range order is reversed. Records with byte +0x0C **== 0** come first in table order; flagged ones come last in reverse table order. The model fails 20/44 with the order the other way round.
+- 2.4: object_filter does reject objects: 47 in the captures, by E bit 27. See 10.7.1. Its inputs are IN[0x151] and IN1[0x0A]; IN[0x34] is not used.
+- 2.1: the "material change" detection is reset at the start of every range.
+- 1 / IN table: IN+0x6C is not used by types 0 and 2.
+- 6: texture entries are **44 bytes**, at mat+8+44t, and only the bound ones are emitted (the 4 entries in job 12 are the 4 bindings at IN1+0x1C).
+- 6: c[0x104] is not integer-derived. It is the op-11 3x4 colour matrix, from the material or the extra record. c[0x1CA] is the op-5 UV offset, and that is where the csflt is.
+- 6: 0x5B60 emits one word (attribute-0 format), not a burst.
+- 3: the `need` argument of 0x18508 is ignored by the callback, so only the byte threshold matters.
+- 4.1: the formula is right. 10.7.5 adds the diagonal scale as three separate fm/fma chains (signed zeros) and the full w-lane behaviour.
+
+### 10.11 Open questions (updated; supersedes section 8)
+
+1. Fallback paths, which need captures from other areas (`SPU_PUT_DUMP`) before porting:
+   - pass types 1, 3, 4;
+   - 15E78 types 1..3 and 5..11, and the sRGB bit;
+   - 7C18 ops 0..3, 6..10, 12..14 (ops 0 and 12 are listed in captured IN1 blocks but gated off by mat_on = 0), op 4's emission, and op 11's second output (slot +0xB0, 0x152B0);
+   - matrix kinds 2, 10, 11 and the D6D8 side kinds (4..9, 12, 13, 17, 43, 45, IN1[9]).
+2. The fragment-program upload in 6AA0: where the ucode at in+0x3510 and the program id come from, presumably from a 15E78/7C18 branch. It is the only place type 0 does an extra atomic and DMA, and it bumps record words 3 and 4.
+3. The op-11 key-match path (`mat.w0 == record.w0`) was read but not exercised. Every captured extra list has one 0xFFFFFFFF record.
+4. 0x19430 (the replacement index for the program cache) is not decoded. It looks like a PRNG.
+5. API+68 and IN2.w2 (0x40, 0xD9: a sequence?) are still unknown. Neither affects the command words.
+6. IN1+0xA0, +0xA2 and +0xA4, +0xAA, +0xAC: their op owners are unknown (only mat_on tests the last three).
+7. Methods 0x0B00 (value 0x2DC4) and the meaning of format types 1/3/5 rest on the usual NV40/RSX method map. Bit-exactness does not depend on it.
