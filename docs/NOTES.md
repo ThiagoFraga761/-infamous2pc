@@ -737,6 +737,28 @@ SPU jobs it waits for depend on RSX output. `PS3RECOMP_ENG_VPULL=1` is much
 slower here (40 against 59 fps), and pinning the `rsx` thread to its own
 physical core changes nothing measurable.
 
+### Round 3 (2026-10-18): with vertex pulling on
+
+- The `rsx` thread drops below 90%: the vertex program is now looked up once
+  per program change (`vp_wgen`, bumped by an upload that changes the program
+  store) instead of compared 3-4 times a draw, and the pulling path's
+  reference scan and index map are SSE4.1.
+- The SPU MFC channels the jobs use most (`MFC_Cmd`, `WrTagMask`,
+  `WrTagUpdate`, `RdTagStat`) are handled inline in lifted code
+  (`spu_wrch_fast`/`spu_rdch_fast`, slow again with `SPU_CHHIST`,
+  `SPU_POLLTRACE` or `SPU_TAGPROBE`); `mfc_for` is inline; the DMA skip test
+  runs only for overlays that registered a skip. SPURS busy 69.2 -> 66.4 ms a
+  frame.
+- `cbd/chd/cwd/cdd` (and the x forms) build their control in a register
+  (no measurable gain; it removed a store-forwarding stall).
+- Now the limit is SPU throughput: the main thread waits ~37% of its time on
+  the job lists, SPURS spends ~62% in the jobs' own code and ~25% in the
+  runtime. More SPU threads (`SPURS_NSPUS_MIN=7`) and a longer idle spin
+  change nothing. The main thread's own work is ~10 ms a frame, 90% of it in
+  lifted PPU code.
+- `second_frame` failed once in the suite (presentation stopped in the opening
+  video, the known rare boot hang) and passed four reruns of the same binary.
+
 ### What the main thread waits for in New Marais
 
 The `PS3_TIMELINE` usleep events name the main thread's three waits:
