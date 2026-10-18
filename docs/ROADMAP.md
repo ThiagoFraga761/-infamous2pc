@@ -36,6 +36,17 @@ A meta é **120+ fps em 4K com FSR**, em qualquer área do jogo.
 
 ## Próximos
 
+**Mods** (ideias do Thiago, 18/10, em ordem):
+
+| # | Mod | Viabilidade |
+|---|---|---|
+| 1 | Central de mods: baixar e instalar mods de dentro do jogo | Boa: um catálogo (JSON) num repositório e zips em `mods/`; o carregador já existe (docs/MODS.md) |
+| 2 | Mapa mostrando todos os fragmentos (cristais) | Boa, com engenharia reversa: achar a lista de fragmentos e o código dos ícones do mapa; o código do jogo é recompilado, então dá para trocar uma função por C nativo (como nos jobs de SPU) |
+| 3 | Melhorias gerais do mapa (zoom, marcadores) | Mesma base do 2 |
+| 4 | Co-op (tela dividida ou online) | Muito difícil: o jogo não tem segundo jogador nem câmera dupla; exigiria refazer lógica de jogo sem o código-fonte. Só uma investigação curta antes de decidir |
+
+Os mods 2 e 3 precisam de "mods de código": um ponto de extensão para trocar funções PPU por código nativo, além dos mods de arquivo de hoje.
+
 **Além do PS3** (depois da base de 120 fps estável):
 
 - Filtro anisotrópico 16x forçado e anti-aliasing de verdade (SMAA/FXAA ou
