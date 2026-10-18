@@ -269,15 +269,16 @@ for the cull):
 
 ### 7.2 Mutation check
 
-`mut.py` applies 42 single changes to the kernels (operand order, a lane, a
+`mut.py` applies 44 single changes to the kernels (operand order, a lane, a
 bit, a constant, a dropped store, the bound, the rounding of an estimate, the
-pixel-snap offset, the slow paths, ...) and expects a test to fail. **All 42
-are caught.** The first round had 5 survivors: two were equivalent mutants
-(a commutative product; `cvtps` under the RZ MXCSR is `cvtt`) and were
-replaced; three showed gaps in the generators (scissor origin always 0, depth
-bounds never +-0 or denormal, no vectors small enough that s underflows to
-0), which were closed. The exact skin path needs the 3% mutation run to be
-reached since the fast path takes denormals.
+pixel-snap offset, the slow paths, the zero-weight rule, DAZ in the fast
+MXCSR, ...) and expects a test to fail. **All 44 are caught** (run at the
+game's MXCSR). Survivors on the way were two equivalent mutants (a
+commutative product; `cvtps` under the RZ MXCSR is `cvtt`), replaced, and
+generator gaps that were closed: scissor origin always 0, depth bounds never
++-0 or denormal, no vectors small enough that s underflows to 0, and no -0
+positions/translations (needed to see the +0 canonicalisation of positions).
+The exact skin path is reached by the 3% mutation run.
 
 ### 7.3 Speed (best of 300 runs, hot LS)
 
