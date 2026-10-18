@@ -92,8 +92,23 @@ watch_stall() {
         gpid=$(pgrep -P $$ -x MyGameRecomp | head -1); [ -n "$gpid" ] && break; sleep 0.2
     done
     [ -n "$gpid" ] || return 0
+    # Each thread's CPU share every 10 s, beside the fps in the log, into
+    # <log>.threads.txt: which one ran out when the frame rate dropped.
+    local tick=0 prev="" cur
+    snap() { for t in /proc/"$gpid"/task/*; do
+                 local st; st=$(sed 's/.*) //' "$t/stat" 2>/dev/null) || continue
+                 set -- $st; echo "$(tr ' ' _ < "$t/comm" 2>/dev/null) $(( ${12} + ${13} ))"
+             done | awk '{a[$1] += $2} END {for (k in a) print k, a[k]}' | sort; }
     while kill -0 "$gpid" 2>/dev/null; do
         sleep 5
+        tick=$((tick + 1))
+        if [ $((tick % 2)) = 0 ]; then
+            cur=$(snap)
+            [ -n "$prev" ] && join <(echo "$prev") <(echo "$cur") |
+                awk -v t="$(date +%T)" '{d = $3 - $2; if (d > 100) printf "%s=%d%% ", $1, d / 10} END {printf " %s\n", t}' \
+                >> "${LOG%.log}.threads.txt"
+            prev=$cur
+        fi
         # Only what was logged since the last look.
         size=$(stat -c %s "$LOG" 2>/dev/null || echo 0)
         if [ "$size" -lt "$off" ]; then off=0; fi
@@ -116,7 +131,11 @@ watch_stall() {
         if [ "${PLAY_PROFILE:-1}" != 0 ] && [ -n "$PERF" ] && [ "$slow" -ge 3 ] && [ "$profiles" -lt 3 ] &&
            [ $(( $(date +%s) - last_prof )) -ge 120 ]; then
             local prof="${LOG%.log}.perf-$(date +%H%M%S).data"
-            LD_LIBRARY_PATH="$PERF_LIBS" "$PERF" record -q -F 499 -p "$gpid" -o "$prof" -- sleep 20 > /dev/null 2>&1 &
+            # Reported right away: a rebuild of the binary later leaves the
+            # samples without symbols.
+            ( LD_LIBRARY_PATH="$PERF_LIBS" "$PERF" record -q -F 499 -p "$gpid" -o "$prof" -- sleep 20 > /dev/null 2>&1
+              LD_LIBRARY_PATH="$PERF_LIBS" "$PERF" report -i "$prof" --no-children --sort comm,sym --stdio \
+                  2> /dev/null | grep "%" | head -200 > "${prof%.data}.txt" ) &
             profiles=$((profiles + 1)); last_prof=$(date +%s); slow=0
             echo "[play.sh] fps under ${PLAY_PROFILE_BELOW:-70} for 30 s -- profiling 20 s into $prof" >&2
         fi
