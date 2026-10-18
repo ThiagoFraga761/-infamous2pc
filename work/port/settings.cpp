@@ -248,6 +248,7 @@ void port_settings_export(const port_settings* s)
      * replaces was what made turning the camera drop to ~40 fps in the city,
      * where most geometry is rebuilt by the SPUs every frame. */
     put("PS3RECOMP_ENG_VPULL", "1");
+    put("PS3RECOMP_ANISO", "16");   /* sharper ground and walls at an angle */
     if (s->skip_launcher) put("PS3_SKIP_LAUNCHER", "1");
 }
 

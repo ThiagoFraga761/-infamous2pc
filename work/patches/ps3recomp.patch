@@ -16796,7 +16796,7 @@ index ecc53fc..5752611 100644
   * program start). Branch targets are absolute slots; this makes them relative
   * to the ucode pointer handed in. Defaults to 0. */
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index e2687b7..9dc049e 100644
+index e2687b7..eca2d0d 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
 @@ -50,6 +50,10 @@
@@ -21432,7 +21432,7 @@ index e2687b7..9dc049e 100644
      s_e2.scratch_w = w; s_e2.scratch_h = h;
      return s_e2.scratch_depth.view;
  }
-@@ -2773,12 +6143,25 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
+@@ -2773,12 +6143,31 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
  {
      u32 lo, hi;
      memcpy(&lo, &d->min_lod, 4); memcpy(&hi, &d->max_lod, 4);
@@ -21448,6 +21448,12 @@ index e2687b7..9dc049e 100644
 +    /* CONTROL0's anisotropy codes as sample counts (RPCS3 vk::max_aniso). */
 +    static const float aniso[8] = { 1.f, 2.f, 4.f, 6.f, 8.f, 10.f, 12.f, 16.f };
 +    float af = aniso[d->max_aniso & 7u];
++    /* PS3RECOMP_ANISO=<n>: at least n-x anisotropic filtering on mipmapped
++     * textures (the scene's; the passes' data textures have no mips). The PS3
++     * mostly asks for none, which is what makes distant ground blur. */
++    { static float forced = -1.0f;
++      if (forced < 0.0f) { const char* e = getenv("PS3RECOMP_ANISO"); forced = e ? (float)atof(e) : 0.0f; }
++      if (d->mip_present && d->min_linear && forced > af) af = forced; }
 +    if (af > s_vk.max_aniso) af = s_vk.max_aniso;
 +    u32 hs = vk_samp_slot(key);
 +    for (; s_esamp_index[hs]; hs = (hs + 1) & (VK_ENG_SAMP_INDEX - 1))
@@ -21461,7 +21467,7 @@ index e2687b7..9dc049e 100644
      float min_lod = d->min_lod, max_lod = d->mip_present ? d->max_lod : d->min_lod;
      if (max_lod < min_lod) max_lod = min_lod;
      VkSamplerCreateInfo sci = {
-@@ -2789,62 +6172,154 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
+@@ -2789,62 +6178,154 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
          .addressModeU = vk_gcm_wrap(d->wrap_s), .addressModeV = vk_gcm_wrap(d->wrap_t),
          .addressModeW = vk_gcm_wrap(d->wrap_r),
          .minLod = min_lod, .maxLod = max_lod,
@@ -21643,7 +21649,7 @@ index e2687b7..9dc049e 100644
  
      /* Targets: every member of a set is target A's size (engine contract). */
      const u32 n = s_eng_bound.nrt;
-@@ -2867,24 +6342,152 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+@@ -2867,24 +6348,152 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
      VkFramebuffer fb = vk_eng_framebuffer(rp, s_eng_bound.rt, n, dview, dkey, w, h);
      if (!pipe || !rp || !fb) return;
  
@@ -21812,7 +21818,7 @@ index e2687b7..9dc049e 100644
      pvkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
      VkViewport vp = { 0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f };
      if (s_e2.have_vp && s_e2.vp[2] > 0.0f && s_e2.vp[3] > 0.0f) {
-@@ -2902,26 +6505,121 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+@@ -2902,26 +6511,121 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
      pvkCmdSetViewport(s_vk.cmd, 0, 1, &vp);
      pvkCmdSetScissor(s_vk.cmd, 0, 1, &sc);
      pvkCmdSetStencilReference(s_vk.cmd, VK_STENCIL_FACE_FRONT_AND_BACK, s_e2.stencil_ref & 0xFFu);
@@ -21943,7 +21949,7 @@ index e2687b7..9dc049e 100644
      .texture_upload       = vk_eng_texture_upload,
      .texture_release      = vk_eng_release,
      .color_target_create  = vk_eng_color_target_create,
-@@ -2929,23 +6627,47 @@ static const rsx_draw_backend s_vk_engine_backend = {
+@@ -2929,23 +6633,47 @@ static const rsx_draw_backend s_vk_engine_backend = {
      .surface_view         = vk_eng_surface_view,
      .depth_target_create  = vk_eng_depth_target_create,
      .depth_target_release = vk_eng_release,
@@ -21992,7 +21998,7 @@ index e2687b7..9dc049e 100644
  };
  
  static rsx_backend s_vulkan_backend = {
-@@ -3017,6 +6739,31 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3017,6 +6745,31 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      pvkGetPhysicalDeviceFeatures(s_vk.phys, &have);
      want.textureCompressionBC = have.textureCompressionBC;
      s_vk.bc_ok = have.textureCompressionBC ? 1 : 0;
@@ -22024,7 +22030,7 @@ index e2687b7..9dc049e 100644
      VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                                 .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
                                 .enabledExtensionCount = s_vk.windowed ? 1u : 0u,
-@@ -3036,9 +6783,15 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3036,9 +6789,15 @@ static int vk_init_all(u32 width, u32 height, const char* title)
                                          .commandPool = s_vk.pool,
                                          .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
                                          .commandBufferCount = 1 };
@@ -22041,7 +22047,7 @@ index e2687b7..9dc049e 100644
  
      if (vk_pick_depth_format()) return -1;
      if (vk_create_image(&s_vk.color, VK_FORMAT_R8G8B8A8_UNORM, s_vk.width, s_vk.height,
-@@ -3046,9 +6799,9 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3046,9 +6805,9 @@ static int vk_init_all(u32 width, u32 height, const char* title)
                          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT)) return -1;
      if (vk_create_image(&s_vk.depth, s_vk.depth_format, s_vk.width, s_vk.height,
                          VK_IMAGE_USAGE_TRANSFER_DST_BIT |
@@ -22054,7 +22060,7 @@ index e2687b7..9dc049e 100644
      if (vk_create_render_pass()) return -1;
      if (vk_create_pipeline_objects()) return -1;
      if (vk_guest_init()) {
-@@ -3063,18 +6816,24 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3063,18 +6822,24 @@ static int vk_init_all(u32 width, u32 height, const char* title)
       * null backend makes the same choice). */
      if (vk_begin()) return -1;
      vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
@@ -22081,7 +22087,7 @@ index e2687b7..9dc049e 100644
              vk_create_swapchain())
              vk_window_drop("the swapchain could not be created");
      }
-@@ -3143,8 +6902,11 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -3143,8 +6908,11 @@ void rsx_vulkan_backend_shutdown(void)
          vk_destroy_image(&s_vk.dummy);
          vk_destroy_image(&s_vk.depth);
          vk_destroy_image(&s_vk.color);
@@ -22093,7 +22099,7 @@ index e2687b7..9dc049e 100644
          if (s_vk.fence) pvkDestroyFence(s_vk.device, s_vk.fence, NULL);
          if (s_vk.pool)  pvkDestroyCommandPool(s_vk.device, s_vk.pool, NULL);
          pvkDestroyDevice(s_vk.device, NULL);
-@@ -3157,18 +6919,75 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -3157,18 +6925,75 @@ void rsx_vulkan_backend_shutdown(void)
  
  int rsx_vulkan_backend_pump_messages(void)
  {
