@@ -36,6 +36,18 @@ A meta é **120+ fps em 4K com FSR**, em qualquer área do jogo.
 
 ## Próximos
 
+**Além do PS3** (depois da base de 120 fps estável):
+
+- Filtro anisotrópico 16x forçado e anti-aliasing de verdade (SMAA/FXAA ou
+  supersampling pela escala de render).
+- FSR para 4K a 120 fps.
+- Sombras em resolução mais alta, independente da escala.
+- Ultrawide e FOV ajustável (projeção e culling).
+- Distância de desenho e LOD maiores, menos pop-in: depende do job `ec5f`
+  nativo, que é quem escolhe o que é desenhado e em qual detalhe.
+- HDR e pacote de texturas em alta resolução.
+
+
 1. **Upscaler (FSR):** renderizar abaixo de 4K e escalar com FSR. A rota
    (Vulkan + FSR 3.1 ou D3D12 + FSR 4.1 via Proton) ainda está em aberto.
 2. **Vértices sem cópia:** o motor entregar o buffer que o fetch preencheu,
