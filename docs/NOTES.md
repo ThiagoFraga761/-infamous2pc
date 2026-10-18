@@ -490,6 +490,20 @@ backend does:
 The one engine-side change is WPOS: the GPU hands the fragment program image
 pixels, so `fp_alpha.w` carries 1/N.
 
+One change sits outside the renderer. Edge Geometry, the SPU job that
+prepares skinned meshes, culls triangles that cover no pixel centre of the
+viewport it is given, and the game gives it 1280x720. At 2x and above those
+triangles do cover pixels, so faces, ears and necks showed dark specks and
+holes; the G-buffer pass already lacked the triangles, and no fragment
+discarded anything. The job reads its `EdgeGeomViewportInfo` through one
+128-byte GET (u16 scissor `0,0,1280,720`, then depth range `-1,1`, a 4x4
+matrix, viewport scales at +80 and offsets at +96), about 8,500 times a
+second in the city. `spu_dma.h` scales the scissor, scales and offsets in the
+job's local-store copy by N when the signature matches; guest memory keeps
+the original. `PS3RECOMP_EDGE_VP=0` turns it off. Ruled out on the way: SSAO,
+the native lighting, LOD bias, a half-pixel viewport shift, the depth-as-RGBA8
+size and the depth-bias slope.
+
 At 2x the pier, the tutorial and the cutscene render with the same light,
 particles and exposure as 1x, and nothing falls back to the SPU. At first it
 cost a lot: the pier walk at ~63 fps and the tutorial at ~89, against ~123.
