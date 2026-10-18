@@ -91,7 +91,7 @@ static inline int ea_ok(uint32_t ea, uint32_t size)
 }
 static const uint8_t* G(J* j, uint32_t ea, uint32_t size)
 {
-    static const uint8_t zero[0x10000];     /* the largest read: 100 queue records */
+    static const uint8_t zero[0x10000];     /* covers every read but a range's items, checked at the call */
     if (__builtin_expect(!ea_ok(ea, size), 0)) {
         if (!(j->fallback & FB_EA)) { j->bad_ea = ea; j->bad_size = size; }
         j->fallback |= FB_EA; return zero;
@@ -743,6 +743,7 @@ static void run(J* j)
     for (int r = 0; r < nr; r++) {
         if (re[r] < rb[r] || re[r] - rb[r] > 0x100000) { j->bad_ea = rb[r]; j->bad_size = 0xF3; j->fallback |= FB_EA; return; }
         const uint8_t* items = G(j, rb[r], re[r] - rb[r]);
+        if (j->fallback) return;                /* the zero stand-in is smaller than a range can be */
         uint32_t cnt = (re[r] - rb[r]) >> 3;
         uint32_t last_mat = 0; const uint8_t* old_mat = 0; const uint8_t* mat = 0;
         for (uint32_t k = 0; k < cnt; k++) {

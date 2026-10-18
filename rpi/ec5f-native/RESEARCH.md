@@ -1361,3 +1361,9 @@ the LS at job entry, and write the last three materials back after a native job.
    where the helpers the port uses keep them. It is outside the new code and
    real inputs do not reach it (mode 2 matched 100% in-game), but one of the
    two float paths differs from the other at the bottom of the range.
+5. **Stack left by a native job.** The slot-12 quad (LS sp-0x970 of main) is
+   written back on publish, since the next job's first slot-12 emit reads it.
+   The rest of what the SPU leaves on its stack (main's frame, callee saves) is
+   not reproduced. Compare mode cannot see this: in it the SPU job always runs.
+   Another reader of uninitialised stack, in this module or in another overlay
+   on the same SPU, would go unnoticed there.
