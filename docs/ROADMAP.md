@@ -29,7 +29,7 @@ A meta é **120+ fps em 4K com FSR**, em qualquer área do jogo.
 
 | Item | Situação |
 |---|---|
-| Travamentos raros no meio do jogo | O `play.sh` captura as pilhas das threads quando a imagem para; falta reproduzir |
+| Travamentos raros no meio do jogo | Deadlock entre a thread principal (esperando uma event flag) e a job chain `0x00B19600`, parada no guard `0x00B15000`: o evento de "job pronto" do SPU para o PPU se perde. Visto em 16/10, 17/10 e 18/10, uma vez a cada 15–60 min de jogo. Falta um registro circular de guard, jobs, eventos e flag, salvo na trava |
 | Custo por draw na thread do RSX | Em áreas com ~9 mil draws por frame, essa thread, a de gravação, a principal do PPU e os SPUs ficam todos em 84–94% |
 | Vazão dos SPUs | Já limita o fps em New Marais; o custo vem do runtime SPU (DMA, despacho) e do código de cada job |
 | Primeira compilação de shaders | Pico de um frame na primeira vez de cada efeito; o cache em disco cobre as seguintes |
@@ -83,7 +83,10 @@ The goal is **120+ fps at 4K with FSR**, everywhere in the game.
 
 ## In progress
 
-- **Rare mid-game freezes:** `play.sh` captures every thread's stack.
+- **Rare mid-game freezes:** a deadlock between the main thread (waiting on an
+  event flag) and job chain `0x00B19600`, parked at guard `0x00B15000`. A
+  job-done event from the SPU to the PPU goes missing, about once per 15-60
+  minutes of play.
 - **RSX thread per-draw cost:** in the heaviest views every busy thread is at
   84–94%.
 - **SPU throughput:** it limits New Marais.
