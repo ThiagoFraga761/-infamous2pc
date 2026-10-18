@@ -10,7 +10,7 @@ index d320252..a075898 100644
 +# SPU differential test build products (runtime/spu/tests/build_diff_test.sh)
 +runtime/spu/tests/build_diff/
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index f843504..c0472de 100644
+index f843504..262bd43 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -26,7 +26,7 @@ option(PS3RECOMP_BUILD_TESTS "Build unit tests" OFF)
@@ -22,7 +22,20 @@ index f843504..c0472de 100644
      "libs/system/*.c"
      "libs/filesystem/*.c"
      "libs/input/*.c"
-@@ -62,6 +62,19 @@ if(PS3RECOMP_RSX_VULKAN)
+@@ -50,8 +50,10 @@ list(FILTER HLE_SOURCES EXCLUDE REGEX "/tests/")
+ option(PS3RECOMP_RSX_VULKAN "Build the Vulkan RSX backend (Linux)" OFF)
+ list(FILTER HLE_SOURCES EXCLUDE REGEX "rsx_vulkan_backend\\.c$")
+ if(PS3RECOMP_RSX_VULKAN)
+-    if(WIN32 OR APPLE)
+-        message(FATAL_ERROR "PS3RECOMP_RSX_VULKAN is Linux-only for now")
++    # Windows through MinGW is being brought up (work/runs/win_probe.sh in the
++    # inFAMOUS 2 port); MSVC and macOS are not.
++    if(APPLE OR (WIN32 AND NOT MINGW))
++        message(FATAL_ERROR "PS3RECOMP_RSX_VULKAN builds on Linux and MinGW only")
+     endif()
+     find_path(PS3RECOMP_VULKAN_INCLUDE_DIR vulkan/vulkan.h)
+     if(NOT PS3RECOMP_VULKAN_INCLUDE_DIR)
+@@ -62,6 +64,19 @@ if(PS3RECOMP_RSX_VULKAN)
      list(APPEND HLE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_vulkan_backend.c")
      # HLSL -> SPIR-V for guest programs: a stub unless glslang is found below.
      list(APPEND HLE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_shader_spirv.cpp")
@@ -42,7 +55,7 @@ index f843504..c0472de 100644
  endif()
  
  # The Metal backend is Objective-C and Apple-only, so it is added explicitly
-@@ -81,7 +94,7 @@ set_source_files_properties(${AT3_SOURCES} PROPERTIES COMPILE_OPTIONS "-w")  # u
+@@ -81,7 +96,7 @@ set_source_files_properties(${AT3_SOURCES} PROPERTIES COMPILE_OPTIONS "-w")  # u
  list(APPEND HLE_SOURCES ${AT3_SOURCES})
  
  # Runtime core (syscalls, PPU, SPU, memory)
@@ -51,7 +64,25 @@ index f843504..c0472de 100644
      "runtime/*.c"
      "runtime/*.cpp"
  )
-@@ -180,6 +193,13 @@ if(PS3RECOMP_RSX_VULKAN)
+@@ -128,6 +143,17 @@ target_include_directories(ps3recomp_runtime PRIVATE
+     "${CMAKE_CURRENT_SOURCE_DIR}/include"
+ )
+ 
++# MinGW-w64 (cross builds from Linux): the POSIX calls the Linux paths use,
++# Vista+ APIs, and SDL2, which the Vulkan backend's window and Dear ImGui need
++# on Windows too.
++if(MINGW)
++    target_compile_definitions(ps3recomp_runtime PUBLIC _WIN32_WINNT=0x0A00)
++    target_compile_options(ps3recomp_runtime PUBLIC
++        "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/runtime/platform/mingw_posix.h")
++    find_package(SDL2 REQUIRED)
++    target_link_libraries(ps3recomp_runtime PUBLIC SDL2::SDL2 winpthread)
++endif()
++
+ # Platform-specific link libraries
+ if(WIN32)
+     target_link_libraries(ps3recomp_runtime PRIVATE
+@@ -180,6 +206,13 @@ if(PS3RECOMP_RSX_VULKAN)
      target_include_directories(ps3recomp_runtime PRIVATE "${PS3RECOMP_VULKAN_INCLUDE_DIR}")
      # PUBLIC: ps3recomp_host selects its backend on this definition.
      target_compile_definitions(ps3recomp_runtime PUBLIC PS3RECOMP_RSX_VULKAN)
@@ -65,7 +96,7 @@ index f843504..c0472de 100644
      target_link_libraries(ps3recomp_runtime PUBLIC ${CMAKE_DL_LIBS})
      message(STATUS "  Vulkan:       RSX backend enabled (rsx_vulkan_backend.c, headers in ${PS3RECOMP_VULKAN_INCLUDE_DIR})")
  endif()
-@@ -449,6 +469,9 @@ if(UNIX)
+@@ -449,6 +482,9 @@ if(UNIX)
                      "${CMAKE_CURRENT_SOURCE_DIR}/tools/ppu_lifter.py"
              COMMENT "Generating the smoke title's image and ppu_recomp.h")
  
@@ -75,7 +106,7 @@ index f843504..c0472de 100644
          add_custom_command(
              OUTPUT "${SMOKE_GEN}/ppu_hle_nids.cpp"
              COMMAND "${Python3_EXECUTABLE}"
-@@ -456,6 +479,7 @@ if(UNIX)
+@@ -456,6 +492,7 @@ if(UNIX)
                      --out "${SMOKE_GEN}/ppu_hle_nids.cpp" --all
              DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_hle_nids.py"
                      "${CMAKE_CURRENT_SOURCE_DIR}/tools/nid_database.py"
@@ -696,18 +727,19 @@ index f2b4c11..87a7185 100644
                   info->max_connect, connected); }
      return CELL_OK;
 diff --git a/libs/network/cellHttp.c b/libs/network/cellHttp.c
-index d39d88d..34a558f 100644
+index d39d88d..c7ec705 100644
 --- a/libs/network/cellHttp.c
 +++ b/libs/network/cellHttp.c
-@@ -29,6 +29,7 @@ typedef SOCKET http_socket_t;
- #include <unistd.h>
- #include <fcntl.h>
- #include <errno.h>
-+#include "../../runtime/memory/guest_wtrack.h"   /* gwt_host_write_*: kernel writes into guest memory */
- typedef int http_socket_t;
- #define HTTP_INVALID_SOCKET (-1)
+@@ -34,6 +34,8 @@ typedef int http_socket_t;
  #define http_closesocket close
-@@ -711,7 +712,9 @@ s32 cellHttpRecvResponse(CellHttpTransId transId, void* buf, u32 size,
+ #endif
+ 
++#include "../../runtime/memory/guest_wtrack.h"   /* gwt_host_write_*: kernel writes into guest memory */
++
+ /* Guest-EA marshalling: the generic HLE adapter passes PPC r3.. verbatim, so
+  * pointer arguments are guest effective addresses, not host pointers. Translate
+  * through vm_base before dereferencing. */
+@@ -711,7 +713,9 @@ s32 cellHttpRecvResponse(CellHttpTransId transId, void* buf, u32 size,
          if (want == 0)
              break;
  
@@ -23887,6 +23919,32 @@ index 0000000..7b71868
 +}
 +
 +#endif /* PS3RECOMP_GUEST_VM_H */
+diff --git a/runtime/platform/mingw_posix.h b/runtime/platform/mingw_posix.h
+new file mode 100644
+index 0000000..417cdb9
+--- /dev/null
++++ b/runtime/platform/mingw_posix.h
+@@ -0,0 +1,20 @@
++/* Forced into every MinGW-w64 translation unit (CMakeLists.txt): the POSIX
++ * time and scheduling calls the Linux build takes from glibc headers. MinGW's
++ * winpthreads provides clock_gettime, nanosleep and sched_yield behind
++ * <pthread.h>/<sched.h>; files written for Linux include neither. */
++#ifndef PS3RECOMP_MINGW_POSIX_H
++#define PS3RECOMP_MINGW_POSIX_H
++#ifdef __MINGW32__
++#include <time.h>
++#include <pthread.h>
++#include <sched.h>
++#ifndef TIME_UTC
++#define TIME_UTC 1
++static inline int ps3_timespec_get(struct timespec* ts, int base)
++{
++    return base == TIME_UTC && clock_gettime(CLOCK_REALTIME, ts) == 0 ? base : 0;
++}
++#define timespec_get ps3_timespec_get
++#endif
++#endif
++#endif
 diff --git a/runtime/ppu/ppu_context.h b/runtime/ppu/ppu_context.h
 index cf7f206..34ca4b8 100644
 --- a/runtime/ppu/ppu_context.h
