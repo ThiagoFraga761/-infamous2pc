@@ -996,3 +996,368 @@ f_5C98(rec):
 5. API+68 and IN2.w2 (0x40, 0xD9: a sequence?) are still unknown. Neither affects the command words.
 6. IN1+0xA0, +0xA2 and +0xA4, +0xAA, +0xAC: their op owners are unknown (only mat_on tests the last three).
 7. Methods 0x0B00 (value 0x2DC4) and the meaning of format types 1/3/5 rest on the usual NV40/RSX method map. Bit-exactness does not depend on it.
+
+## 11. Fallback branches, second round (types 0 and 2)
+
+### 11.0 Status and how it was proven
+
+- New captures: `work/runs/ec5f/io_fb/`, 40000 transfers taken with the native
+  path on, so they hold (almost only) the jobs that fell back: 785 complete jobs
+  in 5 SPU contexts, 317 of them with a fallback reason or a command block.
+- The oracle now tests the port's own code. `oracle/portdrv.c` `#include`s
+  `work/port/ec5f_native.c`, rebuilds guest memory from the GET captures of one
+  job (every GET of the job's window, in order), runs `run()`, links the blocks
+  with the ring addresses the capture shows (ATOMSEQ) and writes them with the
+  32-byte record. `pcmp.py` compares them with the captured PUTs (used part, and
+  the record); `dt2.py` is the differential test against the SPU replay
+  (`harness.c`) on patched inputs, for either capture set. `oracle/native.c`
+  (round 1) is kept but no longer extended.
+- Results with the port as of this section (`work/port/ec5f_native.c`):
+  - old captures: 52/52 jobs, 44/44 blocks byte-exact (unchanged);
+  - io_fb: **250 of the 317 fallback jobs now run natively, all 250 byte-exact**
+    (64 command blocks and 250 records). The 67 others still fall back (11.10).
+    Their original reasons: IN1[9] 128, slot 12 44, slot 4 24, type 1/3/4 with
+    no accepted object 45, runtime bits (op, const, kind) 7, others 2.
+  - differential tests against the SPU replay, all passing: 48 IN1[9] boxes
+    (`t_in19.py`), 84 side slots (`t_side.py`), 55 constant types 1..3
+    (`t_const.py`), 150 ops 0/12 (`t_ops.py`; random material data, every
+    branch of 0x47E8/0x48C8/0x4A60 taken both ways, checked with gcov, op order
+    rotated, slots -1 and 0x8000), 120 matrix kinds 2/10/11 (`t_kind.py`), 116
+    ops 4/14 (`t_op4.py`; the other 20 cases there make the port fall back by
+    design: idx > 6, or material read past the fetch), 140 jobs whose objects
+    are all rejected, types 1..4 included (`t_defer.py`), and 24/25 of round
+    1's tests (the 25th, `stencilE`, now un-rejects an object whose record was
+    never fetched; the port falls back on the missing memory, as it should).
+  - mutation checks: 47 deliberate errors in the new code (11.9); 42 are caught.
+
+### 11.1 Jobs where no object passes the filter (all types)
+
+- Up to the first object that passes object_filter (10.7.1), main does the same
+  for every pass type: queue selection, the per-object E/H GETs, the filter.
+  Nothing is emitted, no atomic is taken and no state is changed before that
+  object. The type dispatch (0x13964) and every IN1-only branch come after it.
+- So a job in which no object passes writes only its record, whatever its type,
+  materials, ops or side slots: all zero if no range is selected, else
+  `{0, 0xFFFFFFFC, 0, ...}` (10.4).
+- In io_fb this is 205 of the 317 fallback jobs (all types; 112 of the 128
+  IN1[9] jobs). The port now runs the type check and `precheck()` at the first
+  object that passes, not before the range selection.
+
+### 11.2 IN1[9]: box overlap barrier (type 0, D6D8 0xDA8C, 0xEAF8, 0x186C0, 0x5488)
+
+Runs after the BDD8 matrices and before the side slots (11.3), for every object,
+when byte IN1[9] != 0. Scratch state: scr+0x40 (min) and scr+0x50 (max), zeroed
+at job start with the matrices (main 0x12F84/0x12FA0), never per range.
+
+```c
+lo = (rec[0x10], rec[0x14], rec[0x18], rec[0x18]);  hi = (rec[0x1C], rec[0x20], rec[0x24], rec[0x24]);
+/* 0x186C0(out, box, M) */
+c  = fm(fa(lo, hi), splat(0.5f));  h = fs(hi, c);
+wc = fa(fma(M2, splat(c.z), fma(M1, splat(c.y), fm(M0, splat(c.x)))), M3);
+e  = fma(splat(h.z), |M2|, fma(splat(h.x), |M0|, fm(splat(h.y), |M1|)));   /* |.| = andc sign */
+mn = fs(wc, e);  mx = fa(wc, e);
+/* compared as (x, y, z, z) */
+if (all(fcgt(mx, scr.min)) && all(fcgt(scr.max, mn))) {     /* strict overlap with the previous object */
+    room(8); emit(0x00040110, 0);                           /* 0x5488: method 0x0110 = 0 (wait for idle) */
+    room(8); emit(0x00041FD8, 1);                           /*         method 0x1FD8 = 1 */
+    rec_out.w6 += 1;
+}
+scr.min = mn; scr.max = mx;
+```
+
+- M is the object matrix after the camera fix, all four lanes (10.7.5).
+- Record word 6 counts the barriers: the record is
+  `{first, bytes, draws, prog_uploads, prog_bytes, triangles, barriers, 0}`.
+- In io_fb only one object of 128 jobs overlapped; the tests force overlaps
+  with huge, equal, inverted, zero and denormal/NaN-pattern boxes.
+
+### 11.3 Side slots 12, 4, 17, 13, 14 (type 0, D6D8 0xDAB0..0xE0B0)
+
+slot[k] = S16(IN1+0x110+2k) as in 10.2. Each test is `slot >= 0`, each emit is
+one 0x1EFC vector (room 24, header 0x00141EFC, the slot sign-extended). Order,
+after 11.2 and before the slot-45 and 5..9 branches, then 6FE0 stencil:
+
+```c
+if (slot[12] >= 0) { X.x = csflt(E[2], 149);  emit(slot[12], X); }      /* E[2]/64; X: see below */
+if (slot[4] >= 0) {
+    f = csflt(E[2], 149);
+    v = (E[0] & 1) ? (1, -f, -f, -f) : (f != 1.0f ? (-1, f, f, f) : (0, 1, 0, 0));  /* != is fceq; (0,1,0,0) is LS 0x19950 */
+    emit(slot[4], v);
+}
+if (slot[17] >= 0) emit(slot[17], splat(csflt(E[1], 147)));             /* E[1]/256 */
+if (slot[13] >= 0) {                                                     /* sprite-sheet cell */
+    a = IN.w[0x240/4]; b = IN.w[0x244/4];
+    if (a*b == 0) HALT;                       /* heqi: the SPU job stops; the port falls back (FB_SIDE) */
+    fr = H.w2 % (a*b); row = fr / a; col = fr % a;                       /* u32 */
+    A = csflt(a, 155); B = csflt(b, 155);                                /* signed */
+    ia = fma(fnms(fm(1, fi(A, frest(A))), A, 1), fi(A, frest(A)), fm(1, fi(A, frest(A))));   /* 1/a, one Newton step */
+    ib = same for B;
+    emit(slot[13], (fm(ia, cuflt(col)), fm(ib, cuflt(row)), ia, ib));
+    if (slot[14] >= 0) emit(slot[14], (IN.w[0x248/4], H.w1, 0, 0));      /* slot 14 is only tested here */
+}
+```
+
+- H is the 48-byte header (main passes its LS copy as D6D8's r7).
+- **Slot 12 emits a stack quad**, X = D6D8's sp+0x30 (= main's sp - 0x210). Only
+  lane x is written; y, z, w are whatever the stack held:
+  - 7C18's prologue saves main's r112 there (7C18's frame is 0x340). main's r112
+    is main's r10 argument (0x12CA8), kept for the whole object loop. So after a
+    7C18 call, X = main's r10 quad. In-game its lanes y..w are (0x900, 0, 0).
+  - Before the first 7C18 call of the job, X is what local store held at job
+    start (a previous job's stack).
+  - No other function main calls before D6D8 reaches that address: the
+    deepest other chains are 15E78 -> 18508 -> 14160 (0x1F0 below main's sp)
+    and 143F0 -> 18508 -> 14160 (0x1A0). D6D8 itself writes it only at 0xDAF4.
+  - The port keeps X: read from LS at entry (sp from gpr[1] at 0x12C50, minus
+    0x970), set to gpr[10] at every 7C18 call, x written by slot 12, and
+    written back to LS when the job is published natively.
+
+### 11.4 Material constant types 1, 2, 3 (15E78 jump table 0x15FB4)
+
+The table at 0x15FB4 (12 entries) has: type 0 0x16188, 1 0x15FE4, 2 0x164C0,
+3 0x16888, 4 0x16940, 5 0x16B80, 6 0x174C4, 7 0x17858, 8 0x16DBC, 9 0x170B4,
+10 0x17378, 11 0x17740. Types 0..3 are one routine with a different change test:
+
+```c
+case 0..3:
+    if (old && all(fceq(np[0..type], op[0..type]))) break;   /* 1, 2, 3 or 4 words; type 2 compares (x,y,z,z) */
+    if ((type == 0 || type == 2) && (d & 0x8000)) FALLBACK;   /* sRGB: pow() path at 0x161D0 / 0x165A0 */
+    room(24); emit(0x00141EFC, slot, np[0], np[1], np[2], np[3]);   /* 0x16028 */
+```
+
+- Types 1 and 3 have no sRGB variant.
+- Type 6 patches constants into the fragment program at P.w0 and sets the
+  upload flag (P+0x10): it belongs to the fragment-program path (10.7.9) and
+  still falls back. Types 5, 7..11 were not read.
+- In io_fb: type 2 in 18 jobs, type 6 in 4.
+
+### 11.5 Per-object ops 0 and 12 (7C18 jump table 0x7D8C)
+
+Table 0x7D8C (ops 0..14): 0 0x8098, 1 0x81F0, 2 0x83E8, 3 0x8530, 4 0x9BA0,
+5 0x89F8, 6 0x8C08, 7 0x8DE0, 8 0x90E8, 9 0x9228, 10 0x9548, 11 0x7DC8,
+12 0x9F38, 13 0x9B98, 14 0x9BA0.
+
+Both read t = IN.w[0x160/4] (a time) and E[1], E[2]. All arithmetic is on lane 0
+of splats; `dv(n, d)` is `q = fm(n, fi(d, frest(d))); fma(fnms(q, d, n), fi(d, frest(d)), q)`;
+`trunc(x)` is `csflt(cflts(x, 173), 155)`.
+
+**Op 12 (0x9F38)**: 4 bytes of op data (`rate`), slot IN1+0xAC (skipped if < 0).
+
+```c
+x  = fma(rate, t, csflt(E[1], 147));
+y  = fm(x, 0x3F7FF800);  y = fma(y, 0x39002000, y);
+ok = |x| < 0x7F800000 && |y| < 0x49800000;                    /* fcmgt */
+n  = trunc(|y|);  r = (|x| > 2|x| - n) ? n - 1 : n;  if (!(|x| > 2|x| - (n+1))) r = n + 1;
+r  = copysign(r, y);
+emit(slot, (ok ? fs(x, r) : 0, 0, 0, 0));                      /* room 24 */
+```
+
+**Op 0 (0x8098 -> 0x4A60, 0x48C8, 0x47E8)**: 24 bytes `d0..d5` (floats; d2 is
+also tested as an integer, bit 0), slot IN1+0xA4. **Only slot == -1 (0xFFFF)
+skips** (ceqhi -1); any other value is emitted, sign-extended. The 24 bytes are
+consumed either way.
+
+```c
+f47E8(a, b, c, d):                          /* one axis: a timeline of loops of length d */
+    run = d >= 30 && b >= 0;                /* fcgt(30, d) / fcgt(0, b) */
+    s = fa(run ? 0 : dv(c, d), b);  q = dv(a, s);
+    fl = |q| < 2^23 ? (trunc(q) > q ? trunc(q) - 1 : trunc(q)) : q;
+    hi = fm(fl, c);  lo = run ? 0 : fm(d, fma(b, fs(-1, fl), a));
+    return hi > lo ? hi : lo;
+f48C8(a, b, c, d, e, f, g) -> (A, B):       /* two phases */
+    p = fa(dv(c, d), b);  r = fa(dv(f, g), e);  per = fa(p, r);
+    n = trunc(dv(a, per));  n1 = csflt(cflts(dv(a, per)) + 1);  pn = fm(per, n);
+    late = fa(p, pn) > a;  early = fm(per, n1) > a;
+    A = (late || !early) ? f47E8(fnms(r, n, a), b, c, d) : fm(c, n1);
+    B = (pn <= a && late) ? fm(f, n) : f47E8(fnms(p, n1, a), e, f, g);
+op0:
+    a0 = |d0|; a1 = |d1|;
+    s0 = (d2 & 1) ? csflt(E[1], 147) : 0;  s1 = (d2 & 1) ? csflt((E[1] << 4) + (E[1] >> 4), 147) : 0;
+    tt = E[2] ? t : 0;
+    u0 = a0 == 0 ? 0 : dv(fm(s0, fa(d3, dv(1, a0))), d4);
+    v0 = a1 == 0 ? 0 : dv(fm(s1, fa(d3, dv(1, a1))), d5);
+    u = fa(u0, tt); v = fa(v0, tt);
+    if (d3 == 0)       { x = fm(a0, u); y = fm(a1, v); }
+    else if (a0 == 0)  { x = 0; y = f47E8(v, d3, d5, a1); }
+    else if (a1 == 0)  { x = f47E8(u, d3, d4, a0); y = 0; }
+    else               (x, y) = f48C8(fa(v0, u), d3, d4, a0, d3, d5, a1);
+    if (d0 < 0) x = -x;  if (d1 < 0) y = -y;
+    emit(slot, (fs(x, trunc(x)), fs(y, trunc(y)), 0, 0));      /* 0x46F8 = room 24 */
+```
+
+- The equality tests are fceq on lane 0; the order tests are fcgt.
+- In io_fb ops 0 and 12 appear together in 15 jobs (FB_OP); all byte-exact.
+
+### 11.6 Validation notes
+
+- Guest memory in the driver comes from the job's own GETs. A test that un-rejects
+  an object whose record the SPU never fetched makes the port fall back on the
+  missing memory (FB_EA), so the tests patch E by EA and keep bit 27.
+- The in-game r10 lanes (0x900 in y) are needed to reproduce slot 12 against the
+  captures (`pcmp.py` passes them for io_fb); the SPU replay's wrapper gives
+  (5, 0, 0, 0), and `dt2.py` uses that on both sides, or overrides it (APIL/R10,
+  and STKQ for the initial stack quad).
+
+### 11.7 Matrix kinds 2, 10 and 11 (BDD8 type 0, B010 type 2)
+
+All of them are inside the "M changed" block (10.7.6), after the kinds already
+modelled: BDD8 order 0, 1, **2**, 3, **10**, **11**; B010 order 1, **11**.
+
+**The inverse of M's 3x3** (BDD8 prologue 0xBDD8..0xBFD4, computed for every
+object before the change test; B010 recomputes it at 0xB510; kind 2 again at
+0xC4E8, same values). With `yzx(v) = (v.y, v.z, v.x, v.x)` and
+`cross(a, b) = yzx(fnms(b, yzx(a), fm(a, yzx(b))))`:
+
+```c
+A = cross(M1, M2); B = cross(M2, M0); C = cross(M0, M1);       /* the w lanes of M do not matter */
+P = fm(C, M2); det = fa(fa(P.x, P.y), P.z);
+e = fi(det, frest(det)); inv = fma(fnms(e, det, 1), e, e);     /* iv3 = (inv, inv, inv, 0) */
+c0 = (A.x, B.x, C.x, 0); c1 = (A.y, B.y, C.y, 0); c2 = (A.z, B.z, C.z, 0);
+Minv = { fm(c0, iv3), fm(c1, iv3), fm(c2, iv3),
+         fma(fma(c2, splat(-T.z), fma(c1, splat(-T.y), fm(c0, splat(-T.x)))), iv3, (0, 0, 0, 1)) };   /* T = M3 */
+```
+
+- **Kind 2 (0xC4E8)**, 3x4, room 56: row r = (A[r], B[r], C[r]) * inv for r = x, y, z
+  (i.e. row 0 = A/det, row 1 = B/det, row 2 = C/det), and lane w of row r is
+  `t[r]`, `t = fma(fma(c2, -0, fma(c1, -0, fm(c0, -0))), iv3, (0,0,0,1))`, a
+  signed zero (the translation part with a zero translation).
+- **Kind 10 (0xCA08)**, 1 vector, room 24: `p = IN[0x110..0x11B]`;
+  `fa(fma(Minv2, splat(p.z), fma(Minv1, splat(p.y), fm(Minv0, splat(p.x)))), Minv3)`,
+  the point (camera?) in object space.
+- **Kind 11** (B010 0xB510 and BDD8 0xCB20), 3x4, room 56: W = the 4x4 at IN+0xD0.
+
+```c
+for (r = 0; r < 3; r++) {
+    q = fma(Minv2, splat(W[r].z), fma(Minv1, splat(W[r].y), fm(Minv0, splat(W[r].x))));
+    if (type == 0 && r < 2) q = -q;                       /* BDD8 negates rows 0 and 1 (xor sign), B010 does not */
+    sq = fm(q, q); l = splat(fa(fa(sq.x, sq.y), sq.z));
+    rs = fi(l, frsqest(l)); rs = fma(fnms(l, fm(rs, rs), 1), fm(rs, 0.5), rs);
+    n  = fcgt(l, 0x0DA2425F) ? fm(q, rs) : 0;
+    if (r < 2) n = fm(IN1[0x179] ? -1.0f : 1.0f, n);
+    row[r] = (n.x, n.y, n.z, 0);
+}
+```
+
+  Both also compute `fa(q3, Minv3)` for W row 3 and store it on the stack; it is not emitted.
+- In io_fb: kind 2 in 6 jobs, kind 11 (type 2) in 2; kind 10 and type-0 kind 11
+  are covered by the differential tests only (`t_kind.py`, 120 tests, including
+  singular and degenerate transforms, zero rows of W, the IN1[0x179] flag).
+
+### 11.8 Per-object ops 4 and 14 (7C18 0x9BA0)
+
+Ops 4 and 14 share the code; op 14 differs in one word. 4 bytes of op data:
+`idx`. Unit = S16(IN1+0xA6), skipped if < 0. The data is consumed either way.
+
+```c
+if (unit < 0 || scr.tex194 == idx) break;     /* scr+0x194, set to -1 at job start (main 0x12FD4), not per range */
+scr.tex194 = idx;
+t = IN + 0x24C + 44*idx;                      /* 7 descriptors in IN (11 words each) */
+a = t[2]; if (op == 14) a = (a & 0xFF0FFFFF) | 0x00700000;
+room(60);
+emit(0x00201A00 + 32*unit, t[0], t[1], a, t[3], t[4], t[5], t[6], t[7],   /* TEXTURE_OFFSET..BORDER_COLOR */
+     0x00041840 + 4*unit, t[8],                                         /* CONTROL3 */
+     0x00040B00 + 4*unit, t[9],                                         /* the 0x0B00 word, here from the descriptor */
+     0x00041D00 + 4*unit, t[10]);
+if (S16(IN1+0xAC) >= 0)                                                 /* the op-12 slot */
+    { room(24); emit(0x00141EFC, slot_AC, (IN.w[0x2FC/4 + idx] == 1 ? 1.0f : 0, 0, 0, 0)); }
+```
+
+- `idx` is not bounded by the SPU (it reads whatever LS holds past IN). The port
+  takes idx 0..6 only (the descriptors that lie inside IN) and falls back
+  (FB_OP4) otherwise.
+- This path does not touch the 143F0 texture cache (scr+0x70, scr+0x170).
+
+### 11.9 Mutation checks (`mut.py`, `muts1..4.json`)
+
+Each mutation is applied to a copy of the port, built into a driver, and run
+through `pcmp.py` (captures) and the matching differential tests.
+
+- 47 mutations; 42 are caught.
+- Not caught:
+  - three are equivalent: `fm(1.0, e)` -> `e` in 11.3; the sRGB test on type 2
+    in 15E78 (precheck already sends that case to the SPU); the kind-2 w lanes
+    -> 0 (they are always +0).
+  - op 12's "n + 1" correction (11.5): for finite x the scaled y is never below
+    x, so the branch is unreachable in range. It is kept as the SPU has it.
+  - the operand order of the box extent in 11.2 (h.y first): it changes only
+    the rounding of `e`, and the outcome is a strict comparison. No test hit a tie.
+- Caught, among others: the IN1[9] counter, compare direction and box update;
+  the barrier word; slot 12's stack quad (r10 at 7C18, the LS value at entry);
+  every scale, sign and lane of slots 4, 12, 13, 14, 17; signed instead of
+  unsigned division; the constant change-test width; every branch condition of
+  op 0; op 12 data consumption; kind 2 transposition, det order, the Newton
+  step; kind 10 translation; kind 11 negation, sign flag, threshold, rsqrt step;
+  the op-4 cache, op-14 ADDRESS mask, the AC flag and the 0x1D00 unit; and
+  dropping the type check when the precheck is deferred.
+
+### 11.10 What still falls back, and why
+
+In io_fb, 67 of 317 fallback jobs: 49 FB_TYPE, 14 the fragment-program cluster,
+4 FB_STALE.
+
+**Pass types 1 and 3** (0xCFA0, 0xBAE0) share **0x7160**, which is not a pure
+command emitter:
+
+- It GETs 80 bytes from the EA at rec+0x38 (per-part descriptors) and loops over
+  the parts.
+- When rec.w1 bit 8 is clear (0x7920), it atomically takes 128 bytes from the
+  heap at IN[0x20] (limit IN[0x28], 0x190D8) and PUTs a 48-byte transform there
+  (cmd 0x20 at 0x79DC). If the heap is full, the object is skipped (0x7820).
+- Per part, **0x5318** reserves a region of the command buffer: pads the cursor
+  to 16 with zero words, then fills it with self-skipping JUMPs
+  (`0x20000000 | (ea + delta)`, one per 128 bytes), using 0x14130 for the EA of
+  the cursor. Something later writes into that region.
+- **0x4740** then takes a 32-byte slot from a pool line (GETLLAR/PUTLLC; u16
+  count at +0, u16 limit at +8, base EA at +12; pools at 0x00A26180 and
+  0x00A26200 in the captures) and PUTs a 32-byte record there (0x77AC, from
+  out+0x20). In-game type-3/1 jobs do PUT these (27 records in one type-3 job,
+  223 in one type-1 job).
+- **If the pool is full, 0x77E8 rolls the cursor back** to before the region.
+- So the command stream depends on the atomics' results (skip, rollback) and
+  needs the ring EA of the cursor while building (0x5318, and the record).
+  The native design here (build privately, take the ring addresses at publish,
+  fall back with nothing written) cannot do that.
+- The SPU replay cannot check it either without seeding the pool lines and the
+  heap (`ATOM=`); with empty lines the replay takes the rollback path.
+
+**Pass type 4** (0xF2C8, 3682 instructions) uses 0x61E8 (atomic + DMA), the
+6AA0 upload and the 9216-byte table. Not started.
+
+**The fragment-program cluster**: op 11's second output (slot IN1+0xB0),
+constant types 6 and 11, slots 43 and 45 all write into the fragment program at
+P.w0 through **0x152B0** (447 instructions) or directly (type 6), and raise the
+upload flag. **0x6AA0's upload** (0x6C50) then takes `align128(size)` from the
+same heap (IN[0x20]); if the heap is full or the size is 0, it emits nothing.
+Same problem as above: the stream depends on an atomic.
+
+**FB_STALE** (4 jobs): material reads past the fetched size. The SPU reads its
+three LS material buffers (scr+0xE80 + 0x300*(m%3)), which still hold earlier
+materials. Reproducible in principle: model the three buffers, starting from
+the LS at job entry, and write the last three materials back after a native job.
+
+**Proposed design for the atomic paths** (not implemented):
+
+1. Run the job once as now ("probe"), with every atomic assumed to succeed and
+   no side effect. Any fallback ends there, nothing written.
+2. If the probe found none, run it again "committed": ring blocks allocated
+   one at a time, as 0x14160 does, so 0x14130 has real EAs; heap and slot
+   atomics done for real; their PUTs done; failures follow the SPU's paths
+   (skip, rollback). A committed run must not fall back, so it may only read
+   memory the probe read.
+3. Validate with the replay seeded with pool and heap lines (ATOM env), and with
+   full and empty pools.
+
+### 11.11 Open questions (adds to 10.11)
+
+1. The consumer of 0x5318's reserved regions and of the 0x4740 slot records
+   (another job, or the PPU?). It decides whether stale or missing records hurt.
+2. Slots 5..9 (D6D8 0xE4B0, 0xE9B0: 0x7A60, 0x4EA0, the pow polynomial of the
+   sRGB path, 0xA428 with the 3072-byte table) were not decoded. In io_fb they
+   appear only with the fragment-program upload.
+3. Method 0x0110 and 0x1FD8 (11.2) are read as wait-for-idle and an invalidate,
+   from the usual NV40 map. The bytes do not depend on it.
+4. **SPU replay vs runtime helpers**: with garbage IN+0x340 (huge scales), the
+   replay (`spu_interp.c`) flushes a few tiny MVP products (about 1e-35) to 0
+   where the helpers the port uses keep them. It is outside the new code and
+   real inputs do not reach it (mode 2 matched 100% in-game), but one of the
+   two float paths differs from the other at the bottom of the range.
