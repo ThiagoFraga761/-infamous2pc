@@ -7691,7 +7691,7 @@ index dab4380..e19afc2 100644
  
  /* ---- lifecycle -------------------------------------------------------- */
 diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
-index 5c50e4a..4f2574c 100644
+index 5c50e4a..a236572 100644
 --- a/libs/video/rsx_draw_engine.c
 +++ b/libs/video/rsx_draw_engine.c
 @@ -1,3 +1,9 @@
@@ -7891,7 +7891,31 @@ index 5c50e4a..4f2574c 100644
  #undef ENG_HASH_FIELD
      return hash;
  }
-@@ -518,29 +614,40 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
+@@ -509,6 +605,23 @@ static const void* eng_surface_seed(u32 location, u32 offset, u32 w, u32 h,
+     return g.tex_staging;
+ }
+ 
++/* Every colour and depth target's (location, offset), as bits: a texture
++ * address with its bit clear is no target, and its bind skips the scans of
++ * both tables (sink_bind_textures does ~12,000 of them a frame in the heavy
++ * views). Rebuilt when a target is created; a bit left by a reused slot only
++ * costs a scan. */
++static u64 s_tbloom[64];
++static inline u32 eng_tbloom_bit(u32 location, u32 offset)
++{
++    return ((offset >> 4 ^ location << 28) * 0x9E3779B1u) >> 20;
++}
++static void eng_tbloom_rebuild(void);
++static inline int eng_tbloom_maybe(u32 location, u32 offset)
++{
++    const u32 b = eng_tbloom_bit(location, offset);
++    return (int)(s_tbloom[b >> 6] >> (b & 63) & 1u);
++}
++
+ /* The colour target for this (location, offset), created or reallocated when
+  * the size or format moved. Returns a slot index, or ENG_INVALID.
+  * rsx_live_draw.c's surface_get (2605-2690). */
+@@ -518,29 +631,40 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
      if (!want_w) want_w = g.width;
      if (!want_h) want_h = g.height;
  
@@ -7947,7 +7971,7 @@ index 5c50e4a..4f2574c 100644
      }
  
      u32 seed_row = 0;
-@@ -548,16 +655,18 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
+@@ -548,16 +672,19 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
                                          want_fmt, &seed_row);
      const u32 handle = g.be->color_target_create(g.be->user, want_fmt,
                                                   want_w, want_h, seed, seed_row);
@@ -7965,11 +7989,12 @@ index 5c50e4a..4f2574c 100644
 +    s->stamp = ++s_surf_clock;
      if (slot == g.n_surfaces) g.n_surfaces++;
 -    { static u32 logs = 0; if (logs++ < 16)
++    eng_tbloom_rebuild();
 +    { static u32 logs = 0; if (__atomic_load_n(&logs, __ATOMIC_RELAXED) < 16 && __atomic_fetch_add(&logs, 1, __ATOMIC_RELAXED) < 16)
          fprintf(stderr, "[rsx engine] surface %u:0x%08X %ux%u fmt %d%s\n",
                  location, offset, want_w, want_h, (int)want_fmt,
                  seed ? " (seeded from guest memory)" : ""); }
-@@ -570,6 +679,14 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
+@@ -570,6 +697,14 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
   * vtable path's target_for binds by. Resolution stops at the first member
   * that cannot be created, as that path stops at the first gap. Returns how
   * many were resolved, or 0. */
@@ -7984,7 +8009,7 @@ index 5c50e4a..4f2574c 100644
  static u32 eng_current_target_set(u32 slots[RSX_BE_MAX_COLOR_TARGETS])
  {
      rsx_dsp_surface sf;
-@@ -582,6 +699,7 @@ static u32 eng_current_target_set(u32 slots[RSX_BE_MAX_COLOR_TARGETS])
+@@ -582,6 +717,7 @@ static u32 eng_current_target_set(u32 slots[RSX_BE_MAX_COLOR_TARGETS])
                                        sf.clip_w, sf.clip_h, fmt);
      if (first == ENG_INVALID) return 0;
      slots[0] = first;
@@ -7992,7 +8017,7 @@ index 5c50e4a..4f2574c 100644
      u32 n = 1;
  
      static const u32 mrt_from[3] = {
-@@ -599,11 +717,63 @@ static u32 eng_current_target_set(u32 slots[RSX_BE_MAX_COLOR_TARGETS])
+@@ -599,11 +735,63 @@ static u32 eng_current_target_set(u32 slots[RSX_BE_MAX_COLOR_TARGETS])
          int seen = 0;
          for (u32 k = 0; k < n; k++) if (slots[k] == slot) seen = 1;
          if (seen) break;
@@ -8056,7 +8081,7 @@ index 5c50e4a..4f2574c 100644
  static u32 eng_current_surface(void)
  {
      u32 slots[RSX_BE_MAX_COLOR_TARGETS];
-@@ -612,6 +782,16 @@ static u32 eng_current_surface(void)
+@@ -612,6 +800,16 @@ static u32 eng_current_surface(void)
  
  /* ---- per-zeta depth ------------------------------------------------------ */
  
@@ -8073,7 +8098,7 @@ index 5c50e4a..4f2574c 100644
  /* One depth target per guest zeta address. Sharing a single resource across a
   * title's shadow, scene and post passes cross-contaminates later depth tests;
   * upstream's ef3271b records that as "the black player-character mass". */
-@@ -650,28 +830,68 @@ static u32 eng_zdepth_get(u32 location, u32 offset, u32 rt_w, u32 rt_h)
+@@ -650,28 +848,69 @@ static u32 eng_zdepth_get(u32 location, u32 offset, u32 rt_w, u32 rt_h)
      z->location = location; z->offset = offset;
      z->w = want_w; z->h = want_h;
      z->handle = handle;
@@ -8085,6 +8110,7 @@ index 5c50e4a..4f2574c 100644
      z->snapshot_valid = 0;
 +    z->snapshot_rgba_valid = 0;
      if (slot == g.n_zdepths) g.n_zdepths++;
++    eng_tbloom_rebuild();
      return slot;
  }
  
@@ -8145,7 +8171,7 @@ index 5c50e4a..4f2574c 100644
      return tex;
  }
  
-@@ -716,19 +936,67 @@ static u64 eng_texture_content_hash(u32 location, u32 offset, u32 span,
+@@ -716,19 +955,67 @@ static u64 eng_texture_content_hash(u32 location, u32 offset, u32 span,
  {
      const u8* src = span ? eng_guest_ptr(NULL, location, offset, span) : NULL;
      if (!src) { *readable = 0; return 0; }
@@ -8219,7 +8245,7 @@ index 5c50e4a..4f2574c 100644
  static int eng_staging_reserve(u32 bytes)
  {
      if (g.tex_staging_cap >= bytes) return 1;
-@@ -742,7 +1010,7 @@ static int eng_staging_reserve(u32 bytes)
+@@ -742,7 +1029,7 @@ static int eng_staging_reserve(u32 bytes)
  /* Decode a guest texture out of guest memory and hand every face and level to
   * the backend. Returns the backend handle, or 0. */
  static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
@@ -8228,7 +8254,7 @@ index 5c50e4a..4f2574c 100644
  {
      rsx_tex_level lv[RSX_MAX_TEXTURE_LEVELS];
      const u32 nlv = rsx_texture_mip_chain(fmt, w, h, levels, pitch, lv);
-@@ -754,8 +1022,12 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+@@ -754,8 +1041,12 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
      const u8* src = eng_guest_ptr(NULL, location, offset, span);
      if (!src) return 0;
  
@@ -8243,7 +8269,7 @@ index 5c50e4a..4f2574c 100644
      if (!handle) return 0;
  
      for (u32 f = 0; f < faces; f++) {
-@@ -763,7 +1035,7 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+@@ -763,7 +1054,7 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
          for (u32 m = 0; m < nlv; m++) {
              const rsx_tex_layout* tl = &lv[m].tl;
              if (!eng_staging_reserve(tl->dst_row_bytes * tl->rows)) {
@@ -8252,7 +8278,7 @@ index 5c50e4a..4f2574c 100644
                  return 0;
              }
              rsx_texture_decode(g.tex_staging, tl->dst_row_bytes,
-@@ -783,39 +1055,124 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+@@ -783,39 +1074,124 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
   * cache full evicts the least recently used entry rather than returning
   * nothing: returning white "made the recovered orphanage render as flat
   * green/black geometry" (rsx_live_draw.c:2326-2334). */
@@ -8328,6 +8354,11 @@ index 5c50e4a..4f2574c 100644
 +            e->span = nspan;
 +            e->content_hash = hash;
 +            e->wt_stamp = probe.wt_stamp;
++            e->last_hash_frame = g.frames;
++        }
++        const u32 span = e->span;
++        if (!span) return 0;
++        if (e->handle && e->last_hash_frame != g.frames) {
              e->last_hash_frame = g.frames;
 -            if (readable && hash != e->content_hash) {
 -                const u32 fresh = eng_texture_upload(location, offset, fmt, w, h,
@@ -8336,11 +8367,6 @@ index 5c50e4a..4f2574c 100644
 -                    g.be->texture_release(g.be->user, e->handle);
 -                    e->handle = fresh;
 -                    e->content_hash = hash;
-+        }
-+        const u32 span = e->span;
-+        if (!span) return 0;
-+        if (e->handle && e->last_hash_frame != g.frames) {
-+            e->last_hash_frame = g.frames;
 +            /* A texture that changed in each of the last few frames -- one an
 +             * SPU job or a video decoder rewrites every frame, inFAMOUS 2's
 +             * lighting and AO results among them -- is uploaded without being
@@ -8391,7 +8417,7 @@ index 5c50e4a..4f2574c 100644
      u32 index;
      u32 evicted = 0;
      if (g.n_textures < ENG_MAX_TEXTURES) {
-@@ -833,14 +1190,15 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+@@ -833,14 +1209,15 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
      e.location = location; e.offset = offset; e.format = fmt;
      e.width = w; e.height = h; e.pitch = pitch;
      e.remap = remap; e.cubemap = (u32)(cube != 0);
@@ -8410,7 +8436,7 @@ index 5c50e4a..4f2574c 100644
      return e.handle;
  }
  
-@@ -866,6 +1224,28 @@ static void eng_decode_sampler(u32 filter, u32 wrap, u32 control0,
+@@ -866,6 +1243,28 @@ static void eng_decode_sampler(u32 filter, u32 wrap, u32 control0,
      out->max_lod = out->mip_present ? (float)((control0 >> 7) & 0xFFFu) / 256.0f
                                      : 0.0f;
      if (out->max_lod < out->min_lod) out->max_lod = out->min_lod;
@@ -8439,7 +8465,7 @@ index 5c50e4a..4f2574c 100644
  }
  
  /* ---- pipelines ----------------------------------------------------------- */
-@@ -886,7 +1266,7 @@ static u32 eng_cube_mask(void)
+@@ -886,7 +1285,7 @@ static u32 eng_cube_mask(void)
      u32 mask = 0;
      for (u32 u = 0; u < RSX_DSP_NUM_TEXTURES; u++) {
          rsx_dsp_texture t;
@@ -8448,7 +8474,7 @@ index 5c50e4a..4f2574c 100644
          /* A cube face is square by construction, so a non-square image
           * cannot be one; the fragment program is compiled against this mask
           * and a texturecube slot filled with a 2D texture is a validation
-@@ -897,41 +1277,220 @@ static u32 eng_cube_mask(void)
+@@ -897,41 +1296,220 @@ static u32 eng_cube_mask(void)
      return mask;
  }
  
@@ -8595,7 +8621,7 @@ index 5c50e4a..4f2574c 100644
 +            ds_memo_hit[0]++;
 +            return m;
 +        }
-+    }
+     }
 +    ds_memo_miss[0]++;
 +    const u32 instrs = rsx_vp_program_size_instrs(uc, (RSX_DSP_VP_INSTR - start) * 16u);
 +    if (!instrs) return NULL;
@@ -8618,7 +8644,7 @@ index 5c50e4a..4f2574c 100644
 +        m->vpc_full = 0;
 +        m->vpc_lo = cu.lo <= cu.hi ? cu.lo : 0;
 +        m->vpc_n = cu.lo <= cu.hi ? cu.hi - cu.lo + 1u : 0;
-     }
++    }
 +    return m;
 +}
  
@@ -8695,7 +8721,7 @@ index 5c50e4a..4f2574c 100644
  }
  
  /* The layout the active vertex program actually reads. An uncertain analysis
-@@ -939,13 +1498,13 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
+@@ -939,13 +1517,13 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
  static void eng_vertex_layout(rsx_vertex_layout_plan* layout)
  {
      u32 mask = 0xFFFFu;
@@ -8716,7 +8742,7 @@ index 5c50e4a..4f2574c 100644
      }
      rsx_vertex_layout_plan_init(layout, mask);
  }
-@@ -1006,45 +1565,224 @@ static const char* const kEngFixedPS =
+@@ -1006,45 +1584,224 @@ static const char* const kEngFixedPS =
  "};\n"
  "float4 main(PSInput input) : SV_TARGET { return input.col0; }\n";
  
@@ -8954,7 +8980,7 @@ index 5c50e4a..4f2574c 100644
      }
      key = eng_fnv1a(&layout->mask, sizeof layout->mask, key);
      key = eng_fnv1a(&layout->stride, sizeof layout->stride, key);
-@@ -1052,13 +1790,41 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -1052,13 +1809,41 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
      /* How many colour attachments the pass will have is pipeline identity:
       * a host API matches the two against each other. */
      key = eng_fnv1a(&rt_count, sizeof rt_count, key);
@@ -9001,7 +9027,7 @@ index 5c50e4a..4f2574c 100644
      if (g.n_pipelines >= ENG_MAX_PIPELINES) return 0;
  
      u32 handle = 0;
-@@ -1071,18 +1837,37 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -1071,18 +1856,37 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
          vi = rsx_vp_decompile_compact_ex(vp_uc, vp_instrs * 16u, vtex_mask,
                                           layout->mask, s_vs_hlsl,
                                           sizeof s_vs_hlsl);
@@ -9045,7 +9071,7 @@ index 5c50e4a..4f2574c 100644
          fprintf(stderr, "[rsx engine] pipeline %016llx: %s vp %d, fp %d,"
                          " %u constants -> %s\n",
                  (unsigned long long)key, fixed ? "built-in" : "guest",
-@@ -1092,10 +1877,52 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -1092,10 +1896,52 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
      g.pipelines[g.n_pipelines].handle = handle;
      g.pipelines[g.n_pipelines].fixed = (u8)fixed;
      g.n_pipelines++;
@@ -9098,7 +9124,7 @@ index 5c50e4a..4f2574c 100644
  /* ---- draw accumulation --------------------------------------------------- */
  
  static void dc_reset(void)
-@@ -1106,18 +1933,28 @@ static void dc_reset(void)
+@@ -1106,18 +1952,28 @@ static void dc_reset(void)
      dc.fetch_ok = 1;
      dc.inl = NULL;
      dc.inl_bytes = 0;
@@ -9135,7 +9161,7 @@ index 5c50e4a..4f2574c 100644
      dc.refs[dc.n_refs].vertex_id = vertex_id;
      dc.refs[dc.n_refs].base_index = base_index;
      dc.n_refs++;
-@@ -1148,12 +1985,354 @@ static int dc_reserve_indices(u32 count)
+@@ -1148,12 +2004,354 @@ static int dc_reserve_indices(u32 count)
      return 1;
  }
  
@@ -9490,7 +9516,7 @@ index 5c50e4a..4f2574c 100644
      for (u32 b = 0; b < dc.n_arr && dc.fetch_ok; b++)
          for (u32 i = 0; i < dc.arr[b].count && dc.fetch_ok; i++)
              if (!dc_push_ref(dc.arr[b].first + i, 0)) dc.fetch_ok = 0;
-@@ -1168,6 +2347,19 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+@@ -1168,6 +2366,19 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
          /* The index array's location field is a DMA selector, not the
           * rsx_dsp location enum: 0 selects local memory. */
          const u32 ia_loc = ia.location ? RSX_LOCATION_MAIN : RSX_LOCATION_LOCAL;
@@ -9510,7 +9536,7 @@ index 5c50e4a..4f2574c 100644
  
          for (u32 b = 0; b < dc.n_idx && dc.fetch_ok; b++) {
              const u32 first = dc.idx[b].first, count = dc.idx[b].count;
-@@ -1177,6 +2369,16 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+@@ -1177,6 +2388,16 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
              if (count && start <= 0xFFFFFFFFull && bytes <= 0xFFFFFFFFull &&
                  start + bytes <= 0x100000000ull)
                  run = eng_guest_ptr(NULL, ia_loc, (u32)start, (u32)bytes);
@@ -9527,7 +9553,7 @@ index 5c50e4a..4f2574c 100644
              for (u32 i = 0; i < count && dc.fetch_ok; i++) {
                  const u8* p = run ? run + (size_t)i * esz
                      : eng_guest_ptr(NULL, ia_loc, ia.offset + (first + i) * esz, esz);
-@@ -1197,137 +2399,1608 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+@@ -1197,137 +2418,1622 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
      if (!dc.fetch_ok) return;
  
      dc.n_source_refs = dc.n_refs;
@@ -9747,11 +9773,6 @@ index 5c50e4a..4f2574c 100644
 -/* Which texture units this draw binds, and from where: a unit naming a
 - * registered colour surface samples that live target rather than guest
 - * memory (every post-process, shadow and reflection in a PS3 title is a
-- * render-to-texture read back through a texture unit), a unit naming a
-- * tracked zeta in DEPTH24_D8 samples its snapshot, and everything else is a
-- * guest upload (rsx_live_draw.c:5986-6062). */
--static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
--                              u32 current_zslot,
 +static u64 eng_geo_key(const rsx_vertex_layout_plan* layout, u32 prim)
 +{
 +    /* Initialised where dc_fetch would initialise it, so a miss does not do
@@ -10231,9 +10252,9 @@ index 5c50e4a..4f2574c 100644
 +/* Which texture units this draw binds, and from where: a unit naming a
 + * registered colour surface samples that live target rather than guest
 + * memory (every post-process, shadow and reflection in a PS3 title is a
-+ * render-to-texture read back through a texture unit), a unit naming a
-+ * tracked zeta in DEPTH24_D8 samples its snapshot, and everything else is a
-+ * guest upload (rsx_live_draw.c:5986-6062). */
+  * render-to-texture read back through a texture unit), a unit naming a
+  * tracked zeta in DEPTH24_D8 samples its snapshot, and everything else is a
+  * guest upload (rsx_live_draw.c:5986-6062). */
 +/* Texture units the current guest fragment program samples: a unit can stay
 + * enabled with a stale binding (a shadow pass keeps its own map bound), and a
 + * snapshot is only worth taking for one the program reads. */
@@ -10942,8 +10963,21 @@ index 5c50e4a..4f2574c 100644
 +    return on;
 +}
 +
-+static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
-+                              u32 current_zslot,
++static void eng_tbloom_rebuild(void)
++{
++    memset(s_tbloom, 0, sizeof s_tbloom);
++    for (u32 i = 0; i < g.n_surfaces; i++) if (g.surfaces[i].handle) {
++        const u32 b = eng_tbloom_bit(g.surfaces[i].location, g.surfaces[i].offset);
++        s_tbloom[b >> 6] |= 1ull << (b & 63);
++    }
++    for (u32 i = 0; i < g.n_zdepths; i++) if (g.zdepths[i].handle) {
++        const u32 b = eng_tbloom_bit(g.zdepths[i].location, g.zdepths[i].offset);
++        s_tbloom[b >> 6] |= 1ull << (b & 63);
++    }
++}
++
+ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
+                               u32 current_zslot,
                                u32 textures[RSX_BE_MAX_TEXTURES],
                                rsx_be_sampler_desc samplers[RSX_BE_MAX_TEXTURES])
  {
@@ -10972,6 +11006,9 @@ index 5c50e4a..4f2574c 100644
 +        mm->off_seen = 0;
          mask |= 1u << u;
 -        eng_decode_sampler(t.filter, t.wrap, t.control0, &samplers[u]);
+-
+-        int sampled = -1;
+-        for (u32 i = 0; i < g.n_surfaces; i++) {
 +        if (hit) samplers[u] = mm->samp;
 +        else eng_decode_sampler(t.filter, t.wrap, t.control0, &samplers[u]);
 +        if (s_nao.runs && eng_nao_bind(&t, &textures[u])) continue;
@@ -10985,14 +11022,14 @@ index 5c50e4a..4f2574c 100644
 +            continue;
 +        }
 +        mm->handle = 0;
- 
--        int sampled = -1;
++        const int maybe_target = eng_tbloom_maybe(t.location, t.offset);
++
 +        /* Several targets can share an address (one per size/format). Take
 +         * the one whose size matches the texture, else the newest; never one
 +         * this draw writes -- reading a target a pass is writing is undefined
 +         * on every API, and an MRT set writes more than one of them. */
 +        int sampled = -1, own_hit = 0, own_slot = -1;
-         for (u32 i = 0; i < g.n_surfaces; i++) {
++        for (u32 i = 0; maybe_target && i < g.n_surfaces; i++) {
              if (!g.surfaces[i].handle || g.surfaces[i].location != t.location ||
                  g.surfaces[i].offset != t.offset)
                  continue;
@@ -11065,7 +11102,8 @@ index 5c50e4a..4f2574c 100644
 +                              u, t.format, base_fmt, t.remap & 0xFFFF, t.width, t.height, current_zslot == i); }
 +              } }
          if (base_fmt == RSX_TEX_FMT_DEPTH24_D8) {
-             for (u32 i = 0; i < g.n_zdepths; i++)
+-            for (u32 i = 0; i < g.n_zdepths; i++)
++            for (u32 i = 0; maybe_target && i < g.n_zdepths; i++)
                  if (g.zdepths[i].location == t.location &&
                      g.zdepths[i].offset == t.offset && current_zslot != i) {
 -                    const u32 snap = eng_zdepth_snapshot(i);
@@ -11081,18 +11119,15 @@ index 5c50e4a..4f2574c 100644
 +                            : 0;
 +                        textures[u] = view ? view : snap;
 +                    }
-                     break;
-                 }
-             if (textures[u]) continue;
-         }
--        textures[u] = eng_texture_slot(t.location, t.offset, t.format,
--                                       t.width, t.height, t.mipmaps, t.pitch,
--                                       (int)t.cubemap, t.remap & 0xFFFFu);
++                    break;
++                }
++            if (textures[u]) continue;
++        }
 +        /* A colour format over a depth buffer reads the depth bytes (fog,
 +         * depth-of-field, SSAO); the copy reflects depth before this draw, so
 +         * the current zeta qualifies too. */
 +        if (base_fmt == 0x85u || base_fmt == 0x9Eu) {
-+            for (u32 i = 0; i < g.n_zdepths; i++)
++            for (u32 i = 0; maybe_target && i < g.n_zdepths; i++)
 +                if (g.zdepths[i].location == t.location && g.zdepths[i].offset == t.offset) {
 +                    const u64 tx0 = eng_ds_enabled() ? eng_ds_now() : 0;
 +                    const u32 snap = eng_zdepth_snapshot_rgba8(i, current_zslot == i);
@@ -11108,10 +11143,13 @@ index 5c50e4a..4f2574c 100644
 +                            : 0;
 +                        textures[u] = view ? view : snap;
 +                    }
-+                    break;
-+                }
-+            if (textures[u]) continue;
-+        }
+                     break;
+                 }
+             if (textures[u]) continue;
+         }
+-        textures[u] = eng_texture_slot(t.location, t.offset, t.format,
+-                                       t.width, t.height, t.mipmaps, t.pitch,
+-                                       (int)t.cubemap, t.remap & 0xFFFFu);
 +        { const u64 tx0 = eng_ds_enabled() ? eng_ds_now() : 0;
 +          textures[u] = eng_texture_slot(t.location, t.offset, t.format,
 +                                         t.width, t.height, t.mipmaps, t.pitch,
@@ -11120,10 +11158,10 @@ index 5c50e4a..4f2574c 100644
 +        if (memo && textures[u] && s_tslot_last < g.n_textures &&
 +            g.textures[s_tslot_last].handle == textures[u]) {
 +            int target = 0;
-+            for (u32 i = 0; i < g.n_surfaces && !target; i++)
++            for (u32 i = 0; maybe_target && i < g.n_surfaces && !target; i++)
 +                target = g.surfaces[i].handle && g.surfaces[i].location == t.location &&
 +                         g.surfaces[i].offset == t.offset;
-+            for (u32 i = 0; i < g.n_zdepths && !target; i++)
++            for (u32 i = 0; maybe_target && i < g.n_zdepths && !target; i++)
 +                target = g.zdepths[i].handle && g.zdepths[i].location == t.location &&
 +                         g.zdepths[i].offset == t.offset;
 +            if (!target) {
@@ -11201,7 +11239,7 @@ index 5c50e4a..4f2574c 100644
      return mask;
  }
  
-@@ -1350,12 +4023,33 @@ static u32 sink_bind_vertex_textures(
+@@ -1350,12 +4056,33 @@ static u32 sink_bind_vertex_textures(
      return bound;
  }
  
@@ -11237,7 +11275,7 @@ index 5c50e4a..4f2574c 100644
      /* Everything that becomes triangles -- lists, strips, fans, quads, quad
       * strips and polygons -- is REBUILT into one triangle list through an
       * index buffer. A host strip topology cannot express a restart cut, which
-@@ -1368,33 +4062,138 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1368,33 +4095,138 @@ static void sink_end(void* user, const rsx_dispatch* r)
      int scratch = 0;
      const int rebuild = eng_topology_rebuild(prim, 0, &scratch) != 0;
      if (!rebuild) {
@@ -11390,7 +11428,7 @@ index 5c50e4a..4f2574c 100644
      const u32 target = targets[0];
  
      rsx_dsp_surface sf;
-@@ -1403,6 +4202,14 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1403,6 +4235,14 @@ static void sink_end(void* user, const rsx_dispatch* r)
      rsx_dsp_get_viewport(&g.rsx, &vp);
      const u32 zslot = eng_zdepth_get(sf.zeta_location, sf.zeta_offset,
                                       sf.clip_w, sf.clip_h);
@@ -11405,7 +11443,7 @@ index 5c50e4a..4f2574c 100644
  
      /* Textures before any pipeline or target binding: a cache refresh can
       * replace a resource, and the backend is free to submit while doing it. */
-@@ -1414,6 +4221,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1414,6 +4254,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
      memset(samplers, 0, sizeof samplers);
      memset(vtextures, 0, sizeof vtextures);
      memset(vsamplers, 0, sizeof vsamplers);
@@ -11413,7 +11451,7 @@ index 5c50e4a..4f2574c 100644
      const u32 tex_mask = sink_bind_textures(targets, n_targets, zslot,
                                              textures, samplers);
      const u32 vtex_mask = sink_bind_vertex_textures(eng_vtex_mask(), vtextures,
-@@ -1423,19 +4231,43 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1423,19 +4264,43 @@ static void sink_end(void* user, const rsx_dispatch* r)
       * is dropped, as the reference engine drops it. Substituting the built-in
       * program would draw the geometry in the wrong colours, which is harder to
       * see than a missing object and hides the translation failure. */
@@ -11467,7 +11505,7 @@ index 5c50e4a..4f2574c 100644
  
      /* The transform constant block, then the viewport epilogue the vertex
       * program's tail multiplies by: RSX window coordinates mapped into the
-@@ -1444,6 +4276,9 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1444,6 +4309,9 @@ static void sink_end(void* user, const rsx_dispatch* r)
      const float H = sf.clip_h ? (float)sf.clip_h : (float)g.height;
      float xf[8] = { 1, 1, 1, 0, 0, 0, 0, 0 };
      if (vp.scale[0] != 0.0f || vp.translate[0] != 0.0f) {
@@ -11477,7 +11515,7 @@ index 5c50e4a..4f2574c 100644
          xf[0] = vp.scale[0] / (W * 0.5f);
          xf[1] = -(vp.scale[1] / (H * 0.5f));
          xf[2] = vp.scale[2];
-@@ -1451,25 +4286,59 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1451,25 +4319,59 @@ static void sink_end(void* user, const rsx_dispatch* r)
          xf[5] = -((vp.translate[1] - H * 0.5f) / (H * 0.5f));
          xf[6] = vp.translate[2];
      }
@@ -11545,7 +11583,7 @@ index 5c50e4a..4f2574c 100644
  
      /* The depth attachment is cleared the first time it is bound, so a title
       * that never clears its shadow zeta still tests against something. */
-@@ -1486,8 +4355,33 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1486,8 +4388,33 @@ static void sink_end(void* user, const rsx_dispatch* r)
      for (u32 i = 0; i < n_targets; i++) handles[i] = g.surfaces[targets[i]].handle;
      g.be->bind_targets(g.be->user, handles, n_targets, depth_handle);
      g.be->bind_pipeline(g.be->user, pipeline);
@@ -11580,7 +11618,7 @@ index 5c50e4a..4f2574c 100644
      g.be->bind_textures(g.be->user, textures, samplers, tex_mask);
      g.be->bind_vertex_textures(g.be->user, vtextures, vsamplers, vtex_mask);
      g.be->set_viewport(g.be->user, 0.0f, 0.0f, W, H);
-@@ -1515,19 +4409,98 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1515,19 +4442,98 @@ static void sink_end(void* user, const rsx_dispatch* r)
          g.be->set_scissor(g.be->user, sx, sy, sw, sh);
      }
      /* Dynamic, and deliberately outside the pipeline key. */
@@ -11682,7 +11720,7 @@ index 5c50e4a..4f2574c 100644
  }
  
  static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
-@@ -1538,6 +4511,9 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+@@ -1538,6 +4544,9 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
      const u32 n_targets = eng_current_target_set(targets);
      if (!n_targets) return;
  
@@ -11692,7 +11730,7 @@ index 5c50e4a..4f2574c 100644
      if (mask & (RSX_CLEAR_COLOR_R | RSX_CLEAR_COLOR_G |
                  RSX_CLEAR_COLOR_B | RSX_CLEAR_COLOR_A)) {
          const u32 c = rsx_dsp_clear_color(&g.rsx);
-@@ -1559,22 +4535,28 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+@@ -1559,22 +4568,28 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
          const u32 zslot = eng_zdepth_get(sf.zeta_location, sf.zeta_offset,
                                           sf.clip_w, sf.clip_h);
          if (zslot == ENG_INVALID) return;
@@ -11723,7 +11761,7 @@ index 5c50e4a..4f2574c 100644
          }
      }
  }
-@@ -1587,14 +4569,198 @@ static u32 eng_present_surface(u32 buffer_id)
+@@ -1587,14 +4602,198 @@ static u32 eng_present_surface(u32 buffer_id)
  {
      if (buffer_id < 8 && g.display_buffers[buffer_id].valid) {
          const eng_display_buffer* d = &g.display_buffers[buffer_id];
@@ -11924,7 +11962,7 @@ index 5c50e4a..4f2574c 100644
  static void eng_present(u32 buffer_id)
  {
      if (!g.ready) return;
-@@ -1610,8 +4776,195 @@ static void eng_present(u32 buffer_id)
+@@ -1610,8 +4809,195 @@ static void eng_present(u32 buffer_id)
                      g.surfaces[i].w, g.surfaces[i].h, g.surfaces[i].handle);
      }
      g.last_present_surface = target;
@@ -12121,7 +12159,7 @@ index 5c50e4a..4f2574c 100644
      g.last_guest_draws = g.guest_draws;
      g.guest_draws = 0;
  }
-@@ -1627,7 +4980,7 @@ static void sink_flip(void* user, const rsx_dispatch* r, u32 arg)
+@@ -1627,7 +5013,7 @@ static void sink_flip(void* user, const rsx_dispatch* r, u32 arg)
  
  void rsx_draw_engine_set_backend(const rsx_draw_backend* backend)
  {
@@ -12130,7 +12168,7 @@ index 5c50e4a..4f2574c 100644
  }
  
  void rsx_draw_engine_set_default(int on)
-@@ -1659,7 +5012,7 @@ int rsx_draw_engine_init(u32 width, u32 height)
+@@ -1659,7 +5045,7 @@ int rsx_draw_engine_init(u32 width, u32 height)
      if (!g.be) return -1;
      g.width  = width  ? width  : 1280;
      g.height = height ? height : 720;
@@ -12139,7 +12177,7 @@ index 5c50e4a..4f2574c 100644
      if (!g.vp_cb) return -1;
      if (g.be->init && g.be->init(g.be->user, g.width, g.height) != 0) {
          free(g.vp_cb); g.vp_cb = NULL;
-@@ -1694,7 +5047,24 @@ void rsx_draw_engine_shutdown(void)
+@@ -1694,7 +5080,24 @@ void rsx_draw_engine_shutdown(void)
          if (g.surfaces[i].handle) g.be->color_target_release(g.be->user, g.surfaces[i].handle);
      for (u32 i = 0; i < g.n_zdepths; i++)
          if (g.zdepths[i].handle) g.be->depth_target_release(g.be->user, g.zdepths[i].handle);
@@ -12164,7 +12202,7 @@ index 5c50e4a..4f2574c 100644
  
      rsx_draw_engine_set_guest_memory(NULL, NULL);
      free(dc.refs); free(dc.cuts); free(dc.verts);
-@@ -1704,6 +5074,9 @@ void rsx_draw_engine_shutdown(void)
+@@ -1704,6 +5107,9 @@ void rsx_draw_engine_shutdown(void)
      const rsx_draw_backend* be = g.be;
      memset(&g, 0, sizeof g);
      g.be = be;
@@ -12174,7 +12212,7 @@ index 5c50e4a..4f2574c 100644
  }
  
  void rsx_draw_engine_method(u32 method, u32 arg)
-@@ -1717,6 +5090,272 @@ void rsx_draw_engine_method(u32 method, u32 arg)
+@@ -1717,6 +5123,272 @@ void rsx_draw_engine_method(u32 method, u32 arg)
       * preserve them with the wider mask. */
      u32 m = (method >= 0xE000u) ? (method & 0xFFFCu) : (method & 0x1FFCu);
      rsx_dispatch_method(&g.rsx, m, arg);
@@ -12447,7 +12485,7 @@ index 5c50e4a..4f2574c 100644
  }
  
  void rsx_draw_engine_set_display_buffer(u32 buffer_id, u32 location, u32 offset,
-@@ -1746,13 +5385,17 @@ void rsx_draw_engine_present(void)
+@@ -1746,13 +5418,17 @@ void rsx_draw_engine_present(void)
       * re-present a double-buffered title's OTHER scanout. Presenting twice is
       * harmless either way -- the engine never clears the surface, so a second
       * present just blits the same image again. */
@@ -15801,7 +15839,7 @@ index 0000000..0b7655f
 +
 +#endif
 diff --git a/libs/video/rsx_vertex_compact.c b/libs/video/rsx_vertex_compact.c
-index 4334f16..6c07995 100644
+index 4334f16..62feff1 100644
 --- a/libs/video/rsx_vertex_compact.c
 +++ b/libs/video/rsx_vertex_compact.c
 @@ -180,6 +180,10 @@ void rsx_vertex_fetch_plan_prepare(
@@ -15846,7 +15884,7 @@ index 4334f16..6c07995 100644
          }
  
          const u64 prefix =
-@@ -292,6 +306,200 @@ int rsx_vertex_fetch_one(
+@@ -292,6 +306,298 @@ int rsx_vertex_fetch_one(
      return 1;
  }
  
@@ -15950,6 +15988,97 @@ index 4334f16..6c07995 100644
 +    v[0] = v[1] = v[2] = 0.0f; v[3] = 1.0f;
 +    for (u32 k = 0; k < size; k++) v[k] = (float)src[k];
 +}
++#if defined(__SSE4_1__)
++/* The same conversions four lanes at a time: (float) of an integer and an
++ * IEEE division give the scalar results bit for bit, and the lanes past
++ * `size` take the scalar forms' 0, 0, 0, 1. */
++#include <smmintrin.h>
++/* Exactly n bytes, zero above: loads of the element's own size (a copy
++ * through a stack buffer stalls the load on store forwarding, and a wider
++ * load could run past the end of the buffer). n is a constant at every use. */
++static inline __m128i rsx_ld(const u8* src, u32 n)
++{
++    u32 w; u16 h; u64 q;
++    switch (n) {
++    case 1:  return _mm_cvtsi32_si128(src[0]);
++    case 2:  memcpy(&h, src, 2); return _mm_cvtsi32_si128(h);
++    case 3:  memcpy(&h, src, 2); return _mm_cvtsi32_si128(h | (u32)src[2] << 16);
++    case 4:  memcpy(&w, src, 4); return _mm_cvtsi32_si128((int)w);
++    case 6:  memcpy(&w, src, 4); memcpy(&h, src + 4, 2);
++             return _mm_insert_epi16(_mm_cvtsi32_si128((int)w), h, 2);
++    case 8:  return _mm_loadl_epi64((const __m128i*)src);
++    case 12: memcpy(&q, src, 8); memcpy(&w, src + 8, 4);
++             return _mm_insert_epi32(_mm_cvtsi64_si128((long long)q), (int)w, 2);
++    default: return _mm_loadu_si128((const __m128i*)src);
++    }
++}
++static inline __m128i rsx_be16x8(__m128i x)
++{
++    return _mm_shuffle_epi8(x, _mm_setr_epi8(1,0, 3,2, 5,4, 7,6, 9,8, 11,10, 13,12, 15,14));
++}
++static inline void rsx_put(float* v, __m128 f, u32 size)
++{
++    const __m128 def = _mm_setr_ps(0.0f, 0.0f, 0.0f, 1.0f);
++    const __m128 keep = _mm_castsi128_ps(_mm_cmpgt_epi32(_mm_set1_epi32((int)size),
++                                                         _mm_setr_epi32(0, 1, 2, 3)));
++    _mm_storeu_ps(v, _mm_blendv_ps(def, f, keep));
++}
++static inline void rsx_fetch_half_x4(float* v, const u8* src, u32 size)
++{
++    const __m128i h = _mm_cvtepu16_epi32(rsx_be16x8(rsx_ld(src, size * 2u)));
++    const __m128i sign = _mm_slli_epi32(_mm_srli_epi32(h, 15), 31);
++    const __m128i e = _mm_and_si128(_mm_srli_epi32(h, 10), _mm_set1_epi32(0x1F));
++    const __m128i m13 = _mm_slli_epi32(_mm_and_si128(h, _mm_set1_epi32(0x3FF)), 13);
++    const __m128i normal = _mm_or_si128(_mm_or_si128(sign, m13),
++                                        _mm_slli_epi32(_mm_add_epi32(e, _mm_set1_epi32(112)), 23));
++    const __m128i inf = _mm_or_si128(_mm_or_si128(sign, m13), _mm_set1_epi32(0x7F800000));
++    __m128i r = _mm_blendv_epi8(normal, inf, _mm_cmpeq_epi32(e, _mm_set1_epi32(31)));
++    r = _mm_blendv_epi8(r, sign, _mm_cmpeq_epi32(e, _mm_setzero_si128()));
++    rsx_put(v, _mm_castsi128_ps(r), size);
++}
++static inline void rsx_fetch_unorm8_x4(float* v, const u8* src, u32 size)
++{
++    const __m128 f = _mm_cvtepi32_ps(_mm_cvtepu8_epi32(rsx_ld(src, size)));
++    rsx_put(v, _mm_div_ps(f, _mm_set1_ps(255.0f)), size);
++}
++static inline void rsx_fetch_snorm16_x4(float* v, const u8* src, u32 size)
++{
++    const __m128 f = _mm_cvtepi32_ps(_mm_cvtepi16_epi32(rsx_be16x8(rsx_ld(src, size * 2u))));
++    rsx_put(v, _mm_div_ps(f, _mm_set1_ps(32767.0f)), size);
++}
++static inline void rsx_fetch_sint16_x4(float* v, const u8* src, u32 size)
++{
++    rsx_put(v, _mm_cvtepi32_ps(_mm_cvtepi16_epi32(rsx_be16x8(rsx_ld(src, size * 2u)))), size);
++}
++static inline void rsx_fetch_uint8_x4(float* v, const u8* src, u32 size)
++{
++    rsx_put(v, _mm_cvtepi32_ps(_mm_cvtepu8_epi32(rsx_ld(src, size))), size);
++}
++static inline void rsx_fetch_float_x4(float* v, const u8* src, u32 size)
++{
++    const __m128i w = _mm_shuffle_epi8(rsx_ld(src, size * 4u),
++        _mm_setr_epi8(3,2,1,0, 7,6,5,4, 11,10,9,8, 15,14,13,12));
++    rsx_put(v, _mm_castsi128_ps(w), size);
++}
++static inline void rsx_fetch_cmp32_x4(float* v, const u8* src)
++{
++    const u32 word = rsx_be32(src);
++    s32 x = (s32)(word & 0x7FF), y = (s32)((word >> 11) & 0x7FF), z = (s32)((word >> 22) & 0x3FF);
++    if (x & 0x400) x -= 0x800;
++    if (y & 0x400) y -= 0x800;
++    if (z & 0x200) z -= 0x400;
++    const __m128 f = _mm_div_ps(_mm_cvtepi32_ps(_mm_setr_epi32(x, y, z, 0)),
++                                _mm_setr_ps(1023.0f, 1023.0f, 511.0f, 1.0f));
++    rsx_put(v, f, 3);
++}
++#define rsx_fetch_half    rsx_fetch_half_x4
++#define rsx_fetch_unorm8  rsx_fetch_unorm8_x4
++#define rsx_fetch_snorm16 rsx_fetch_snorm16_x4
++#define rsx_fetch_sint16  rsx_fetch_sint16_x4
++#define rsx_fetch_uint8   rsx_fetch_uint8_x4
++#define RSX_FETCH_SIMD 1
++#endif
++
 +/* One loop per size, so each body is unrolled for a constant one. */
 +#define RSX_FETCH_SIZED(fn)                                                  \
 +    switch (size) {                                                          \
@@ -15990,6 +16119,13 @@ index 4334f16..6c07995 100644
 +        if (consecutive && fetch->desc.frequency <= 1 && fetch->stable_base &&
 +            e0 >= fetch->stable_first && e0 + (count - 1u) <= fetch->stable_last)
 +            lin = fetch->stable_base + (u64)(e0 - fetch->stable_first) * fetch->stride;
++#ifdef RSX_FETCH_SIMD
++        if (type == RSX_VTX_TYPE_FLOAT && size <= 4) {
++            RSX_FETCH_SIZED(rsx_fetch_float_x4)
++        } else if (type == RSX_VTX_TYPE_CMP32) {
++            RSX_FETCH_LOOP(rsx_fetch_cmp32_x4(v, src))
++        } else
++#endif
 +        if (type == RSX_VTX_TYPE_FLOAT && size == 3) {
 +            RSX_FETCH_LOOP({
 +                const u32 a = rsx_be32(src), b = rsx_be32(src + 4),
@@ -16047,7 +16183,7 @@ index 4334f16..6c07995 100644
  static u64 rsx_vertex_remap_hash(u64 value)
  {
      value ^= value >> 33;
-@@ -302,9 +510,112 @@ static u64 rsx_vertex_remap_hash(u64 value)
+@@ -302,9 +608,112 @@ static u64 rsx_vertex_remap_hash(u64 value)
      return value;
  }
  
@@ -16160,7 +16296,7 @@ index 4334f16..6c07995 100644
  {
      if (!remap || (!refs && count) || !unique_count)
          return 0;
-@@ -321,6 +632,21 @@ int rsx_vertex_remap_build(
+@@ -321,6 +730,21 @@ int rsx_vertex_remap_build(
          remap->occurrence_capacity = count;
      }
  
@@ -16182,7 +16318,7 @@ index 4334f16..6c07995 100644
      if (count > UINT_MAX / 2u)
          return 0;
      u32 slot_capacity = 16u;
-@@ -390,6 +716,8 @@ void rsx_vertex_remap_destroy(rsx_vertex_remap* remap)
+@@ -390,6 +814,8 @@ void rsx_vertex_remap_destroy(rsx_vertex_remap* remap)
          return;
      free(remap->occurrence_to_unique);
      free(remap->slots);
@@ -27986,7 +28122,7 @@ index 0000000..71ae9b4
 +
 +#endif /* PS3_THREAD_NAME_H */
 diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
-index 0b235d0..02a7b55 100644
+index 0b235d0..0243034 100644
 --- a/runtime/spu/spu_channels.c
 +++ b/runtime/spu/spu_channels.c
 @@ -12,18 +12,21 @@
@@ -28396,7 +28532,8 @@ index 0b235d0..02a7b55 100644
 -    spu_context* volatile ctx;
 +    spu_context* ctx;
      mfc_engine   mfc;
- } spu_mfc_slot;
+-} spu_mfc_slot;
++} __attribute__((aligned(128))) spu_mfc_slot;   /* one SPU's tag writes never share a line with the next slot's ctx */
  
  static spu_mfc_slot s_mfc_slots[SPU_MAX_CONTEXTS];
 +
@@ -31302,7 +31439,7 @@ index 0000000..659aa33
 +#endif
 +}
 diff --git a/runtime/spu/spu_context.h b/runtime/spu/spu_context.h
-index 8d8e4aa..19179ec 100644
+index 8d8e4aa..9570337 100644
 --- a/runtime/spu/spu_context.h
 +++ b/runtime/spu/spu_context.h
 @@ -38,20 +38,30 @@ extern "C" {
@@ -31595,6 +31732,8 @@ index 8d8e4aa..19179ec 100644
 -SPU_GATE int g_wws_code_probe = 0;   /* WWS code-buffer resolution, capped      */
 -SPU_GATE int g_wws_read_probe = 0;
 -static __attribute__((noinline, cold)) void spu_ls_read_probe(const spu_context* ctx, uint32_t lsa)
+-{
+-    if (g_spu_ls_probe < 0) g_spu_ls_probe = getenv("SPU_LS_LOWREAD") ? 1 : 0;
 +/* ---- cold paths that leave every register alone (SPU_COLD_THUNK) ----------
 + * The x86-64 SysV ABI has no callee-saved vector register, so a call anywhere
 + * in a lifted function -- even one behind __builtin_expect that never runs --
@@ -31633,8 +31772,7 @@ index 8d8e4aa..19179ec 100644
 +}
 +#endif
 +static __attribute__((noinline, cold)) void spu_ls_read_probe(const spu_context* ctx, uint32_t lsa)
- {
--    if (g_spu_ls_probe < 0) g_spu_ls_probe = getenv("SPU_LS_LOWREAD") ? 1 : 0;
++{
      /* SPU_LS_LOWREAD=1: a job that reads its OWN first bytes as data is
       * dereferencing a null base -- the job binary loads at LS 0, so [NULL+off]
       * returns its own instruction words. Report each distinct low address once,
@@ -32071,7 +32209,34 @@ index 8d8e4aa..19179ec 100644
  /* Take a pending SPU interrupt (spu_drain.c): srr0 <- ctx->pc, int_enable <- 0,
   * decode the guest-planted branch at LS 0 into ctx->pc, and return the
   * dispatcher to run instead of the interrupted transfer. Returns `tf`
-@@ -812,7 +1126,7 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc);
+@@ -798,6 +1112,26 @@ void (*spu_take_interrupt(spu_context* ctx,
+ 
+ /* Drain a translated call up to its explicit architectural return PC. */
+ void spu_drain_call(spu_context* ctx, uint32_t return_pc);
++/* Nearly every drain finds its callee back where it should be: returned
++ * through SPU_RET (nothing pending) or with a plain indirect branch pending
++ * to the return pc. Lifted code drains after every call, so that case is
++ * answered inline; the loop, the depth guard and the interrupt frame are for
++ * the rest. A file that defines spu_drain_call itself sets
++ * SPU_DRAIN_NO_INLINE. */
++#ifndef SPU_DRAIN_NO_INLINE
++static inline void spu_drain_call_inl(spu_context* ctx, uint32_t return_pc)
++{
++    void (*t)(spu_context*) = ctx->tramp_fn;
++    if (__builtin_expect((((uint32_t)ctx->pc ^ return_pc) & SPU_LS_MASK) == 0 &&
++                         (!t || t == spu_indirect_branch), 1)) {
++        ctx->tramp_fn = 0;
++        ctx->drain_ret_pc = 0;
++        return;
++    }
++    spu_drain_call(ctx, return_pc);
++}
++#define spu_drain_call(c, r) spu_drain_call_inl((c), (r))
++#endif
+ /* SPU_PCHIST=1: bucket SPU execution by the GPU module's own symbols.
+  *
+  * SPU_VRAMPC showed 3.7M VRAM writes from Host2Local_Body and ZERO from
+@@ -812,7 +1146,7 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc);
   * 0x171100), so they are exact rather than guessed. */
  static inline void spu_pchist_tick(const spu_context* ctx)
  {
@@ -32080,7 +32245,7 @@ index 8d8e4aa..19179ec 100644
      if (en < 0) en = getenv("SPU_PCHIST") ? 1 : 0;
      if (!en) return;
      static unsigned long long b[8][8], n;
-@@ -857,7 +1171,7 @@ static inline void spu_pchist_tick(const spu_context* ctx)
+@@ -857,7 +1191,7 @@ static inline void spu_pchist_tick(const spu_context* ctx)
               * matching brsl/bisl never pops and a poll loop nests a frame \
               * per iteration until the host stack dies. Off by default --  \
               * this changes core dispatch for every title. */              \
@@ -32089,7 +32254,7 @@ index 8d8e4aa..19179ec 100644
                  (((uint32_t)(ctx)->pc & SPU_LS_MASK) ==                    \
                   ((ctx)->gpr[0]._u32[0] & SPU_LS_MASK))) {                 \
                  g_spu_trampoline_fn = 0;                                   \
-@@ -865,13 +1179,13 @@ static inline void spu_pchist_tick(const spu_context* ctx)
+@@ -865,13 +1199,13 @@ static inline void spu_pchist_tick(const spu_context* ctx)
              }                                                              \
              void (*_tf)(spu_context*) = g_spu_trampoline_fn;    \
              g_spu_trampoline_fn = 0;                            \
@@ -32141,7 +32306,7 @@ index d9f86bb..c610dad 100644
              ctx->pc = pc;
              __attribute__((musttail)) return fn(ctx);
 diff --git a/runtime/spu/spu_dma.h b/runtime/spu/spu_dma.h
-index 90f3221..ecf0250 100644
+index 90f3221..7b6f960 100644
 --- a/runtime/spu/spu_dma.h
 +++ b/runtime/spu/spu_dma.h
 @@ -16,6 +16,7 @@
@@ -32170,7 +32335,7 @@ index 90f3221..ecf0250 100644
        }
      }
      return 1;
-@@ -161,6 +162,40 @@ static inline int mfc_is_fence(uint32_t cmd)
+@@ -161,6 +162,158 @@ static inline int mfc_is_fence(uint32_t cmd)
      return (cmd & 0x02) != 0; /* fence variants have bit 1 set */
  }
  
@@ -32192,7 +32357,8 @@ index 90f3221..ecf0250 100644
 +        const char* e = getenv("PS3RECOMP_EDGE_VP");
 +        const char* r = getenv("PS3RECOMP_RES_SCALE");
 +        n = (e && e[0] == '0') ? 1 : (r ? atoi(r) : 1);
-+        if (n < 1 || n > 4) n = 1;
++        if (n < 1) n = 1;
++        if (n > 4) n = 4;   /* vk_res_scale's clamp */
 +        __atomic_store_n(&s_n, n, __ATOMIC_RELAXED);
 +    }
 +    if (n == 1 || memcmp(p, sig, 16)) return;
@@ -32208,13 +32374,132 @@ index 90f3221..ecf0250 100644
 +    }
 +}
 +
++/*
++ * mfc_do_transfer without its diagnostics. The full path tests ~30 opt-in
++ * hooks per transfer, and at ~9,000 draws a frame the SPUs make millions of
++ * transfers a second: the tests alone were ~4% of SPURS time. When none of
++ * those variables is set and no host watch is armed, this does what the full
++ * path does for a well-formed transfer and nothing else. Keep the two in step.
++ */
++static inline int mfc_diag_env(void)
++{
++    static const char* const names[] = {
++        "LBP_SKIP_NULL_DMA", "SPU_DMACHK", "SPU_DMA_LAX", "SPU_DMA_RANGE", "SPU_DMA_SKIP_DUMP",
++        "SPU_DMA_STACK_CHECK", "SPU_DMATRACE_ALL", "SPU_DMA_WATCH", "SPU_DSP_IMAGE_EA",
++        "SPU_DUMP_GET", "SPU_GET_EA", "SPU_GET_HAS", "SPU_GETHIST", "SPU_IMG_DMA",
++        "SPU_MFC_TRACE", "SPU_OVL_DIAG", "SPU_OVL_DMA", "SPU_POISON_DMA", "SPU_PUT_EA",
++        "SPU_PUTHIST", "SPU_PUT_RANGE", "SPU_PUT_WATCH", "SPU_SMC_WATCH", "SPU_STACKEA_WATCH",
++        "YDKJ_DMA_IMG", "SPU_LS_WATCH", "SPU_DMA_SLOW",
++    };
++    for (unsigned i = 0; i < sizeof names / sizeof names[0]; i++)
++        if (getenv(names[i])) return 1;
++#ifdef SPU_DMA_LOG
++    return 1;
++#else
++    return 0;
++#endif
++}
++
++static inline int mfc_fast_ok(void)
++{
++    static _Atomic int s_env = -1;
++    int env = __atomic_load_n(&s_env, __ATOMIC_RELAXED);
++    if (__builtin_expect(env < 0, 0)) { env = mfc_diag_env(); __atomic_store_n(&s_env, env, __ATOMIC_RELAXED); }
++    extern int g_spu_param_dump, g_spu_lbt, g_ps3_tl;
++    extern uint32_t g_barrier_sync_watch;
++    return !env && !g_spu_param_dump && !g_spu_lbt && !g_ps3_tl
++        && !g_barrier_sync_watch;
++}
++
++static inline int mfc_do_transfer_fast(spu_context* spu, uint32_t lsa, uint64_t ea,
++                                       uint32_t size, uint32_t cmd)
++{
++    { extern int g_spu_get_watch; extern void spu_get_watch_note(const spu_context*, uint32_t, uint32_t, uint32_t);
++      if (g_spu_get_watch) spu_get_watch_note(spu, (uint32_t)ea, size, cmd); }
++    if (size == 0) return 0;
++    if (size > 0x4000 || (size >= 16 && (size & 15)) || ((lsa ^ (uint32_t)ea) & 15)
++        || (mfc_is_put(cmd) && (uint32_t)ea < 0x10000u)) {
++        static int _n = 0;
++        if (__atomic_load_n(&_n, __ATOMIC_RELAXED) < 8 && __atomic_fetch_add(&_n, 1, __ATOMIC_RELAXED) < 8)
++            fprintf(stderr, "[mfc] REJECTED malformed transfer: img=%d pc=0x%05X"
++                            " cmd=0x%X lsa=0x%05X ea=0x%08X size=%u\n",
++                    spu->image_id, (uint32_t)spu->pc & SPU_LS_MASK, cmd, lsa, (uint32_t)ea, size);
++        return 0;
++    }
++    lsa &= SPU_LS_MASK;
++    if ((uint64_t)lsa + (uint64_t)size > (uint64_t)SPU_LS_SIZE) return -1;
++    if (!mfc_ea_range_committed(ea, size)) {
++        static int s_warned = 0;
++        if (__atomic_load_n(&s_warned, __ATOMIC_RELAXED) < 32 && __atomic_fetch_add(&s_warned, 1, __ATOMIC_RELAXED) < 32)
++            fprintf(stderr, "[spu-dma] SKIP %s img=%d pc=0x%05X lsa=0x%05X ea=0x%08X "
++                    "size=%u (EA not committed -- bad/garbage DMA target)\n",
++                    mfc_is_get(cmd) ? "GET" : "PUT", spu->image_id,
++                    (uint32_t)spu->pc & SPU_LS_MASK, lsa, (uint32_t)ea, size);
++        return -1;
++    }
++    uint8_t* ls_ptr = &spu->ls[lsa];
++    uint8_t* ea_ptr = vm_base + (uint32_t)ea;
++    { extern int g_cri_video_dma;
++      if (spu->image_id == 22 && mfc_is_get(cmd) && size > 0x100) g_cri_video_dma = 1; }
++    { extern int g_spu_dma_skip; extern int spu_dma_skip_note(const spu_context*, uint32_t, uint32_t);
++      if (g_spu_dma_skip && spu_dma_skip_note(spu, (uint32_t)ea, size)) return 0; }
++    if (mfc_is_get(cmd)) {
++        gm_copy_from(ls_ptr, (const uint8_t*)ea_ptr, size);
++        if (size == 0x80) spu_edge_viewport_scale(ls_ptr);
++        { extern void spu_overlay_note_get(spu_context*, uint32_t, const uint8_t*, uint32_t);
++          spu_overlay_note_get(spu, (uint32_t)ea, (const uint8_t*)ls_ptr, size); }
++    } else if (mfc_is_put(cmd)) {
++        spu->ext_writes++;
++        extern int  spu_coh_is_reserved(uint32_t);
++        extern void spu_coh_notify_write_except(uint32_t, const void*);
++        extern uint64_t spu_lockline_mask_ea(uint32_t);
++        extern uint64_t spu_lockline_mask_range(uint32_t, uint32_t);
++        extern void spu_lockline_lock_mask(uint64_t);
++        extern void spu_lockline_unlock_mask(uint64_t);
++        extern void spu_lockguard_check(spu_context*, uint32_t, const uint8_t*, uint32_t, const char*);
++        spu_lockguard_check(spu, (uint32_t)ea, (const uint8_t*)ls_ptr, size, "PUT");
++        const uint32_t a0 = (uint32_t)ea & ~127u, a1 = ((uint32_t)ea + size - 1u) & ~127u;
++        int span_reserved = 0;
++        for (uint32_t a = a0; ; a += 128u) {
++            if (spu_coh_is_reserved(a)) { span_reserved = 1; break; }
++            if (a == a1) break;
++        }
++        if (span_reserved) {
++            const uint64_t llm = spu_lockline_mask_range((uint32_t)ea, size);
++            spu_lockline_lock_mask(llm);
++            gm_copy_to((uint8_t*)ea_ptr, ls_ptr, size);
++            for (uint32_t a = a0; ; a += 128u) {
++                if (spu_coh_is_reserved(a)) spu_coh_notify_write_except(a, spu);
++                if (a == a1) break;
++            }
++            spu_lockline_unlock_mask(llm);
++        } else {
++            gm_copy_to((uint8_t*)ea_ptr, ls_ptr, size);
++            for (uint32_t a = a0; ; a += 128u) {
++                if (spu_coh_is_reserved(a)) {
++                    const uint64_t llm = spu_lockline_mask_ea(a);
++                    spu_lockline_lock_mask(llm);
++                    spu_coh_notify_write_except(a, spu);
++                    spu_lockline_unlock_mask(llm);
++                }
++                if (a == a1) break;
++            }
++        }
++        { extern void (*g_spu_put_hook)(uint32_t ea, uint32_t size);
++          if (g_spu_put_hook) g_spu_put_hook((uint32_t)ea, size); }
++    }
++    return 0;
++}
++
  /*
   * Execute a single DMA transfer between local store and main memory.
   * Returns 0 on success, -1 on error.
-@@ -168,43 +203,103 @@ static inline int mfc_is_fence(uint32_t cmd)
+@@ -168,43 +321,105 @@ static inline int mfc_is_fence(uint32_t cmd)
  static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
                                     uint32_t size, uint32_t cmd)
  {
++    if (__builtin_expect(mfc_fast_ok(), 1))
++        return mfc_do_transfer_fast(spu, lsa, ea, size, cmd);
 +    /* SPU_PARAM_DUMP (spu_channels.c): job parameter blocks around a trigger. */
 +    { extern int g_spu_param_dump; extern void spu_param_dump_note(spu_context*, uint32_t, uint32_t, uint32_t, uint32_t);
 +      if (g_spu_param_dump) spu_param_dump_note(spu, lsa, (uint32_t)ea, size, cmd); }
@@ -32325,7 +32610,7 @@ index 90f3221..ecf0250 100644
      /* Malformed transfers are REJECTED, as the hardware MFC does. The rules
       * are the ones the SDK's own dma.h asserts: a non-zero size, at most
       * 16 KB, a multiple of 16 once >= 16 bytes, and LSA/EA sharing 16-byte
-@@ -216,7 +311,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -216,7 +431,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
       * "code 0x00000000 not registered".
       *
       * SPU_DMA_LAX=1 restores the old permissive behaviour. */
@@ -32334,7 +32619,7 @@ index 90f3221..ecf0250 100644
        if (!s_lax) {
            /* A PUT into the null page is the same class of accident: lv2 reserves
             * the low 64 KB and no title DMAs there on purpose, so an EA that
-@@ -227,13 +322,16 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -227,13 +442,16 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
             * nothing useful and buries the real destinations in the histogram.
             * GETs from low EAs stay allowed: they only read garbage, and
             * LBP_SKIP_NULL_DMA already exists to test zeroing them instead. */
@@ -32353,7 +32638,7 @@ index 90f3221..ecf0250 100644
                    fprintf(stderr, "[mfc] REJECTED malformed transfer: img=%d pc=0x%05X"
                                    " cmd=0x%X lsa=0x%05X ea=0x%08X size=%u\n",
                            spu->image_id, (uint32_t)spu->pc & SPU_LS_MASK, cmd,
-@@ -243,12 +341,12 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -243,12 +461,12 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
      /* SPU_DMACHK=1: report transfers that break the MFC rules the guest's own
       * dma.h asserts on -- size 0 or > 16 KB, size not a multiple of 16 for
       * transfers of 16+ bytes, or LSA/EA not sharing 16-byte alignment. */
@@ -32368,7 +32653,7 @@ index 90f3221..ecf0250 100644
                fprintf(stderr, "[dmachk] BAD pc=0x%05X cmd=0x%X lsa=0x%05X ea=0x%08X size=%u%c",
                        (uint32_t)spu->pc & SPU_LS_MASK, cmd, lsa, (uint32_t)ea, size, 10); } }
      /* SPU_PUTHIST=1: histogram of PUT destinations by 1 MB bucket. "the SPU
-@@ -257,7 +355,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -257,7 +475,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
      /* SPU_GETHIST=1: the same accounting for GETs, on the SOURCE side. A solver
       * whose inputs read back as zeros produces zeros no matter how many
       * instructions it runs. */
@@ -32377,7 +32662,7 @@ index 90f3221..ecf0250 100644
        if (s_gh && mfc_is_get(cmd) && vm_base) {
            static uint32_t seen[48]; static int ns = 0;
            uint32_t k = (uint32_t)ea & ~0xFFFFu;
-@@ -267,7 +365,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -267,7 +485,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
                for (uint32_t i7 = 0; i7 < size && i7 < 0x4000u; i7 += 7) if (q[i7]) nzs++;
                fprintf(stderr, "[getea] spu=0x%X 0x%08X size=%u srcNonZero=%u%c",
                        spu->spu_id, (uint32_t)ea, size, nzs, 10); } } }
@@ -32386,7 +32671,7 @@ index 90f3221..ecf0250 100644
        if (s_ph) { static unsigned long long ngets, nputs, nother;
            if (mfc_is_get(cmd)) ngets++; else if (mfc_is_put(cmd)) nputs++; else nother++;
            if (((ngets + nputs + nother) % 5000) == 0)
-@@ -309,7 +407,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -309,7 +527,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
      /* SPU_MFC_TRACE: attribute silent DMA-poll loops (a wedged task whose
       * host thread samples "in ntdll" because VirtualQuery dominates). Prints
       * every 64k-th transfer per thread: enough to see the loop's pc/ea. */
@@ -32395,7 +32680,7 @@ index 90f3221..ecf0250 100644
          s_t = e ? atoi(e) : 0; if (e && !s_t) s_t = 1; }
        if (s_t) { static _Thread_local unsigned long long _n; ++_n;
          /* level 2+: also print each thread's first 192 transfers (setup DMAs
-@@ -355,12 +453,12 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -355,12 +573,12 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
          } } }
      /* cellAudio port-ring window: log every guest write into it (rare, load-
       * bearing -- the audio OUTPUT path). Same env gate as the sampler. */
@@ -32410,7 +32695,7 @@ index 90f3221..ecf0250 100644
                fprintf(stderr, "[ring-PUT] img=%d pc=0x%05X ea=0x%08X size=%u lsa=0x%05X\n",
                        spu->image_id, (uint32_t)spu->pc & SPU_LS_MASK,
                        (uint32_t)ea, size, lsa);
-@@ -383,7 +481,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -383,7 +601,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
       * rather than a host segfault. */
      if (!mfc_ea_range_committed(ea, size)) {
          static int s_warned = 0;
@@ -32419,7 +32704,7 @@ index 90f3221..ecf0250 100644
              fprintf(stderr, "[spu-dma] SKIP %s img=%d pc=0x%05X lsa=0x%05X ea=0x%08X "
                      "size=%u%s (EA not committed -- bad/garbage DMA target)\n",
                      mfc_is_get(cmd) ? "GET" : "PUT", spu->image_id,
-@@ -393,7 +491,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -393,7 +611,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
           * A job that DMAs a small buffer to a garbage EA in a tight loop is
           * usually an SPU-side assert/print path, and the payload names the
           * actual complaint -- far more useful than the address it failed at. */
@@ -32428,7 +32713,7 @@ index 90f3221..ecf0250 100644
            if (s_d && s_warned <= 2) {
              const uint8_t* q = spu->ls + (lsa & SPU_LS_MASK);
              fprintf(stderr, "  LS[0x%05X] ascii: ", lsa);
-@@ -413,12 +511,12 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -413,12 +631,12 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
       * -- a completion-write attempt -- and (b) any GET payload carrying a
       * 0xD00Cxxxx dword -- the completion EA arriving in a loaded job buffer.
       * Answers whether the EA ever reaches / is ever written by the SPU. */
@@ -32443,7 +32728,7 @@ index 90f3221..ecf0250 100644
                  uint32_t v0 = mfc_is_put(cmd) && size>=4 ?
                      ((ls_ptr[0]<<24)|(ls_ptr[1]<<16)|(ls_ptr[2]<<8)|ls_ptr[3]) : 0;
                  fprintf(stderr, "[stackea] %s ea=0x%08X lsa=0x%05X size=%u img=%d pc=0x%05X"
-@@ -432,7 +530,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -432,7 +650,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
          fprintf(stderr, "[spu-dma] %s lsa=0x%05X ea=0x%08X size=%u\n",
                  mfc_is_get(cmd) ? "GET" : "PUT", lsa, (uint32_t)ea, size); }
  #endif
@@ -32452,7 +32737,7 @@ index 90f3221..ecf0250 100644
        if (s_t < 0) s_t = getenv("SPU_DMATRACE_ALL") ? 1 : 0;
        if (s_img == -2) { const char* e = getenv("YDKJ_DMA_IMG"); s_img = e ? atoi(e) : -1; }
        /* YDKJ_DMA_IMG=N: trace ONLY image N, uncapped (the 300-cap otherwise fills
-@@ -445,7 +543,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -445,7 +663,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
                  fprintf(stderr, "[dmatrace] %s lsa=0x%05X ea=0x%08X size=%u img=%d pc=0x%05X\n",
                          mfc_is_get(cmd) ? "GET" : "PUT", lsa, (uint32_t)ea, size, spu->image_id,
                          (uint32_t)spu->pc);
@@ -32461,7 +32746,7 @@ index 90f3221..ecf0250 100644
              fprintf(stderr, "[dmatrace] %s lsa=0x%05X ea=0x%08X size=%u img=%d pc=0x%05X\n",
                      mfc_is_get(cmd) ? "GET" : "PUT", lsa, (uint32_t)ea, size, spu->image_id,
                      (uint32_t)spu->pc); }
-@@ -473,7 +571,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -473,7 +691,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
       * from that address. Fixed BSS structures have the same address in a
       * reference run, so this is what a dump from real hardware diffs against. */
      if (mfc_is_get(cmd) && size && vm_base) {
@@ -32470,7 +32755,7 @@ index 90f3221..ecf0250 100644
          if (s_dg == 0xFFFFFFFFu) { const char* e = getenv("SPU_DUMP_GET");
                                     s_dg = e ? (uint32_t)strtoul(e, 0, 0) : 0; }
          if (s_dg && (uint32_t)ea == s_dg) {
-@@ -500,12 +598,12 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -500,12 +718,12 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
      static uint32_t s_desc_ea = 0;
      if (mfc_is_get(cmd) && size == 368) s_desc_ea = (uint32_t)ea;
      if (mfc_is_get(cmd) && !(uint32_t)ea && size) {
@@ -32485,7 +32770,7 @@ index 90f3221..ecf0250 100644
                  fprintf(stderr, "[dsp-image] img%d GET ea=0 size=%u dest=0x%05X -> 0x%08X "
                          "(last imported SPU image: ls_start=0x%X span=%u) descriptor@0x%08X\n",
                          spu->image_id, size, lsa, g_spu_image_src_ea,
-@@ -522,49 +620,69 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -522,49 +740,69 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
       * event flag) vs still loops. If it progresses, the null buffers are tolerable
       * and our lift is DMAing where HW skips; if not, the buffers must be real. */
      if (mfc_is_get(cmd) && (uint32_t)ea < 0x10000u) {
@@ -32563,7 +32848,7 @@ index 90f3221..ecf0250 100644
            if (s_se && size >= 4) { static int _n = 0;
              for (uint32_t o = 0; o + 4 <= size && _n < 60; o += 4) {
                  uint32_t w = (ls_ptr[o]<<24)|(ls_ptr[o+1]<<16)|(ls_ptr[o+2]<<8)|ls_ptr[o+3];
-@@ -576,7 +694,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -576,7 +814,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
                      fflush(stderr); } } } }
          /* SPU_SMC_WATCH: a DMA GET that lands inside the image's own code
           * segment is a code overlay = self-modification. */
@@ -32572,7 +32857,7 @@ index 90f3221..ecf0250 100644
            if (s == -2) { const char* e = getenv("SPU_SMC_WATCH");
              s = e ? atoi(e) : -1; img = (uint32_t)s;
              const char* l = getenv("SPU_SMC_LO"); lo = l ? (uint32_t)strtoul(l,0,0) : 0xA00;
-@@ -584,30 +702,65 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -584,30 +822,65 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
            if (s >= 0 && (uint32_t)spu->image_id == img &&
                lsa < hi && lsa + size > lo) {
                static int _n = 0;
@@ -32646,7 +32931,7 @@ index 90f3221..ecf0250 100644
          /* PUT: local store -> main memory.
           *
           * A plain PUT is a store by another processor as far as every SPU
-@@ -633,8 +786,10 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -633,8 +906,10 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
              extern int  spu_coh_is_reserved(uint32_t);
              extern void spu_coh_notify_write(uint32_t);
              extern void spu_coh_notify_write_except(uint32_t, const void*);
@@ -32659,7 +32944,7 @@ index 90f3221..ecf0250 100644
              extern void spu_lockguard_check(spu_context*, uint32_t, const uint8_t*, uint32_t, const char*);
              spu_lockguard_check(spu, (uint32_t)ea, (const uint8_t*)ls_ptr, size, "PUT");
              uint32_t a0 = (uint32_t)ea & ~127u;
-@@ -645,20 +800,24 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -645,20 +920,24 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
                  if (a == a1) break;
              }
              if (span_reserved) {
@@ -32690,7 +32975,7 @@ index 90f3221..ecf0250 100644
                      }
                      if (a == a1) break;
                  }
-@@ -673,13 +832,26 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -673,13 +952,26 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
           * find the pushbuffer; NULL for every title that does not. */
          { extern void (*g_spu_put_hook)(uint32_t ea, uint32_t size);
            if (g_spu_put_hook) g_spu_put_hook((uint32_t)ea, size); }
@@ -32718,7 +33003,7 @@ index 90f3221..ecf0250 100644
                    /* spuNum lives in the kernel context at LS 0x1C8 (BE u32). */
                    uint32_t sn = ((uint32_t)spu->ls[0x1C8]<<24)|((uint32_t)spu->ls[0x1C9]<<16)|
                                  ((uint32_t)spu->ls[0x1CA]<<8)|spu->ls[0x1CB];
-@@ -694,16 +866,19 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -694,16 +986,19 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
           * (0x40003000-0x40005000) or carry the 0xC708C708 poison? This host-side
           * memcpy bypasses vm_write32/AWATCH, so it's the prime suspect for the
           * garbage fn-ptr fields that cause the 0xC708C708 vcall crash. */
@@ -32742,7 +33027,7 @@ index 90f3221..ecf0250 100644
                    fprintf(stderr, "[POISON-DMA] img%u PUT ea=0x%08X size=0x%X lsa=0x%X hitregion=%d haspoison=%d\n",
                            spu->image_id, e, size, lsa, hitregion, haspoison);
            } }
-@@ -741,6 +916,23 @@ static inline int mfc_run_list(spu_context* spu, uint32_t elem_lsa,
+@@ -741,6 +1036,23 @@ static inline int mfc_run_list(spu_context* spu, uint32_t elem_lsa,
  
          uint64_t ea = (ea_base & 0xFFFFFFFF00000000ull) | eal;
  
@@ -32766,7 +33051,7 @@ index 90f3221..ecf0250 100644
          if (xfer_size) {
              /* Each list element occupies whole LS quadwords, even for
               * 1/2/4/8-byte transfers. The EA supplies its byte offset within
-@@ -760,20 +952,19 @@ static inline int mfc_run_list(spu_context* spu, uint32_t elem_lsa,
+@@ -760,20 +1072,19 @@ static inline int mfc_run_list(spu_context* spu, uint32_t elem_lsa,
              spu->list_stall_cmd[t]       = base_cmd;
              spu->list_stall_mask |= (1u << t);  /* this tag now has a parked list */
              spu->list_stall_stat |= (1u << t);  /* accumulate into the notify mask */
@@ -32791,7 +33076,7 @@ index 90f3221..ecf0250 100644
                  fprintf(stderr, "[mfc-list] STALL img=%d tag=%u elem@0x%05X "
                          "left=%u dest=0x%05X (SN raised, parked mask=0x%X) "
                          "loadJobState@12A0=%02X%02X%02X%02X %02X%02X%02X%02X\n",
-@@ -797,13 +988,13 @@ static inline int mfc_list_stall_ack(struct mfc_engine* mfc, spu_context* spu,
+@@ -797,13 +1108,13 @@ static inline int mfc_list_stall_ack(struct mfc_engine* mfc, spu_context* spu,
      uint32_t t = tag & 0x1F;
      if (!(spu->list_stall_mask & (1u << t))) {
          static int _n = 0;
@@ -32807,7 +33092,7 @@ index 90f3221..ecf0250 100644
          fprintf(stderr, "[mfc-list] RESUME img=%d tag=%u elem@0x%05X left=%u\n",
                  spu->image_id, t, spu->list_stall_elem_lsa[t],
                  spu->list_stall_remaining[t]); }
-@@ -811,13 +1002,14 @@ static inline int mfc_list_stall_ack(struct mfc_engine* mfc, spu_context* spu,
+@@ -811,13 +1122,14 @@ static inline int mfc_list_stall_ack(struct mfc_engine* mfc, spu_context* spu,
       * about to land. If the handler was supposed to fill in the claimed job's
       * EA and did not, the elements read back empty and the transfer is a no-op
       * -- which looks identical to "the pipeline never ran" from the PPU side. */
@@ -32824,13 +33109,46 @@ index 90f3221..ecf0250 100644
      int rc = mfc_run_list(spu, spu->list_stall_elem_lsa[t], spu->list_stall_remaining[t],
                            spu->list_stall_dest_lsa[t], spu->list_stall_ea_base[t],
                            spu->list_stall_cmd[t], t);
-@@ -863,12 +1055,12 @@ static inline int mfc_enqueue(mfc_engine* mfc, spu_context* spu)
+@@ -863,12 +1175,45 @@ static inline int mfc_enqueue(mfc_engine* mfc, spu_context* spu)
   * Submit and immediately execute an MFC command.
   * This is the main entry point called when the SPU writes to MFC_Cmd.
   */
 -static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
++/* The submit path's own opt-in diagnostics (see mfc_fast_ok for the transfer's). */
++static inline int mfc_submit_diag_env(void)
++{
++    static const char* const names[] = {
++        "SPU_CMDHIST", "SPU_WATCHEA", "SPU_WATCHLSA", "SPU_ROWCOV", "SPU_VRAMPC", "SPU_H2LSRC",
++        "SPU_PUTEA", "SPU_PUTHIST", "YDKJ_CRI_CHAIN", "SPU_DMA_REPEAT_LIMIT", "SPU_DMATRACE_ALL",
++        "SPU_DMATRACE", "SPU_DMATRACE_RAW", "SPU_LS_DUMP_LIST", "SPU_CMDDUMP",
++    };
++    for (unsigned i = 0; i < sizeof names / sizeof names[0]; i++)
++        if (getenv(names[i])) return 1;
++    return 0;
++}
++
 +static inline int mfc_submit_body(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
  {
++    /* A plain GET or PUT with no diagnostic on: what the path below does for
++     * one, without testing each diagnostic. Lists, the policy modules (whose
++     * first commands are logged) and the WWS batch fetch (counted) go below. */
++    { static _Atomic int s_env = -1;
++      int env = __atomic_load_n(&s_env, __ATOMIC_RELAXED);
++      if (__builtin_expect(env < 0, 0)) { env = mfc_submit_diag_env(); __atomic_store_n(&s_env, env, __ATOMIC_RELAXED); }
++      if (__builtin_expect(!env && !spu->policy_mode && !mfc_is_list(cmd) && mfc_fast_ok(), 1) &&
++          !(spu->image_id == 2 && spu->mfc_lsa == 0xC00)) {
++          const uint32_t tag = spu->mfc_tag & 0x1F, bit = 1u << tag;
++          mfc->tag_completed &= ~bit;
++          int rc = 0;
++          if (cmd != MFC_BARRIER_CMD && cmd != MFC_EIEIO_CMD && cmd != MFC_SYNC_CMD) {
++              rc = mfc_do_transfer_fast(spu, spu->mfc_lsa,
++                                        ((uint64_t)spu->mfc_eah << 32) | spu->mfc_eal,
++                                        spu->mfc_size, cmd);
++              if (spu->list_stall_mask & bit) return rc;
++          }
++          mfc->tag_completed |= bit;
++          return rc;
++      } }
      /* SPU_CMDHIST=1: every MFC command that reaches the engine, by opcode and
       * SPU image. Catches list DMAs (putl/getl) that never reach
       * mfc_do_transfer's per-element path. */
@@ -32839,7 +33157,7 @@ index 90f3221..ecf0250 100644
        if (s_ch) { static unsigned long long h[256][8]; static unsigned long long n;
            h[cmd & 0xFF][spu->image_id & 7]++;
            if ((++n % 300) == 0) {
-@@ -897,7 +1089,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -897,7 +1242,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       * Nothing in that module's code stores +0x88, so the consumer count is
       * written from outside -- an SPU DMA is the obvious candidate, and this
       * says outright whether that is true. Watch 0x002DF008. */
@@ -32848,7 +33166,7 @@ index 90f3221..ecf0250 100644
        if (s_we == -2) { const char* e = getenv("SPU_WATCHEA");
                          s_we = e ? 1 : 0;
                          s_wa = e ? (uint32_t)strtoul(e, 0, 16) : 0u; }
-@@ -933,7 +1125,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -933,7 +1278,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       * writes that mirror back to a stale value AFTER the GETLLAR, and a DMA is
       * the only thing that can do it without going through spu_ls_write128.
       * Watch LS 0x10800. */
@@ -32857,7 +33175,7 @@ index 90f3221..ecf0250 100644
        if (s_wl == -2) { const char* e7 = getenv("SPU_WATCHLSA");
                          s_wl = e7 ? 1 : 0;
                          s_wlsa = e7 ? (uint32_t)strtoul(e7, 0, 16) : 0u; }
-@@ -960,7 +1152,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -960,7 +1305,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       * covering it. Those cannot both be true as stated. Coverage per block over
       * a whole row says whether the row is fully written with wrong DATA, or
       * partly written, and those are completely different bugs. */
@@ -32866,7 +33184,7 @@ index 90f3221..ecf0250 100644
        if (s_rc == -2) { const char* e8 = getenv("SPU_ROWCOV");
                          s_rc = e8 ? 1 : 0;
                          s_rcb = e8 ? (uint32_t)strtoul(e8, 0, 16) : 0u; }
-@@ -1004,7 +1196,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1004,7 +1349,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       * 0x004DC/0x00598 (Host2Local_Body) and none from the DrawRect/DrawEdge
       * range, which would mean no geometry is rasterised at all -- the missing
       * 3D. That was noticed from three sampled addresses, so count them all. */
@@ -32875,7 +33193,7 @@ index 90f3221..ecf0250 100644
        if (s_vp < 0) s_vp = getenv("SPU_VRAMPC") ? 1 : 0;
        if (s_vp && mfc_is_put(cmd) &&
            (uint32_t)ea >= 0x40600000u && (uint32_t)ea < 0x40700000u) {
-@@ -1061,7 +1253,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1061,7 +1406,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       *   LS holds real pixels   -> the destination comparison was wrong
       *
       * Host2Local_Body is LS 0x00350..0x00757 (from the firmware .symtab). */
@@ -32884,7 +33202,7 @@ index 90f3221..ecf0250 100644
        if (s_hs < 0) s_hs = getenv("SPU_H2LSRC") ? 1 : 0;
        if (s_hs && vm_base && mfc_is_put(cmd) && size >= 16u &&
            (uint32_t)ea >= 0x40600000u && (uint32_t)ea < 0x40700000u) {
-@@ -1090,7 +1282,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1090,7 +1435,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       * (RSX local + 0x400000). Buckets keep only 4 address bits, so that may be
       * an artifact of where RSX local memory actually sits; the full EA settles
       * it. */
@@ -32893,7 +33211,7 @@ index 90f3221..ecf0250 100644
        if (s_pe && (cmd & 0xFF) >= 0x20u && (cmd & 0xFF) <= 0x2Fu) {
            static int shown[8];
            const unsigned sp2 = spu->spu_id & 7u;
-@@ -1108,7 +1300,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1108,7 +1453,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       * of VRAM decodes to correct game art -- so the rasteriser runs and the
       * asset upload works, and the question is what geometry these transfers
       * actually have. */
@@ -32902,7 +33220,7 @@ index 90f3221..ecf0250 100644
        if (s_ph && (cmd & 0xFF) >= 0x20u && (cmd & 0xFF) <= 0x2Fu) {
            static unsigned long long n[8][16], byt[8][16], nsz[8][8], tot;
            const unsigned sp = spu->spu_id & 7u;
-@@ -1141,7 +1333,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1141,7 +1486,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       * instead of image-22's lift_pol (sys-service). The cri task (0x3000+) is
       * registered under both 22 and 23, so it still resolves after the switch. */
      if (lsa == 0xA00u && (uint32_t)ea == 0x30023680u) {
@@ -32911,7 +33229,7 @@ index 90f3221..ecf0250 100644
          if (s_cc) {
              spu->image_id = 23;
              fprintf(stderr, "[cri-chain] taskset policy DMA'd to LS 0xA00 -> SPU image -> 23\n");
-@@ -1170,28 +1362,31 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1170,28 +1515,31 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
          }
      }
  
@@ -32965,7 +33283,7 @@ index 90f3221..ecf0250 100644
  
      /* Mark tag as in-progress */
      mfc->tag_completed &= ~(1u << tag);
-@@ -1208,7 +1403,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1208,7 +1556,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       * can see the work-fetch GET (func_000040F0) that precedes the branch-to-0 and
       * whether its source EA holds valid work-queue data. Env SPU_DMATRACE_ALL. */
      {
@@ -32974,7 +33292,7 @@ index 90f3221..ecf0250 100644
          /* SPU_DMATRACE=<img> traces one image; SPU_DMATRACE_ALL keeps the old
           * hardcoded pair. Seeing a job's FIRST transfers is how you tell a bad
           * parameter block from a bad address computed later. */
-@@ -1218,7 +1413,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1218,7 +1566,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
           * SPU issues no DMA at all". That produced a confidently wrong writeup
           * for Guitar Hero III, whose task is in fact busy. Accept "all", and
           * announce once what was armed so silence is never ambiguous. */
@@ -32983,7 +33301,7 @@ index 90f3221..ecf0250 100644
          if (only==-2){ const char* e=getenv("SPU_DMATRACE");
              only = !e ? -1 : ((strcmp(e,"all")==0 || strcmp(e,"ALL")==0) ? -3
                                                                          : strtol(e,0,0));
-@@ -1228,14 +1423,17 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1228,14 +1576,17 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
          }
          if ((dt && (spu->image_id==22 || spu->image_id==23)) ||
              only==-3 || (only >= 0 && spu->image_id == only)) {
@@ -33003,7 +33321,7 @@ index 90f3221..ecf0250 100644
                  mfc_ea_range_committed(ea, size)) {
                  const uint8_t* s = vm_base + (uint32_t)ea;
                  fprintf(stderr, "        got:");
-@@ -1247,7 +1445,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1247,7 +1598,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
               * SpursTasksetContext (LS 0x2700..0x27E0) so we can see which field
               * fed the bad EA. taskset@0x27B8, kernelMgmt@0x27C0, syscall@0x27C4. */
              if (spu->image_id==23 && lsa==0x2780u && ((ea>>32)&0xFFFF)) {
@@ -33012,7 +33330,7 @@ index 90f3221..ecf0250 100644
                      fprintf(stderr, "[cri-r4] BAD-DMA ea=0x%09llX; SpursTasksetContext LS[0x2700..0x27E0]:\n",
                              (unsigned long long)ea);
                      for (uint32_t o=0x2700; o<0x27E0; o+=16)
-@@ -1259,7 +1457,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1259,7 +1610,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
              /* kernel bootstrap DMA: dump LS[0x1C0] (=r17, the packed instance EA via
               * the entry's cdd/cwd/shufb) to check if the EA got byte-mangled. */
              if (cmd==0x40 && lsa==0x3FFE0) {
@@ -33021,7 +33339,7 @@ index 90f3221..ecf0250 100644
                      const uint8_t* p=&spu->ls[0x1C0];
                      fprintf(stderr, "[DMA] LS[0x1C0] (r17, packed instance) = %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X\n",
                          p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7],p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15]);
-@@ -1284,7 +1482,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1284,7 +1635,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       * SPURS job-queue kernel, never dispatching decode); if plane-sized PUTs
       * appear we learn where the decoded frame actually lands. Env SPU_DMATRACE_RAW. */
      {
@@ -33030,7 +33348,7 @@ index 90f3221..ecf0250 100644
          if (bt && spu->image_id==3) {
              uint32_t ea32 = (uint32_t)ea;
              int is_put   = ((cmd & 0x20) && !(cmd & 0x40));   /* PUT-family */
-@@ -1373,7 +1571,9 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1373,7 +1724,9 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
                      cmd, lsa, (unsigned long long)ea, size, tag);
          } else if (_pn == 96)
              fprintf(stderr, "[spurs-pm] DMA trace suppressed from here\n");
@@ -33041,7 +33359,7 @@ index 90f3221..ecf0250 100644
      }
  
      /* Execute the transfer.
-@@ -1386,11 +1586,25 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1386,11 +1739,25 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
           * they are easy to miss entirely while diagnosing a pipeline that
           * never fills. Always report the issue: the DESTINATION lsa is the
           * value the whole transfer hangs on. */
@@ -33068,7 +33386,7 @@ index 90f3221..ecf0250 100644
          rc = mfc_do_list_transfer(spu, (uint32_t)ea & SPU_LS_MASK,
                                    ea & 0xFFFFFFFF00000000ull, size, cmd);
      } else {
-@@ -1406,7 +1620,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1406,7 +1773,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
           * dispatch that CLAIMS a ticket but never stages its job. */
          { extern volatile unsigned g_wws_batch_gets; g_wws_batch_gets++; }
          static int _n = 0;
@@ -33077,7 +33395,7 @@ index 90f3221..ecf0250 100644
              const uint8_t* p = spu->ls + 0xC00;
              fprintf(stderr, "[wws-batch] GET 0xC00 ea=0x%09llX size=0x%X:",
                      (unsigned long long)ea, size);
-@@ -1419,8 +1633,8 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1419,8 +1786,8 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
           * shareableWriteIfDiscarded=(f>>12)&1, logBufSet=(f>>5)&0xF, logBuf=f&0x1F.
           * Answers lifter-vs-builder: are shareable-output UseBuffer + kRunJob +
           * store commands PRESENT in the list the PPU built? */
@@ -33088,7 +33406,7 @@ index 90f3221..ecf0250 100644
              static const char* NM[8] = {"kNop","kReserveBufSet","kUseBuffer",
                  "kUnreserveBufSets","kReqDepDec","kRunJob","kEndCommand","kInvalid"};
              const uint8_t* p = spu->ls + 0xC00;
-@@ -1439,9 +1653,9 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1439,9 +1806,9 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
      /* After a cri-task GET, dump the bytes it just read (the task context) so we
       * can tell if eaContext holds valid SPURS work data or garbage. */
      {
@@ -33100,7 +33418,7 @@ index 90f3221..ecf0250 100644
                  const uint8_t* p = spu->ls + (lsa & 0x3FFFF);
                  fprintf(stderr, "[DMA] GET data @LS0x%05X (from ea=0x%09llX):", lsa, (unsigned long long)ea);
                  for (uint32_t i=0;i<size && i<0x40;i+=4)
-@@ -1460,6 +1674,43 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1460,6 +1827,43 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
      return rc;
  }
  
@@ -33144,7 +33462,7 @@ index 90f3221..ecf0250 100644
  /* ---------------------------------------------------------------------------
   * Tag group synchronization
   * -----------------------------------------------------------------------*/
-@@ -1539,9 +1790,9 @@ static inline void mfc_channel_write(mfc_engine* mfc, spu_context* spu,
+@@ -1539,9 +1943,9 @@ static inline void mfc_channel_write(mfc_engine* mfc, spu_context* spu,
           * RdTagStat must equal the mask EXACTLY (mask 2 = tag 1 =
           * kLoadJob_readBuffers). Log the inputs so we can see whether the tag
           * really is reported complete. Env SPU_TAGPROBE=1. */
@@ -33157,10 +33475,18 @@ index 90f3221..ecf0250 100644
                        spu->image_id, value, spu->mfc_tag_mask, mfc->tag_completed,
                        spu->mfc_tag_status,
 diff --git a/runtime/spu/spu_drain.c b/runtime/spu/spu_drain.c
-index 931d3b3..66294b9 100644
+index 931d3b3..0eeccdf 100644
 --- a/runtime/spu/spu_drain.c
 +++ b/runtime/spu/spu_drain.c
-@@ -17,9 +17,6 @@ typedef struct spu_irq_frame {
+@@ -5,6 +5,7 @@
+  * gain real bodies in their own milestones. Keeping them as real out-of-line
+  * functions (not macros) means the SPU_DRAIN/SPU_RET call sites are already in
+  * place -- later milestones only replace the bodies. */
++#define SPU_DRAIN_NO_INLINE   /* defines spu_drain_call */
+ #include "spu_context.h"
+ #include <setjmp.h>
+ 
+@@ -17,9 +18,6 @@ typedef struct spu_irq_frame {
  } spu_irq_frame;
  
  /* Pending cross-function transfer target for this host thread's SPU context. */
@@ -33170,7 +33496,7 @@ index 931d3b3..66294b9 100644
  
  /* yz_lockstep_tick now has its real body in spu_lockstep.c (milestone 2). */
  
-@@ -29,7 +26,7 @@ SPU_THREAD_LOCAL unsigned g_spu_pch_n;
+@@ -29,7 +27,7 @@ SPU_THREAD_LOCAL unsigned g_spu_pch_n;
  /* PM flow trace (SPURS_PM_FLOW=1): record every cross-function transfer of ONE
   * policy-module run (the ctx spurs_policy.c arms) so the post-claim decision
   * path can be reconstructed offline. Written by the drain-loop hook below;
@@ -33179,7 +33505,7 @@ index 931d3b3..66294b9 100644
  uint32_t          g_pm_flow_buf[8192];
  volatile unsigned g_pm_flow_n = 0;
  void* volatile    g_pm_flow_ctx = 0;
-@@ -46,45 +43,77 @@ void* volatile    g_pm_flow_ctx = 0;
+@@ -46,45 +44,77 @@ void* volatile    g_pm_flow_ctx = 0;
   * set the done bit on the pending records -- the faithful sync equivalent of
   * the completion interrupt. Env SPU_JOBDRAIN (default off while validating). */
  extern void spu_halt(spu_context*);
@@ -33274,7 +33600,7 @@ index 931d3b3..66294b9 100644
              fprintf(stderr, "[spurs-job] img=%d branched to LS 0 -- job complete\n",
                      ctx->image_id);
          if (s_et >= 0 && ctx->image_id == s_et) {
-@@ -99,9 +128,9 @@ void spu_task_launch_check(spu_context* ctx, void* fn)
+@@ -99,9 +129,9 @@ void spu_task_launch_check(spu_context* ctx, void* fn)
      /* SPU_STEPTRACE=<img>: pc and the argument registers at every trampoline
       * step. This runs on each drain iteration, so it is the finest-grained
       * view of a register file changing under a running job. */
@@ -33286,7 +33612,7 @@ index 931d3b3..66294b9 100644
        if (s_from == -2) { const char* e = getenv("SPU_STEPTRACE_FROM");
                            s_from = e ? strtol(e,0,16) : -1; }
        static int s_armed = 0;
-@@ -109,7 +138,7 @@ void spu_task_launch_check(spu_context* ctx, void* fn)
+@@ -109,7 +139,7 @@ void spu_task_launch_check(spu_context* ctx, void* fn)
            if (s_from >= 0 && !s_armed &&
                ((uint32_t)ctx->pc & SPU_LS_MASK) == (uint32_t)s_from) s_armed = 1;
            static int n = 0;
@@ -33295,7 +33621,7 @@ index 931d3b3..66294b9 100644
                fprintf(stderr, "[step] pc=0x%05X r1=0x%05X r2=0x%08X r3=0x%08X r4=0x%08X\n",
                        (uint32_t)ctx->pc & SPU_LS_MASK, ctx->gpr[1]._u32[0],
                        ctx->gpr[2]._u32[0], ctx->gpr[3]._u32[0], ctx->gpr[4]._u32[0]);
-@@ -119,7 +148,7 @@ void spu_task_launch_check(spu_context* ctx, void* fn)
+@@ -119,7 +149,7 @@ void spu_task_launch_check(spu_context* ctx, void* fn)
      if (g_pm_flow_ctx == (void*)ctx && g_pm_flow_n < 8192)
          g_pm_flow_buf[g_pm_flow_n++] = ctx->pc;
  
@@ -33304,7 +33630,7 @@ index 931d3b3..66294b9 100644
      if (s_on < 0) s_on = getenv("SPU_JOBDRAIN") ? 1 : 0;
      if (!s_on || ctx->image_id != 2 || !ctx->policy_mode) return;
  
-@@ -145,7 +174,7 @@ void spu_task_launch_check(spu_context* ctx, void* fn)
+@@ -145,7 +175,7 @@ void spu_task_launch_check(spu_context* ctx, void* fn)
          marked++;
      }
      static int _n = 0;
@@ -33313,7 +33639,7 @@ index 931d3b3..66294b9 100644
          fprintf(stderr, "[pm-jobdrain] ring-full spin: marked %d pending records done\n", marked);
  }
  
-@@ -194,12 +223,10 @@ void spu_img_restore(spu_context* ctx, int32_t saved_img)
+@@ -194,12 +224,10 @@ void spu_img_restore(spu_context* ctx, int32_t saved_img)
   * brhz cond1,Exit` to LS 0x2D30, skipping the Load setup.) Default OFF; kept
   * env-gated for experiments: SPU_SN_DEFER=<n> ticks (0 = immediate, faithful
   * to the current synchronous list execution). */
@@ -33327,7 +33653,7 @@ index 931d3b3..66294b9 100644
      if (s_n < 0) { const char* e = getenv("SPU_SN_DEFER"); s_n = e ? atoi(e) : 0; }
      return (unsigned)(s_n < 0 ? 0 : s_n);
  }
-@@ -223,9 +250,18 @@ unsigned spu_sn_defer_ticks(void)
+@@ -223,9 +251,18 @@ unsigned spu_sn_defer_ticks(void)
   * until iret). */
  static void spu_irq_regs_save(spu_context* ctx)
  {
@@ -33349,7 +33675,7 @@ index 931d3b3..66294b9 100644
  }
  
  /* Called from spu_indirect_branch on every dispatch. Restores + clears when
-@@ -236,37 +272,51 @@ static void spu_irq_regs_save(spu_context* ctx)
+@@ -236,37 +273,51 @@ static void spu_irq_regs_save(spu_context* ctx)
   * context's registers wholesale. A fresh run must never do that. */
  void spu_irq_regs_forget(spu_context* ctx)
  {
@@ -33412,7 +33738,7 @@ index 931d3b3..66294b9 100644
                            fprintf(stderr, "[irq] IRET at depth %u unwinds to the driver (srr0=0x%05X)\n",
                                    ctx->host_depth, ctx->pc & SPU_LS_MASK); }
                      extern void spu_restart_dispatch(spu_context*);
-@@ -284,8 +334,8 @@ void (*spu_take_interrupt(spu_context* ctx,
+@@ -284,8 +335,8 @@ void (*spu_take_interrupt(spu_context* ctx,
                            void (*tf)(spu_context*)))(spu_context*)
  {
      /* Stall-and-notify still settling: let the SPU run on (see above). */
@@ -33423,7 +33749,7 @@ index 931d3b3..66294b9 100644
          return tf;
      }
      const uint8_t* v = ctx->ls;      /* vector word at LS 0, big-endian */
-@@ -299,23 +349,23 @@ void (*spu_take_interrupt(spu_context* ctx,
+@@ -299,23 +350,23 @@ void (*spu_take_interrupt(spu_context* ctx,
          target = (((w >> 7) & 0xFFFF) << 2) & SPU_LS_MASK;
      } else {
          static int _w = 0;
@@ -33452,7 +33778,7 @@ index 931d3b3..66294b9 100644
            /* WWS Load->Run diagnosis: the job-manager interrupt handler advances
             * g_WwsJob_loadJobState kReadCommands(1)->kExecuteCommands(2) only if
             * (a) the ch25 stall mask has tag 0 (kLoadJob_readCommands) AND
-@@ -325,7 +375,7 @@ void (*spu_take_interrupt(spu_context* ctx,
+@@ -325,7 +376,7 @@ void (*spu_take_interrupt(spu_context* ctx,
            fprintf(stderr, "[spu-int] TAKEN img=%d events=0x%X&0x%X vector->0x%05X "
                    "(srr0=0x%05X) stallstat=0x%X parked=0x%X loadJobState@12A0=%02X%02X%02X%02X "
                    "%02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X\n", ctx->image_id,
@@ -33461,7 +33787,7 @@ index 931d3b3..66294b9 100644
                    ctx->list_stall_stat, ctx->list_stall_mask,
                    js[0],js[1],js[2],js[3], js[4],js[5],js[6],js[7],
                    js[8],js[9],js[10],js[11], js[12],js[13],js[14],js[15]); } }
-@@ -335,7 +385,7 @@ void (*spu_take_interrupt(spu_context* ctx,
+@@ -335,7 +386,7 @@ void (*spu_take_interrupt(spu_context* ctx,
  /* See the declaration in spu_context.h. */
  void spu_depth_guard(spu_context* ctx)
  {
@@ -33470,7 +33796,7 @@ index 931d3b3..66294b9 100644
      if (!s_max) {
          const char* e = getenv("SPU_HOST_DEPTH_MAX");
          s_max = e ? (uint32_t)strtoul(e, 0, 0) : 2000u;
-@@ -345,13 +395,12 @@ void spu_depth_guard(spu_context* ctx)
+@@ -345,13 +396,12 @@ void spu_depth_guard(spu_context* ctx)
       * not "where are we" but "what cycle got us here" -- one pc names a point,
       * a ring names the loop. */
      enum { RING = 24 };
@@ -33488,7 +33814,7 @@ index 931d3b3..66294b9 100644
      if (s_reported < 1) {   /* one report: five SPU threads all trip together */
          s_reported++;
          fprintf(stderr, "[spu-depth] img=%d pc=0x%05X lr=0x%05X host_depth=%u"
-@@ -369,11 +418,11 @@ void spu_depth_guard(spu_context* ctx)
+@@ -369,11 +419,11 @@ void spu_depth_guard(spu_context* ctx)
  }
  
  /* See spu_context.h. Env-gated: SPU_TAILRET=1. */
@@ -33503,7 +33829,7 @@ index 931d3b3..66294b9 100644
  }
  
  /* A return may use any register, not only r0. Running that branch target
-@@ -404,7 +453,7 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
+@@ -404,7 +454,7 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
       * loop exits, whichever first. */
      spu_irq_frame f;
      f.prev = 0; f.depth = 0; f.image_id = 0;
@@ -33512,7 +33838,7 @@ index 931d3b3..66294b9 100644
      for (;;) {
          while (g_spu_trampoline_fn) {
              if (g_spu_trampoline_fn == spu_indirect_branch &&
-@@ -415,10 +464,10 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
+@@ -415,10 +465,10 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
              }
              void (*fn)(spu_context*) = g_spu_trampoline_fn;
              g_spu_trampoline_fn = 0;
@@ -33527,7 +33853,7 @@ index 931d3b3..66294b9 100644
                  void (*vf)(spu_context*) = spu_take_interrupt(ctx, fn);
                  if (!ctx->int_enable) {   /* taken (a take clears the enable; a deferral leaves it) */
                      /* Interrupt taken here: this loop is the frame the iret
-@@ -429,7 +478,7 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
+@@ -429,7 +479,7 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
                          f.image_id = ctx->image_id;
                          ctx->irq_frame = &f;
                      }
@@ -33536,7 +33862,7 @@ index 931d3b3..66294b9 100644
                          vf(ctx);
                      } else {
                          /* iret fired deeper: registers restored, pc = srr0 */
-@@ -449,10 +498,20 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
+@@ -449,10 +499,20 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
          }
          {
              uint32_t pc = ctx->pc & SPU_LS_MASK;
@@ -33561,7 +33887,7 @@ index 931d3b3..66294b9 100644
                              (unsigned)(return_pc & SPU_LS_MASK), pc, ctx->image_id, ctx->host_depth,
                              (int)ctx->resident_ovl); }
 diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
-index 0fca7f5..ebfa8ce 100644
+index 0fca7f5..9a66eeb 100644
 --- a/runtime/spu/spu_helpers.h
 +++ b/runtime/spu/spu_helpers.h
 @@ -21,6 +21,17 @@
@@ -33696,7 +34022,7 @@ index 0fca7f5..ebfa8ce 100644
  /* ---- constructors ---- */
  static inline u128 spu_splat_u32(uint32_t v) {
      u128 r; r._u32[0]=v; r._u32[1]=v; r._u32[2]=v; r._u32[3]=v; return r;
-@@ -99,109 +217,288 @@ static inline u128 spu_splat_u8(uint8_t v) {
+@@ -99,109 +217,265 @@ static inline u128 spu_splat_u8(uint8_t v) {
  static inline u128 spu_zero(void) { u128 r; memset(&r,0,sizeof r); return r; }
  
  /* ---- integer arithmetic (SIMD) ---- */
@@ -33998,46 +34324,6 @@ index 0fca7f5..ebfa8ce 100644
 +/* NEON version: tbl over the 32-byte {a,b} concatenation. SPU byte P lives at
 + * host byte P^3 (each word's bytes reversed), so rev32 into SPU order,
 + * select, and rev32 back. */
-+static inline u128 spu_shufb(u128 a, u128 b, u128 c) {
-+    uint8x16x2_t t;
-+    t.val[0] = vrev32q_u8(vld1q_u8(a._u8));
-+    t.val[1] = vrev32q_u8(vld1q_u8(b._u8));
-+    const uint8x16_t C = vrev32q_u8(vld1q_u8(c._u8));
-+    uint8x16_t r = vqtbl2q_u8(t, vandq_u8(C, vdupq_n_u8(0x1F)));
-+    /* Special selectors: 10x -> 0x00, 110 -> 0xFF, 111 -> 0x80. */
-+    const uint8x16_t m80 = vtstq_u8(C, vdupq_n_u8(0x80));
-+    const uint8x16_t mC0 = vceqq_u8(vandq_u8(C, vdupq_n_u8(0xC0)), vdupq_n_u8(0xC0));
-+    const uint8x16_t mE0 = vceqq_u8(vandq_u8(C, vdupq_n_u8(0xE0)), vdupq_n_u8(0xE0));
-+    const uint8x16_t special = vbslq_u8(mE0, vdupq_n_u8(0x80), mC0);
-+    r = vrev32q_u8(vbslq_u8(m80, special, r));
-+    u128 out; vst1q_u8(out._u8, r); return out;
-+}
-+#endif
-+#if defined(__SSE4_1__) || defined(__ARM_NEON)
-+/* The byte loop stays as the reference (tests/test_spu_shufb.c checks both). */
-+static inline u128 spu_shufb_ref(u128 a, u128 b, u128 c) {
-+    /* shufb is defined on SPU byte positions. Our u128 is host-native LE, so SPU
-+     * byte P lives at _u8[SPU_W(P)]; map every access (the concat source, the
-+     * control, and the result) through SPU_W so a control supplied as an immediate
-+     * (ila/il) or an LS-loaded constant -- already in true SPU byte order -- is
-+     * interpreted correctly. The cbd/chd/cwd/cdd generators below produce true
-+     * SPU-byte-order selectors to match. */
-+    uint8_t cat[32];
-+    for (int j=0;j<16;j++) cat[j]    = a._u8[SPU_W(j)];   /* concat SPU byte j  = a SPU byte j */
-+    for (int j=0;j<16;j++) cat[16+j] = b._u8[SPU_W(j)];   /* concat SPU byte 16+j = b SPU byte j */
-+    u128 r;
-+    for (int t=0;t<16;t++) {                              /* result SPU byte t */
-+        uint8_t s = c._u8[SPU_W(t)];                      /* control SPU byte t */
-+        uint8_t v;
-+        if      ((s & 0xE0)==0xE0) v=0x80;
-+        else if ((s & 0xC0)==0xC0) v=0xFF;
-+        else if ((s & 0xC0)==0x80) v=0x00;
-+        else                       v=cat[s & 0x1F];       /* concat SPU byte (s & 0x1F) */
-+        r._u8[SPU_W(t)] = v;
-+    }
-+    return r;
-+}
-+#else
  static inline u128 spu_shufb(u128 a, u128 b, u128 c) {
 -    const __m128i sw = _mm_setr_epi8(3,2,1,0, 7,6,5,4, 11,10,9,8, 15,14,13,12);
 -    __m128i A, B, C; memcpy(&A, &a, 16); memcpy(&B, &b, 16); memcpy(&C, &c, 16);
@@ -34055,10 +34341,27 @@ index 0fca7f5..ebfa8ce 100644
 -}
 -/* The byte loop stays as the reference (tests/test_spu_shufb.c checks both). */
 -static inline u128 spu_shufb_ref(u128 a, u128 b, u128 c) {
++    uint8x16x2_t t;
++    t.val[0] = vrev32q_u8(vld1q_u8(a._u8));
++    t.val[1] = vrev32q_u8(vld1q_u8(b._u8));
++    const uint8x16_t C = vrev32q_u8(vld1q_u8(c._u8));
++    uint8x16_t r = vqtbl2q_u8(t, vandq_u8(C, vdupq_n_u8(0x1F)));
++    /* Special selectors: 10x -> 0x00, 110 -> 0xFF, 111 -> 0x80. */
++    const uint8x16_t m80 = vtstq_u8(C, vdupq_n_u8(0x80));
++    const uint8x16_t mC0 = vceqq_u8(vandq_u8(C, vdupq_n_u8(0xC0)), vdupq_n_u8(0xC0));
++    const uint8x16_t mE0 = vceqq_u8(vandq_u8(C, vdupq_n_u8(0xE0)), vdupq_n_u8(0xE0));
++    const uint8x16_t special = vbslq_u8(mE0, vdupq_n_u8(0x80), mC0);
++    r = vrev32q_u8(vbslq_u8(m80, special, r));
++    u128 out; vst1q_u8(out._u8, r); return out;
++}
++#endif
++#if defined(__SSE4_1__) || defined(__ARM_NEON)
++/* The byte loop stays as the reference (tests/test_spu_shufb.c checks both). */
++static inline u128 spu_shufb_ref(u128 a, u128 b, u128 c) {
      /* shufb is defined on SPU byte positions. Our u128 is host-native LE, so SPU
       * byte P lives at _u8[SPU_W(P)]; map every access (the concat source, the
       * control, and the result) through SPU_W so a control supplied as an immediate
-@@ -223,76 +520,925 @@ static inline u128 spu_shufb_ref(u128 a, u128 b, u128 c) {
+@@ -223,76 +497,948 @@ static inline u128 spu_shufb_ref(u128 a, u128 b, u128 c) {
      }
      return r;
  }
@@ -34087,6 +34390,29 @@ index 0fca7f5..ebfa8ce 100644
 -}
 -#define spu_shufb_ref spu_shufb
 -#endif
++#else
++static inline u128 spu_shufb(u128 a, u128 b, u128 c) {
++    /* shufb is defined on SPU byte positions. Our u128 is host-native LE, so SPU
++     * byte P lives at _u8[SPU_W(P)]; map every access (the concat source, the
++     * control, and the result) through SPU_W so a control supplied as an immediate
++     * (ila/il) or an LS-loaded constant -- already in true SPU byte order -- is
++     * interpreted correctly. The cbd/chd/cwd/cdd generators below produce true
++     * SPU-byte-order selectors to match. */
++    uint8_t cat[32];
++    for (int j=0;j<16;j++) cat[j]    = a._u8[SPU_W(j)];   /* concat SPU byte j  = a SPU byte j */
++    for (int j=0;j<16;j++) cat[16+j] = b._u8[SPU_W(j)];   /* concat SPU byte 16+j = b SPU byte j */
++    u128 r;
++    for (int t=0;t<16;t++) {                              /* result SPU byte t */
++        uint8_t s = c._u8[SPU_W(t)];                      /* control SPU byte t */
++        uint8_t v;
++        if      ((s & 0xE0)==0xE0) v=0x80;
++        else if ((s & 0xC0)==0xC0) v=0xFF;
++        else if ((s & 0xC0)==0x80) v=0x00;
++        else                       v=cat[s & 0x1F];       /* concat SPU byte (s & 0x1F) */
++        r._u8[SPU_W(t)] = v;
++    }
++    return r;
++}
 +#define spu_shufb_ref spu_shufb
 +#endif
  
@@ -35416,7 +35742,7 @@ index 0fca7f5..ebfa8ce 100644
      u128 r;
      for(int i=0;i<4;i++) {
          uint64_t s = (uint64_t)b._u32[i] + (uint64_t)(~a._u32[i]) + (uint64_t)(t._u32[i]&1);
-@@ -631,4 +1854,579 @@ static inline u128 spu_iohl(u128 a, uint16_t imm){ u128 r; for(int i=0;i<4;i++)
+@@ -631,4 +1854,588 @@ static inline u128 spu_iohl(u128 a, uint16_t imm){ u128 r; for(int i=0;i<4;i++)
  }
  #endif
  
@@ -35994,6 +36320,15 @@ index 0fca7f5..ebfa8ce 100644
 +}
 +#define spu_wrch(ctx, ch, v) spu_wrch_fast((ctx), (ch), (v))
 +#endif
++
++/* `bid` lifted as a goto (spu_lifter.py --const-bi): the interrupt-enable
++ * write, in a form the register localization treats as register-free. */
++static inline void spu_int_set(spu_context* ctx, int on) { ctx->int_enable = on; }
++/* An interrupt the drain loop would take at a transfer (spu_drain_call). */
++static inline int spu_irq_pending(const spu_context* ctx)
++{
++    return ctx->int_enable && !ctx->irq_saved && (spu_ev_get(ctx) & ctx->event_mask);
++}
 +
  #endif /* SPU_HELPERS_H */
 diff --git a/runtime/spu/spu_interp.c b/runtime/spu/spu_interp.c
@@ -39829,10 +40164,11 @@ index 0000000..2159e11
 +    main()
 diff --git a/runtime/spu/tests/spu_interp_diff_test.c b/runtime/spu/tests/spu_interp_diff_test.c
 new file mode 100644
-index 0000000..4cd077c
+index 0000000..f98ec72
 --- /dev/null
 +++ b/runtime/spu/tests/spu_interp_diff_test.c
-@@ -0,0 +1,783 @@
+@@ -0,0 +1,784 @@
++#define SPU_DRAIN_NO_INLINE   /* stubs spu_drain_call */
 +/* spu_interp_diff_test.c -- bit-exact differential test of the SPU interpreter (and, optionally,
 + * the SPU lifter's emitted C) against RPCS3's own SPU interpreter.
 + *
@@ -40617,10 +40953,15 @@ index 0000000..4cd077c
 +    return okk ? 0 : 1;
 +}
 diff --git a/runtime/spu/tests/spu_interp_selftest.c b/runtime/spu/tests/spu_interp_selftest.c
-index 21bc39e..3604693 100644
+index 21bc39e..7b5912f 100644
 --- a/runtime/spu/tests/spu_interp_selftest.c
 +++ b/runtime/spu/tests/spu_interp_selftest.c
-@@ -18,12 +18,20 @@ u128 spu_rdch(spu_context* c, uint32_t ch) { (void)c;(void)ch; u128 z; memset(&z
+@@ -1,3 +1,4 @@
++#define SPU_DRAIN_NO_INLINE   /* stubs spu_drain_call */
+ /* spu_interp_selftest.c — end-to-end check of the SPU interpreter.
+  *
+  * Runs a snippet assembled by spu-lv2-as (bytes below) through the interpreter
+@@ -18,12 +19,20 @@ u128 spu_rdch(spu_context* c, uint32_t ch) { (void)c;(void)ch; u128 z; memset(&z
  void spu_wrch(spu_context* c, uint32_t ch, u128 v) { (void)c;(void)ch;(void)v; }
  uint32_t spu_rchcnt(spu_context* c, uint32_t ch) { (void)c;(void)ch; return 1; }
  
@@ -40647,7 +40988,7 @@ index 21bc39e..3604693 100644
  /* .text of the assembled snippet (big-endian words, verbatim). */
  static const unsigned char PROG[] = {
      0x40,0x80,0x02,0x82, 0x40,0x80,0x03,0x83, 0x18,0x00,0xc1,0x04,
-@@ -64,22 +72,361 @@ int main(void) {
+@@ -64,22 +73,361 @@ int main(void) {
      };
      static spu_context lc;
      memset(&lc, 0, sizeof lc);
@@ -51167,10 +51508,10 @@ index 2630352..9380de3 100644
      0b01111101: "ceqhi",  # compare equal halfword immediate
      0b01111110: "ceqbi",  # compare equal byte immediate
 diff --git a/tools/spu_lifter.py b/tools/spu_lifter.py
-index bfc9af4..c312769 100644
+index bfc9af4..f061179 100644
 --- a/tools/spu_lifter.py
 +++ b/tools/spu_lifter.py
-@@ -193,6 +193,170 @@ def _chan(token: str) -> str:
+@@ -193,6 +193,171 @@ def _chan(token: str) -> str:
          return m.group(1)
      return token
  
@@ -51194,7 +51535,8 @@ index bfc9af4..c312769 100644
 +# The MFC parameter channel writes only latch ctx->mfc_* (spu_wrch_fast): no
 +# register traffic around them.
 +_SAFE_CTX_RE = re.compile(r"spu_ls_(?:read|write)128\(ctx,|spu_loop_tick\(ctx|"
-+                          r"spu_wrch\(ctx, MFC_(?:LSA|EAH|EAL|Size|TagID),")
++                          r"spu_wrch\(ctx, MFC_(?:LSA|EAH|EAL|Size|TagID),|spu_int_set\(ctx,|"
++                          r"spu_irq_pending\(ctx\)")
 +_LABEL_RE = re.compile(r"loc_[0-9A-Fa-f]+:")
 +_GOTO_RE = re.compile(r"\bgoto (loc_[0-9A-Fa-f]+);")
 +_LOOP_TICK = "    if (__builtin_expect(spu_loop_tick(ctx), 0)) { spu_job_overrun(ctx); return; }"
@@ -51341,10 +51683,56 @@ index bfc9af4..c312769 100644
  # ---------------------------------------------------------------------------
  # Lifter
  # ---------------------------------------------------------------------------
-@@ -338,6 +502,43 @@ def compute_bi_r0_jumps(insns, bounds) -> set:
+@@ -338,6 +503,89 @@ def compute_bi_r0_jumps(insns, bounds) -> set:
      return jumps
  
  
++_FLOW_BREAKS = {"bi", "iret", "biz", "binz", "bihz", "bihnz", "br", "bra", "brz",
++                "brnz", "brhz", "brhnz", "brsl", "brasl", "bisl", "bisled",
++                "stop", "stopd"}
++
++
++def compute_const_bi_targets(insns, bounds) -> dict:
++    """`bi $rN` sites whose target is a constant: the nearest write to rN in
++    the same chunk, with no branch, call or stop between, is an `il`/`ila`.
++
++    That is how Sony's SPU code moves between the halves of an interrupt
++    window -- `ila $r3,<resume> / bid $r3` -- and it is most of the indirect
++    transfers in the job modules (164 of 173 in the busiest one). Lifted as an
++    indirect transfer, each goes back to the drain loop, through
++    spu_indirect_branch and a registry lookup, to land on an address known at
++    lift time. A chunk starts at every branch target, so nothing enters
++    between the load and the branch. Returns {bi addr: target}."""
++    out = {}
++    ordered = sorted(insns, key=lambda x: x.addr)
++    # Every direct branch target is a place control can arrive from
++    # elsewhere: the scan stops there whatever the bounds are (sized symbols
++    # or --functions bounds need not split at each one).
++    entries = {t for t in (SPULifter._branch_target(i) for i in ordered) if t is not None}
++    for (s, e) in bounds:
++        fn = [i for i in ordered if s <= i.addr < e]
++        for idx, insn in enumerate(fn):
++            if insn.mnemonic != "bi":
++                continue
++            reg = _bi_target_reg(insn)
++            if reg is None:
++                continue
++            r = int(reg)
++            for j in range(idx - 1, -1, -1):
++                w = fn[j]
++                if w.mnemonic in _FLOW_BREAKS or fn[j + 1].addr in entries:
++                    break
++                if w.mnemonic in _NO_RT_WRITE or _dest_reg(w) != r:
++                    continue
++                if w.mnemonic == "ila":
++                    out[insn.addr] = ((w.raw >> 7) & 0x3FFFF) & 0x3FFFC
++                elif w.mnemonic == "il":
++                    v = (w.raw >> 7) & 0xFFFF
++                    out[insn.addr] = (v - 0x10000 if v & 0x8000 else v) & 0x3FFFC
++                break
++    return out
++
++
 +def merge_chunk_groups(insns, bounds, max_insns, entry_points=()) -> dict:
 +    """Group contiguous chunks into function-sized runs for --merge-chunks.
 +
@@ -51385,7 +51773,7 @@ index bfc9af4..c312769 100644
  def compute_link_returns(insns, bounds) -> set:
      """A `bi $rN` / conditional `bi{z,nz,hz,hnz} $rC,$rN` with N != 0 is emitted
      as a generic indirect branch, but Sony's SPU compiler also uses a NON-r0
-@@ -456,6 +657,11 @@ def compute_link_returns(insns, bounds) -> set:
+@@ -456,6 +704,11 @@ def compute_link_returns(insns, bounds) -> set:
      return returns
  
  
@@ -51397,7 +51785,42 @@ index bfc9af4..c312769 100644
  class SPULifter:
      def __init__(self, trace: bool = False, prefix: str = ""):
          self.functions: list[LiftedFunction] = []
-@@ -524,7 +730,10 @@ class SPULifter:
+@@ -487,6 +740,14 @@ class SPULifter:
+         # compute_link_returns(). Emitted as `return;` so they compose with the
+         # brsl->C-call nesting instead of branching to an unregistered PC.
+         self.link_return: set = set()
++        # `bi $rN` sites with a constant target (compute_const_bi_targets,
++        # --const-bi): {addr: target}. Empty => every one dispatches indirectly.
++        self.const_bi: dict = {}
++        # Targets a direct trampoline must not take: where spu_indirect_branch
++        # does more than dispatch (kernel and policy-module services, job
++        # return), and call-return addresses, which the drain recognises as
++        # a return only through spu_indirect_branch.
++        self.const_bi_unsafe: set = set()
+ 
+     # ------------------------------------------------------------------ #
+     def lift_function(self, insns: list[SPUInstruction],
+@@ -501,6 +762,9 @@ class SPULifter:
+             tgt = self._branch_target(insn)
+             if tgt is not None and start <= tgt < end:
+                 internal.add(tgt)
++            ct = self._const_bi_goto(insn, start, end)
++            if ct is not None:
++                internal.add(ct)
+ 
+         last_insn = None
+         for insn in insns:
+@@ -512,7 +776,8 @@ class SPULifter:
+             if c:
+                 if self.trace:
+                     func.body_lines.append(f"    spu_trace_pc(ctx, 0x{insn.addr:X});")
+-                func.body_lines.append(f"    {c}")
++                # One statement per line: --local-regs classifies lines.
++                func.body_lines.extend(f"    {part}" for part in c.split("\n"))
+                 if self.trace and insn.mnemonic not in _NO_RT_WRITE:
+                     rt_idx = insn.raw & 0x7F
+                     func.body_lines.append(f"    spu_trace_rt(ctx, {rt_idx});")
+@@ -524,7 +789,10 @@ class SPULifter:
          # into the next sequential function. Emit a tail-call so the chain isn't
          # truncated (this was silently dropping execution mid-job).
          _TERMINATORS = {"br", "bra", "bi", "iret", "stop", "stopd"}
@@ -51409,7 +51832,7 @@ index bfc9af4..c312769 100644
                  and end in getattr(self, "func_starts", set())):
              func.body_lines.append(
                  f"    {{ ctx->pc = 0x{end:X}; "
-@@ -610,7 +819,15 @@ class SPULifter:
+@@ -610,7 +878,15 @@ class SPULifter:
          if mn == "stop":
              # Preserve the 14-bit stop-and-signal code: SPURS leaf tasks use
              # `stop <code>` to invoke kernel syscalls (EXIT/YIELD/WAIT_SIGNAL/...).
@@ -51426,7 +51849,7 @@ index bfc9af4..c312769 100644
                      f"ctx->status = SPU_STATUS_STOPPED_BY_STOP; spu_stop(ctx); return;")
  
          # ---- immediate loaders ----
-@@ -657,7 +874,8 @@ class SPULifter:
+@@ -657,7 +933,8 @@ class SPULifter:
                      f"ctx->status = SPU_STATUS_STOPPED_BY_HALT; "
                      f"spu_halt(ctx); return; }}")
          if mn == "stopd":
@@ -51436,7 +51859,7 @@ index bfc9af4..c312769 100644
                      "ctx->status = SPU_STATUS_STOPPED_BY_STOP; spu_stop(ctx); return;")
  
          # ---- integer arithmetic (register) ----
-@@ -838,7 +1056,7 @@ class SPULifter:
+@@ -838,7 +1115,7 @@ class SPULifter:
              tgt = self._branch_target(insn)
              # Link register: preferred word only, other slots ZERO (real HW /
              # RPCS3 v128::from32r) -- splatting corrupts full-quadword link use.
@@ -51445,7 +51868,7 @@ index bfc9af4..c312769 100644
              # SELF-LOOP TRAP: `brsl rX, .` (target == this instruction) is an
              # infinite loop on real SPU (re-sets the link each pass, never
              # advances) -- a trap, NOT a call. Emitting a host call recurses
-@@ -873,7 +1091,9 @@ class SPULifter:
+@@ -873,7 +1150,9 @@ class SPULifter:
              if tgt is None:
                  return (f'/* TODO spu: {mn} {insn.operands} */ '
                          f'spu_unsupported(0x{insn.addr:X}, "{mn}");')
@@ -51456,7 +51879,35 @@ index bfc9af4..c312769 100644
                  return f"if ({cond}) goto loc_{tgt:08X};"
              self.branch_targets.add(tgt)
              # Cross-function conditional branch = conditional tail: hand the
-@@ -925,19 +1145,21 @@ class SPULifter:
+@@ -906,6 +1185,27 @@ class SPULifter:
+                 if tgt_reg != "0":
+                     return f"{_ied}SPU_RET_REG(ctx, {tgt_reg});"
+                 return f"{_ied}SPU_RET(ctx);"
++            ct = self.const_bi.get(addr)
++            if ct is not None:
++                if self._const_bi_goto(insn, func.start_addr, func.end_addr) is not None:
++                    # spu_int_set, not a ctx store: --local-regs keeps the
++                    # registers in locals across it (_SAFE_CTX_RE). Unless the
++                    # branch disables interrupts, one pending now is taken
++                    # where the drain loop would have taken it: on the way out.
++                    parts = []
++                    if insn.raw & 0x40000:
++                        parts.append("spu_int_set(ctx, 1);")
++                    elif insn.raw & 0x80000:
++                        parts.append("spu_int_set(ctx, 0);")
++                    if not insn.raw & 0x80000:
++                        parts.append(f"if (spu_irq_pending(ctx)) {{ ctx->pc = 0x{ct:X}; "
++                                     f"g_spu_trampoline_fn = spu_indirect_branch; return; }}")
++                    parts.append(f"goto loc_{ct:08X};")
++                    return "\n".join(parts)
++                if ct in getattr(self, "func_starts", set()) and ct not in self.const_bi_unsafe:
++                    self.branch_targets.add(ct)
++                    return (f"{_ied}ctx->pc = 0x{ct:X}; "
++                            f"g_spu_trampoline_fn = {self.prefix}spu_func_{ct:08X}; return;")
+             # Computed indirect tail: set pc + trampoline to the dispatcher, unwind.
+             return (f"{_ied}ctx->pc = {g(tgt_reg)}._u32[0]; "
+                     f"g_spu_trampoline_fn = spu_indirect_branch; return;")
+@@ -925,19 +1225,21 @@ class SPULifter:
              # Indirect call: nested dispatch bracketed like brsl (host_depth +
              # SPU_DRAIN + image save/restore) so the callee's tail-chains drain
              # here and its `bi $r0` returns via host return.
@@ -51486,7 +51937,27 @@ index bfc9af4..c312769 100644
          # biz/binz/bihz/bihnz: ops[0] = condition reg, ops[1] = target reg.
          if mn in ("biz", "binz", "bihz", "bihnz"):
              cond = self._cond(mn[1:], _reg(ops[0]))   # strip leading 'b' -> iz/inz...
-@@ -983,7 +1205,7 @@ class SPULifter:
+@@ -980,10 +1282,27 @@ class SPULifter:
+         }
+         return table.get(mn, f"{word} != 0")
+ 
++    def _const_bi_goto(self, insn, start, end):
++        """The target of a constant `bi` that can be a goto: inside this
++        function. The drain loop it skips is where a pending interrupt is
++        taken, so a goto that does not disable interrupts checks for one first
++        (spu_irq_pending)."""
++        if insn.mnemonic != "bi":
++            return None
++        ct = self.const_bi.get(insn.addr)
++        # Forward only: a backward goto would be a loop with no hop in it,
++        # which neither the step budget nor a stop request can end.
++        if ct is None or ct == 0 or not (start <= ct < end) or ct <= insn.addr:
++            return None
++        if insn.addr in self.link_return or \
++                (_bi_target_reg(insn) == "0" and insn.addr not in self.bi_r0_jump):
++            return None
++        return ct
++
      def _uncond_branch(self, tgt, func: LiftedFunction) -> str:
          if tgt is None:
              return "/* TODO spu: unresolved branch */;"
@@ -51495,7 +51966,7 @@ index bfc9af4..c312769 100644
              return f"goto loc_{tgt:08X};"
          self.branch_targets.add(tgt)
          # Cross-function unconditional tail: hand the target to the trampoline
-@@ -1011,9 +1233,12 @@ class SPULifter:
+@@ -1011,9 +1330,12 @@ class SPULifter:
  
      def emit_source(self,header_name: str) -> str:
          lines = [SOURCE_PREAMBLE.format(header_name=header_name), ""]
@@ -51510,7 +51981,7 @@ index bfc9af4..c312769 100644
                  lines.append(b if b.endswith(":") else f"    {b}")
              lines.append("}")
              lines.append("")
-@@ -1076,6 +1301,13 @@ def main() -> None:
+@@ -1076,6 +1398,13 @@ def main() -> None:
                          "targets + STT_FUNC symbols). When set, .text is "
                          "read from this ELF and the positional <input> arg "
                          "is ignored.")
@@ -51524,7 +51995,7 @@ index bfc9af4..c312769 100644
      p.add_argument("--trace", action="store_true",
                     help="Emit spu_trace_pc/spu_trace_rt around each instruction "
                          "for §3 diff-vs-RPCS3 validation. Output goes to stderr "
-@@ -1089,6 +1321,16 @@ def main() -> None:
+@@ -1089,6 +1418,16 @@ def main() -> None:
                          "0x10F8,0x808) to add as boundaries -- for indirect-branch "
                          "targets that --auto-functions can't detect statically. "
                          "Splits the containing auto-detected function at each addr.")
@@ -51541,10 +52012,14 @@ index bfc9af4..c312769 100644
      p.add_argument("--code-end", type=lambda x: int(x, 0), default=0,
                     help="Address where executable code ends and an embedded "
                          "rodata/const tail begins. Drops any auto-detected "
-@@ -1099,6 +1341,15 @@ def main() -> None:
+@@ -1099,6 +1438,19 @@ def main() -> None:
                          "garbage `functions` (e.g. the LBP WWS physics jobmods, "
                          "which append a zlib inflate string table + float tables "
                          "after the code at 0xAE68 / 0xAE48).")
++    p.add_argument("--const-bi", action="store_true",
++                   help="dispatch `bi $rN` directly when rN was just loaded with "
++                        "il/ila: a goto for a `bid` inside the function, a direct "
++                        "trampoline otherwise (compute_const_bi_targets)")
 +    p.add_argument("--merge-chunks", action="store_true",
 +                   help="Emit each run of contiguous chunks from one call target "
 +                        "to the next as ONE C function (branches between them "
@@ -51557,7 +52032,7 @@ index bfc9af4..c312769 100644
      p.add_argument("--force-indirect", default="",
                     help="Comma-separated `bi $rN` addresses to emit as GENERIC "
                          "indirect dispatch, overriding the link-register-return "
-@@ -1149,6 +1400,28 @@ def main() -> None:
+@@ -1149,6 +1501,28 @@ def main() -> None:
              # No boundary info: treat the whole image as one function.
              bounds = [(base, base + len(data))]
  
@@ -51586,7 +52061,7 @@ index bfc9af4..c312769 100644
      # Add extra function entry points (indirect-branch targets auto-detect misses)
      # by splitting whichever bound contains each address.
      if args.extra_funcs:
-@@ -1200,6 +1473,8 @@ def main() -> None:
+@@ -1200,6 +1574,8 @@ def main() -> None:
      insns = disassemble_spu(data, base)
  
      lifter = SPULifter(trace=args.trace, prefix=args.symbol_prefix)
@@ -51595,10 +52070,16 @@ index bfc9af4..c312769 100644
      lifter.bi_r0_jump = compute_bi_r0_jumps(insns, bounds)
      if lifter.bi_r0_jump:
          print(f"  {len(lifter.bi_r0_jump)} `bi $r0` computed-jump site(s) "
-@@ -1221,8 +1496,17 @@ def main() -> None:
+@@ -1221,8 +1597,23 @@ def main() -> None:
                f"(`bi $rN` where rN is a brsl/bisl link reg): "
                f"{', '.join(f'0x{a:X}' for a in sorted(lifter.link_return))}")
      lifter.func_starts = {s for s, e in bounds}  # for fall-through tail-call chaining
++    if args.const_bi:
++        lifter.const_bi = compute_const_bi_targets(insns, bounds)
++        lifter.const_bi_unsafe = {0x0, 0xA00, 0xA70, 0x290, 0x808, 0x3FF00} | {
++            (i.addr + 4) & 0x3FFFC for i in insns
++            if i.mnemonic in ("brsl", "brasl", "bisl", "bisled")}
++        print(f"  {len(lifter.const_bi)} constant-target `bi` site(s) (--const-bi)")
 +    groups = {}
 +    if args.merge_chunks:
 +        seeds = {base}

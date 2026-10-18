@@ -71,7 +71,7 @@ JOBBIN_IMAGE_BASE = 250     # after the plugins'
 # geometry job's inner loops then stay in one frame instead of spilling every
 # register to the context at each block (see docs/NOTES.md). SPU_LIFT_EXTRA adds
 # lifter arguments for an experiment.
-LIFT_ARGS = ["--local-regs", "--merge-chunks"] + os.environ.get("SPU_LIFT_EXTRA", "").split()
+LIFT_ARGS = ["--local-regs", "--merge-chunks", "--const-bi"] + os.environ.get("SPU_LIFT_EXTRA", "").split()
 JOBBIN_MAGIC = b"\x44\x01\x28\x50"
 ELF_IMAGE_BASE = 30         # clear of the policy module (2) and the overlays (200+)
 JOBMOD_IMAGE_BASE = 200     # tools/lift_jobmods.py

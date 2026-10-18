@@ -702,6 +702,41 @@ New Marais now runs at the same rate at every scale:
   (`MFC_LSA`, `EAH`, `EAL`, `Size`, `TagID`), which only latch a value, are
   done inline in lifted code (`spu_wrch_fast`).
 
+### Heavy area, round 2 (2026-10-18)
+
+Measured in the heavy area (`work/runs/heavy_bench.sh`, ~9,000 draws a
+frame) with two new tools that other load on the machine barely moves, unlike
+fps: `runs/spu_busy.sh` (SPURS busy ms per frame, minus the idle spin, and the
+main thread's share in `usleep` polls) and `runs/spu_cost.sh` (instructions
+per frame per thread).
+
+- **DMA fast path.** `mfc_do_transfer` and `mfc_submit_body` tested ~45
+  opt-in diagnostics per transfer. With none of their variables set, a plain
+  GET/PUT now goes through `mfc_do_transfer_fast`, which does only what the
+  full path does for a well-formed transfer. `SPU_DMA_SLOW=1` forces the full
+  path. The port's get-watch (native lighting) runs inside the fast path.
+- **Inline drain.** `spu_drain_call` is answered inline when the callee came
+  back to the return pc (nothing pending, or a plain indirect branch there).
+- **`--const-bi` (lifter).** `ila $rN,<label> / bid $rN` -- the interrupt
+  window idiom -- was most of the jobs' indirect transfers (164 of 173 in
+  `ec5f`). A constant target inside the function, forward, is now a `goto`
+  (a `bie` or plain `bi` first checks for a pending interrupt and leaves
+  through the drain if there is one); elsewhere a direct trampoline, except
+  to kernel/PM service addresses and call-return addresses.
+- **MFC slots 128-byte aligned.** One SPU's `tag_completed` shared a cache
+  line with the next slot's `ctx`, read on every channel access.
+- Together: SPURS busy time 69.2 -> 63 ms a frame.
+- **RSX thread.** SSE4.1 vertex conversions, bit-identical (fetch+decode
+  1.97 -> 1.33 ms a frame); a bloom of target addresses spares
+  `sink_bind_textures` its scans of the target tables for plain textures.
+
+What limits the frame now: the `rsx` thread is ~92% busy with real work
+(~1.7 us a draw), while `rsx-record` spins idle half of its time. Making the
+SPUs faster did not shorten the main thread's waits (still ~43%), because the
+SPU jobs it waits for depend on RSX output. `PS3RECOMP_ENG_VPULL=1` is much
+slower here (40 against 59 fps), and pinning the `rsx` thread to its own
+physical core changes nothing measurable.
+
 ### What the main thread waits for in New Marais
 
 The `PS3_TIMELINE` usleep events name the main thread's three waits:
