@@ -102,3 +102,23 @@ values are small (~0.01-1, translation row ~(-0.15, -0.52, 0.10), w column
 0,0,0,1): it looks like the dequantization of 16-bit normalized positions
 (the record's box at +0x10) folded into the object transform. Next: read the
 lifted routine that writes the 0x100 burst instead of fitting formulas.
+
+## The code (2026-10-18, fifth pass; listing: spu_disasm over the module at 0x4000)
+
+- 0x55D8 emit(cursor r3, slot r4, src r5): writes a SET_TRANSFORM_CONSTANT_LOAD
+  header (count 17) with the slot, then copies 16 words from LS src into the
+  command buffer (cwd/shufb word inserts). Generic: every matrix burst goes
+  through it.
+- 0x4D60 mat4 multiply: dst row i = ((A0*b_i0 + A1*b_i1) + A2*b_i2) + A3*b_i3,
+  A = rows at r5, b = elements of row i at r4 (splatted); one fm then three
+  fma, SPU truncating arithmetic -- reproducible bit-exact with spu_fm and
+  spu_fma from spu_helpers.h.
+- The caller at 0xF8xx compares the new matrices with the previous ones
+  (fceq + gb) and emits only those that changed; the constant SLOT comes from
+  the material descriptor (lqd 0x490(r97), rotated by a per-material offset):
+  slots are data-driven, not fixed in code.
+- 0x18508: calls the function pointer at +12 of the struct in r3 when set
+  (a hook: profiling/assert), returns r3 & 0xFF or 1. 73 call sites.
+- 0x18540: sine/cosine (2/pi = 0x3F22F983, pi/2 = 0x3FC90FDB): orientations
+  are angles turned into rotations here, not table lookups.
+- Entry 0x14F90 calls 0x159B0 and 0x152B0 (the main loop is next).
