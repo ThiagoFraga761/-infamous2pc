@@ -26,6 +26,8 @@
 !/work/port/native_passes.c
 !/work/port/ec5f_native.c
 !/work/port/job2025_native.c
+!/work/port/edge_kernels_native.c
+!/work/port/jobbc11_native.c
 !/work/port/windows/
 !/work/port/config.toml
 !/work/port/settings.cpp

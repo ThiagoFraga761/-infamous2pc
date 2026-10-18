@@ -76,7 +76,9 @@ LIFT_ARGS = ["--local-regs", "--merge-chunks", "--const-bi"] + os.environ.get("S
 # entry calls spu_native_entry, and returns as `bi $r0` does when it reports the
 # work done. Keyed by the lifted image's directory name.
 NATIVE_ENTRIES = {"jobmod_ec5f11015784_e14F90": [0x12C50],
-                  "jobmod_2025343b09d0_eFE70": [0x4FE0, 0x17280]}
+                  "jobmod_2025343b09d0_eFE70": [0x4FE0, 0x17280],
+                  "jobmod_6d1c65171899_eA2A0": [0xD0A8, 0xA3C8, 0xA798],
+                  "jobmod_bc11d5e7b134_e2898": [0x4358]}
 JOBBIN_MAGIC = b"\x44\x01\x28\x50"
 ELF_IMAGE_BASE = 30         # clear of the policy module (2) and the overlays (200+)
 JOBMOD_IMAGE_BASE = 200     # tools/lift_jobmods.py
