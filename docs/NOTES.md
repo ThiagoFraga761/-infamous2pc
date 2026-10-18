@@ -759,6 +759,24 @@ physical core changes nothing measurable.
 - `second_frame` failed once in the suite (presentation stopped in the opening
   video, the known rare boot hang) and passed four reruns of the same binary.
 
+### The job that writes the draw list, and constant bursts (2026-10-18)
+
+Job module `ec5f11015784` (overlay 225), the busiest SPU job (~20% of SPURS
+time in the city), builds RSX command buffers: its 4 KB PUTs to IO
+0x20000.. hold, per object, a `SET_TRANSFORM_CONSTANT_LOAD` burst (method
+0x1EFC, count 17: the slot, then 16 constant words) and the object's state
+and draws. Job `d7096a8ffc1c` (overlay 220) writes command buffers too.
+Replacing `ec5f` natively is the largest single gain left.
+
+Meanwhile the FIFO walker takes each burst's words from 0x1F00 on in one
+call (`rsx_draw_engine_vp_consts`) when only the register-file engine
+consumes them: the RSX thread's instructions per frame 207 -> 187 M in the
+city. `RSX_CONST_LOG`, the legacy-state switches and the FIFO diagnostics
+keep the word-by-word path.
+
+`PS3RECOMP_FTLOG=1` (set by `play.sh` and `heavy_bench.sh`) prints the
+frame-time spread every 10 s: median, 99th percentile, worst frame, 1% low.
+
 ### What the main thread waits for in New Marais
 
 The `PS3_TIMELINE` usleep events name the main thread's three waits:

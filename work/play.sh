@@ -27,6 +27,7 @@ export PS3RECOMP_VK_WINDOW=1
 export SDL_NO_SIGNAL_HANDLERS=1
 # Every 10 s, "[rsx fps] N fps ..." in this terminal.
 export PS3RECOMP_ENG_FPSLOG=1
+export PS3RECOMP_FTLOG=1
 GAME_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in

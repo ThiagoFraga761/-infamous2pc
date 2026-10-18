@@ -4958,7 +4958,7 @@ index 1cb09ad..f473cc3 100644
  static unsigned calls;
  static int waiting;
 diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
-index cdb0464..d6cd52c 100644
+index cdb0464..42896e5 100644
 --- a/libs/video/cellGcmSys.c
 +++ b/libs/video/cellGcmSys.c
 @@ -199,7 +199,7 @@ static void ydkj_restore_handler_opd(u32 opd, u32 code) {
@@ -5433,7 +5433,7 @@ index cdb0464..d6cd52c 100644
      int dry = 0;
      if (now.QuadPart - s_last_pub >= min_gap) {
          gcm_ref_publish_one();
-@@ -1459,6 +1739,13 @@ void cellGcm_ref_on_poll(void)
+@@ -1459,6 +1739,34 @@ void cellGcm_ref_on_poll(void)
          SetEvent(s_gcm_kick_ev);       /* dry: ask the present thread to walk */
  }
  
@@ -5444,10 +5444,31 @@ index cdb0464..d6cd52c 100644
 +static unsigned long long s_park_since = 0;
 +static int s_park_told = 0;
 +
++/* Whether a transform-constant burst may take rsx_draw_engine_vp_consts:
++ * the conditions under which the per-word FIFO path sends those words to the
++ * draw engine and nowhere else (no live engine, no legacy state machine, no
++ * 2D routing of subchannel 1, no constant log). */
++static int gcm_vpc_bulk_ok(u32 subch)
++{
++    static int ok = -1, s1 = -1;
++    if (ok < 0) {
++        ok = rsx_draw_engine_enabled() && !rsx_live_draw_enabled() && !rsx_get_backend() &&
++             !getenv("PS3RECOMP_FIFO_LEGACY") && !getenv("RSX_TRACE") && !getenv("SEQ_DBG") &&
++             !getenv("MVPDBG") && !getenv("SURFDBG") && !getenv("RTT_DUMP") && !getenv("TCONST_DBG") &&
++             !getenv("LOAD_DBG") && !getenv("VDATA_DBG") && !getenv("RSX_LIVE_FEED_DBG") &&
++             !getenv("RSX_CONST_LOG") && !getenv("RSX_EMPTY_DRAW_LOG");
++        const char* e = getenv("GCM_SUBCH1_2D");
++        s1 = !(e && atoi(e));
++        fprintf(stderr, "[gcm] transform-constant bursts in bulk: %s (engine %d, live %d, backend %p)\n",
++                ok ? "on" : "off", rsx_draw_engine_enabled(), rsx_live_draw_enabled(), (void*)rsx_get_backend());
++    }
++    return ok && (subch == 0 || s1);
++}
++
  void cellGcm_rsx_process_fifo(void)
  {
      AcquireSRWLockExclusive(&s_gcm_fifo_lock);
-@@ -1468,10 +1755,11 @@ void cellGcm_rsx_process_fifo(void)
+@@ -1468,10 +1776,11 @@ void cellGcm_rsx_process_fifo(void)
  
  static void gcm_rsx_process_fifo_unlocked(void)
  {
@@ -5461,7 +5482,7 @@ index cdb0464..d6cd52c 100644
            unsigned long long now = ps3_ms_now();
            if (_t0 == 0) _t0 = now;
            if (now - _t0 >= 2000) {
-@@ -1512,7 +1800,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1512,7 +1821,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
       * once at init; if the title repoints gCellGcmCurrentContext at a buffer of
       * its own, every field below moves with it and the FIFO the runtime walks
       * stops being the one the title fills. Reported on change, not per tick. */
@@ -5472,7 +5493,7 @@ index cdb0464..d6cd52c 100644
          static u32 last_ptr = 0xFFFFFFFFu, last_cur = 0xFFFFFFFFu;
          u32 ptr = vm_read32(s_gcm_ctx_out_ea);
          u32 cur = ptr ? vm_read32(ptr + 0x8) : 0;
-@@ -1528,7 +1818,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1528,7 +1839,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
      }
  
      u32 start_off = s_fifo_getoff;
@@ -5481,7 +5502,7 @@ index cdb0464..d6cd52c 100644
          static int n = 0;
          if (n++ % 60 == 0)
              printf("[DRAIN] getoff=%08X put=%08X ref=%08X ctx.current=%08X\n",
-@@ -1541,7 +1831,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1541,7 +1852,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
       * two very different causes -- we missed the command, or it was never
       * submitted -- and only a direct scan of the ring separates them. */
      { static int scanned = 0;
@@ -5492,7 +5513,7 @@ index cdb0464..d6cd52c 100644
          unsigned found = 0;
          for (u32 io = 0; io + 8 <= put; io += 4) {
              u32 ea = gcm_io2ea(io); if (!ea) continue;
-@@ -1578,6 +1870,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1578,6 +1891,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
        } }
  
      int budget = 0x100000;                    /* words per tick cap */
@@ -5501,7 +5522,7 @@ index cdb0464..d6cd52c 100644
      /* GCM_DRAINDBG also reports WHY each pass stopped. A drain that ends far
       * short of `put` every tick is the signature of a FIFO that can never
       * catch up, and the reason is the whole diagnosis. */
-@@ -1596,7 +1890,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1596,7 +1911,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
              static u32 last_bad; static int n;
              if (s_fifo_getoff != last_bad || n < 4) {
                  last_bad = s_fifo_getoff;
@@ -5510,7 +5531,7 @@ index cdb0464..d6cd52c 100644
                      fprintf(stderr, "[cellGcmSys] FIFO get=0x%08X has no IO "
                              "mapping -- resyncing to put=0x%08X\n",
                              s_fifo_getoff, put);
-@@ -1678,8 +1972,46 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1678,8 +1993,46 @@ static void gcm_rsx_process_fifo_unlocked(void)
                     * park standing -- it only patches a park when it reuses that
                     * block. Waiting for a patch that will not come freezes the
                     * FIFO for the rest of the run, so follow the write head. */
@@ -5559,7 +5580,7 @@ index cdb0464..d6cd52c 100644
                    break;
                }
                s_fifo_getoff = tgt; }
-@@ -1713,7 +2045,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1713,7 +2066,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
                    u32 mi = (method >> 2) & 2047;
                    hist[mi]++; tot[mi] += count;
                    static u64 seen = 0;
@@ -5570,7 +5591,7 @@ index cdb0464..d6cd52c 100644
                        fprintf(stderr, "[TCFIFO] method histogram (blocks, dwords):%c", 10);
                        for (u32 k = 0; k < 2048; k++) if (hist[k])
                            fprintf(stderr, "[TCFIFO]   0x%04X  %8u blocks %10u dwords%c",
-@@ -1740,42 +2074,91 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1740,42 +2095,115 @@ static void gcm_rsx_process_fifo_unlocked(void)
                      u32 m = (type == 0) ? method + i * 4 : method;
                      u32 v = vm_read32(dea);
                      u32 la = GCM_LABEL_GUEST_BASE + (s_sema_offset & 0xFFFFu);
@@ -5648,7 +5669,31 @@ index cdb0464..d6cd52c 100644
                  continue;
              }
 +            const int fifo_dbg = gcm_fifo_dbg();
++            /* A burst of transform constants (the SPUs build a 17-word one
++             * per object: ~half the FIFO words of a city frame) goes to the
++             * engine in one call: the per-word path below does nothing else
++             * with them when only the register-file engine draws. */
++            /* The burst starts at VP_UPLOAD_CONST_ID (0x1EFC), which takes the
++             * ordinary path; the words from 0x1F00 on go here. */
++            const int vpc_bulk = type == 0 && !fifo_dbg && count >= 3 && (subch == 0 || subch == 1) &&
++                                 (method & 0x1FFCu) < 0x1F80u && (method & 0x1FFCu) + count * 4u > 0x1F00u &&
++                                 gcm_vpc_bulk_ok(subch);
              for (u32 i = 0; i < count; i++) {
++                if (vpc_bulk) {
++                    const u32 mi = (method + i * 4u) & 0x1FFCu;
++                    if (mi >= 0x1F00u && mi < 0x1F80u) {
++                        u32 n = (0x1F80u - mi) >> 2;
++                        if (n > count - i) n = count - i;
++                        const u32 e0 = gcm_io2ea(s_fifo_getoff + 4 + i * 4),
++                                  e1 = gcm_io2ea(s_fifo_getoff + 4 + (i + n - 1) * 4);
++                        extern u8* vm_base;
++                        if (n >= 2 && e0 && e1 == e0 + (n - 1) * 4 && vm_base) {
++                            rsx_draw_engine_vp_consts(mi, vm_base + e0, n);
++                            i += n - 1;
++                            continue;
++                        }
++                    }
++                }
                  u32 dea = gcm_io2ea(s_fifo_getoff + 4 + i * 4);
                  if (!dea) break;
                  u32 m = (type == 0) ? method + i * 4 : method;
@@ -5675,7 +5720,7 @@ index cdb0464..d6cd52c 100644
                      continue;
                  }
                  /* GCM_SUBCH1_3D=1: treat subchannel 1 as the 3D object too.
-@@ -1788,11 +2171,11 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1788,11 +2216,11 @@ static void gcm_rsx_process_fifo_unlocked(void)
                   * title binds to a subchannel is what says which engine that
                   * subchannel drives; comparing subchannel 1 against subchannel 0
                   * turns the routing below from a guess into a reading. */
@@ -5689,7 +5734,7 @@ index cdb0464..d6cd52c 100644
                        if (subch < 8 && (!have[subch] || seen[subch] != h)) {
                            have[subch] = 1; seen[subch] = h;
                            printf("[GCM-OBJ] subch=%u SET_OBJECT handle=0x%08X%c",
-@@ -1816,46 +2199,61 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1816,46 +2244,61 @@ static void gcm_rsx_process_fifo_unlocked(void)
                  if (s1_2d < 0) { const char* e = getenv("GCM_SUBCH1_2D"); s1_2d = e ? atoi(e) : 0; }
                  /* GCM_SUBCH_GATE=<file>: while <file> exists, log every method on a
                   * non-zero subchannel -- what each binding slot actually carries. */
@@ -5763,7 +5808,7 @@ index cdb0464..d6cd52c 100644
                    if (fdbg < 0) fdbg = getenv("RSX_LIVE_FEED_DBG") ? 1 : 0;
                    if (fdbg) {
                        static long long n_be = 0, n_va = 0, n_ia = 0, tick = 0;
-@@ -1874,11 +2272,14 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1874,11 +2317,14 @@ static void gcm_rsx_process_fifo_unlocked(void)
                   * the draw-engine call above does. */
                  { const u32 mfull = (subch << 13) | m;
                  if (mfull == 0xEB00u || mfull == 0xEB04u) {
@@ -5781,7 +5826,7 @@ index cdb0464..d6cd52c 100644
                      /* NV406E_SET_REFERENCE: queue the fence value for PACED
                       * publication (gcm_ref_publish below) instead of letting a
                       * later fence in the same batch overwrite it. */
-@@ -1887,22 +2288,47 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1887,22 +2333,47 @@ static void gcm_rsx_process_fifo_unlocked(void)
                       * area. Sample counts are not measured, so a ZPASS query
                       * reports "visible" -- the conservative answer; reading 0
                       * tells the title every queried object is occluded. */
@@ -5836,7 +5881,7 @@ index cdb0464..d6cd52c 100644
              fprintf(stderr, "[FIFOUW] unknown word 0x%08X at getoff 0x%X\n", w, s_fifo_getoff); }
          s_fifo_getoff += 4;                    /* unknown word: skip */
      }
-@@ -1938,7 +2364,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1938,7 +2409,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
        if (passes && budget <= 0 && s_fifo_getoff != put) {
            if (++burned >= passes) {
                static int n = 0;
@@ -5845,7 +5890,7 @@ index cdb0464..d6cd52c 100644
                    fprintf(stderr, "[cellGcmSys] FIFO walker circling (get=0x%08X, "
                            "put=0x%08X, full budget burned x%d) -- following the "
                            "write head\n", s_fifo_getoff, put, burned);
-@@ -1947,8 +2373,17 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1947,8 +2418,17 @@ static void gcm_rsx_process_fifo_unlocked(void)
            }
        } else burned = 0; }
  
@@ -5864,7 +5909,7 @@ index cdb0464..d6cd52c 100644
            if (++stuck >= 8) { gcm_fifo_dump_around(s_fifo_getoff);
                               gcm_fifo_resync_why("stuck-get", &s_fifo_getoff, put); stuck = 0; }
        } else { stuck = 0; last = s_fifo_getoff; } }
-@@ -1957,7 +2392,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1957,7 +2437,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
       * per tick (gcm_ref_push/gcm_ref_publish_one above) so every SET_REFERENCE
       * value stays observable to equality-waiters. The wrap recycle path polls
       * the drained EA. */
@@ -5873,7 +5918,7 @@ index cdb0464..d6cd52c 100644
          static int n2 = 0;
          if (n2++ % 60 == 0)
              fprintf(stderr, "[DRAINEND] %s: %08X -> %08X (%u bytes), put=%08X\n",
-@@ -2040,7 +2475,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -2040,7 +2520,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
                  s_fifo_getoff = io_begin;                          /* get */
                  put = io_begin;
                  static int n = 0;
@@ -5882,7 +5927,7 @@ index cdb0464..d6cd52c 100644
                      fprintf(stderr, "[cellGcmSys] recycled the title's own ring "
                              "(ctx=0x%08X begin=0x%08X end=0x%08X) -- its callback "
                              "does not%c", ctx, begin, end, 10);
-@@ -2122,7 +2557,7 @@ void cellGcm_fifo_recycle(u32 ctx_ea)
+@@ -2122,7 +2602,7 @@ void cellGcm_fifo_recycle(u32 ctx_ea)
      while (g_gcm_fifo_drained_ea != begin && spins < 2000) { Sleep(1); spins++; }
      if (spins >= 2000) {
          static int warned = 0;
@@ -5891,7 +5936,7 @@ index cdb0464..d6cd52c 100644
              printf("[cellGcmSys] fifo recycle: drain stalled (drained=0x%08X begin=0x%08X)\n",
                     g_gcm_fifo_drained_ea, begin);
      }
-@@ -2230,7 +2665,7 @@ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
+@@ -2230,7 +2710,7 @@ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
            }
        } }
  
@@ -5900,7 +5945,7 @@ index cdb0464..d6cd52c 100644
          fprintf(stderr, "[FLIP] SetFlipCommand(buf=%u) set=%d\n",
                  bufferId, bufferId < CELL_GCM_MAX_DISPLAY_BUFFER_NUM ? s_display_buffer_set[bufferId] : -1); }
      if (bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM)
-@@ -2554,7 +2989,7 @@ s32 cellGcmAddressToOffset(u32 address, u32* offset)
+@@ -2554,7 +3034,7 @@ s32 cellGcmAddressToOffset(u32 address, u32* offset)
      printf("[cellGcmSys] WARNING: AddressToOffset failed for 0x%08X\n", address);
      vm_write32(off_ea, 0);
      { static int _d = -1; if (_d < 0) _d = getenv("A2O_FAILDBG") ? 1 : 0;
@@ -5909,7 +5954,7 @@ index cdb0464..d6cd52c 100644
            fprintf(stderr, "[A2O] FAILED ea=0x%08X (not in local or IO space)%c",
                    address, 10); } }
      return CELL_GCM_ERROR_FAILURE;
-@@ -2802,7 +3237,7 @@ CellGcmReportData* cellGcmGetReportDataAddress(u32 index)
+@@ -2802,7 +3282,7 @@ CellGcmReportData* cellGcmGetReportDataAddress(u32 index)
  u32 cellGcmGetReport(u32 type, u32 index)
  {
      { static int n = 0;
@@ -5918,7 +5963,7 @@ index cdb0464..d6cd52c 100644
                            index < CELL_GCM_MAX_REPORT_COUNT ? s_report_data[index].value : 0u, 10); }
      if (index >= CELL_GCM_MAX_REPORT_COUNT) return 0;
      return s_report_data[index].value;
-@@ -2943,7 +3378,7 @@ u32 cellGcmGetTiledPitchSize(u32 size)
+@@ -2943,7 +3423,7 @@ u32 cellGcmGetTiledPitchSize(u32 size)
              if (s_valid_pitches[i] >= size) { r = s_valid_pitches[i]; break; }
          }
      }
@@ -7395,7 +7440,7 @@ index 68929ed..edc7512 100644
               * (IO-mapped) -- and count nonzero bytes over the whole plane for each.
               * If the plane the game declares (loc bits fmt&3) is zero but the OTHER
 diff --git a/libs/video/rsx_dispatch.c b/libs/video/rsx_dispatch.c
-index d105230..70552cc 100644
+index d105230..ad1cce3 100644
 --- a/libs/video/rsx_dispatch.c
 +++ b/libs/video/rsx_dispatch.c
 @@ -1,3 +1,5 @@
@@ -7425,7 +7470,7 @@ index d105230..70552cc 100644
      /* Execution methods */
      mark_class(rsx, M_VERTEX_BEGIN_END,  1, RSX_DSP_CLASS_EXEC);
      mark_class(rsx, M_VB_VERTEX_BATCH,   1, RSX_DSP_CLASS_EXEC);
-@@ -252,54 +260,133 @@ void rsx_dispatch_seed_transform_constants(rsx_dispatch* rsx, const u32* words,
+@@ -252,51 +260,143 @@ void rsx_dispatch_seed_transform_constants(rsx_dispatch* rsx, const u32* words,
      memcpy(rsx->constants, words, count * sizeof(u32));
  }
  
@@ -7545,7 +7590,7 @@ index d105230..70552cc 100644
 +        v[1] = (float)(int16_t)(arg >> 16);
 +        imm_store(rsx, a, d, 2, v, 2 * d, 2, 4);
 +        return 1;
-     }
++    }
 +    if (m >= 0x0A80 && m < 0x0B00) {            /* DATA_SCALED4S_M (normalized) */
 +        const u32 a = (m - 0x0A80) >> 3, d = ((m - 0x0A80) >> 2) & 1;
 +        v[0] = (float)(int16_t)(arg & 0xFFFF) / 32767.0f;
@@ -7554,8 +7599,8 @@ index d105230..70552cc 100644
 +        return 1;
 +    }
 +    return 0;
- }
- 
++}
++
 +/* BEGIN_END(0) of a pair that carried immediate vertices and no array,
 + * index or inline packet: replay them as an INLINE_ARRAY of float4s, with
 + * VTXFMT rewritten for the duration so every consumer's inline layout reads
@@ -7597,10 +7642,20 @@ index d105230..70552cc 100644
 +static u32 s_ed_m[24], s_ed_a[24];
 +static int s_ed_on = -1; static u32 s_ed_from;
 +
- void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg)
- {
-     method &= 0xFFFFC;
-@@ -316,11 +403,29 @@ void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg)
++void rsx_dispatch_vp_consts(rsx_dispatch* rsx, u32 m0, const u8* src, u32 n)
++{
++    const u32 base = rsx->regs[M_VP_UPLOAD_CONST_ID >> 2];
++    const u32 w0 = (m0 - M_VP_UPLOAD_CONST) >> 2;
++    for (u32 i = 0; i < n; i++) {
++        u32 arg; memcpy(&arg, src + i * 4u, 4); arg = __builtin_bswap32(arg);
++        const u32 idx = (m0 >> 2) + i, word = w0 + i, slot = base + (word >> 2);
++        rsx->seen[idx]++;
++        rsx->regs[idx] = arg;
++        if (slot < RSX_DSP_NUM_CONSTANTS) rsx->constants[slot][word & 3] = arg;
+     }
+ }
+ 
+@@ -316,11 +416,29 @@ void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg)
                      method, arg);
          return;
      }
@@ -7633,7 +7688,7 @@ index d105230..70552cc 100644
  
      /* Transform program upload window: word goes to instruction slot
       * VP_UPLOAD_FROM_ID; the load pointer advances after every completed
-@@ -329,8 +434,10 @@ void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg)
+@@ -329,8 +447,10 @@ void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg)
          const u32 lane = ((method - M_VP_UPLOAD_INST) >> 2) & 3;
          u32* load = &rsx->regs[M_VP_UPLOAD_FROM_ID >> 2];
          const u32 pos = *load * 4 + lane;
@@ -7645,7 +7700,7 @@ index d105230..70552cc 100644
          if (lane == 3)
              (*load)++;
          return;
-@@ -355,6 +462,9 @@ void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg)
+@@ -355,6 +475,9 @@ void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg)
          return;
      }
  
@@ -7655,7 +7710,7 @@ index d105230..70552cc 100644
      switch (method) {
      case M_CLEAR_BUFFERS:
          if (rsx->sink.clear)
-@@ -366,10 +476,28 @@ void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg)
+@@ -366,10 +489,28 @@ void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg)
              rsx->in_begin_end = 1;
              rsx->current_primitive = arg;
              rsx->inline_len = 0;
@@ -7684,7 +7739,7 @@ index d105230..70552cc 100644
              /* Hand an inline stream over BEFORE end: the sink reads end as
               * "draw what you have", so a batch delivered after it would be
               * drawn one primitive late, or not at all. */
-@@ -396,6 +524,7 @@ void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg)
+@@ -396,6 +537,7 @@ void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg)
       * carrying no vertices at all: the backend saw BEGIN/END with nothing
       * between them and counted an empty group. */
      case M_INLINE_ARRAY:
@@ -7692,7 +7747,7 @@ index d105230..70552cc 100644
          if (rsx->inline_len + 4u <= RSX_DSP_INLINE_MAX_BYTES) {
              rsx->inline_data[rsx->inline_len + 0] = (u8)(arg >> 24);
              rsx->inline_data[rsx->inline_len + 1] = (u8)(arg >> 16);
-@@ -411,12 +540,14 @@ void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg)
+@@ -411,12 +553,14 @@ void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg)
          break;
  
      case M_VB_VERTEX_BATCH:
@@ -7708,7 +7763,7 @@ index d105230..70552cc 100644
              rsx->sink.draw_index_array(rsx->sink.user, rsx,
                                         arg & 0xFFFFFF, (arg >> 24) + 1);
 diff --git a/libs/video/rsx_dispatch.h b/libs/video/rsx_dispatch.h
-index dab4380..a307ebf 100644
+index dab4380..eef8d76 100644
 --- a/libs/video/rsx_dispatch.h
 +++ b/libs/video/rsx_dispatch.h
 @@ -84,6 +84,7 @@ extern "C" {
@@ -7753,8 +7808,18 @@ index dab4380..a307ebf 100644
  };
  
  /* ---- lifecycle -------------------------------------------------------- */
+@@ -150,6 +171,9 @@ void rsx_dispatch_seed_transform_constants(rsx_dispatch* rsx, const u32* words,
+ 
+ /* Dispatch one register write. */
+ void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg);
++/* rsx_dispatch_method over n transform-constant words (method m0 + 4i, all
++ * inside the 0x1F00 upload window), read big-endian from src. */
++void rsx_dispatch_vp_consts(rsx_dispatch* rsx, u32 m0, const u8* src, u32 n);
+ 
+ /* ---- decoded state getters -------------------------------------------- */
+ 
 diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
-index 5c50e4a..fc2fca9 100644
+index 5c50e4a..e4c433a 100644
 --- a/libs/video/rsx_draw_engine.c
 +++ b/libs/video/rsx_draw_engine.c
 @@ -1,3 +1,9 @@
@@ -11224,13 +11289,10 @@ index 5c50e4a..fc2fca9 100644
 +                            : 0;
 +                        textures[u] = view ? view : snap;
 +                    }
-                     break;
-                 }
-             if (textures[u]) continue;
-         }
--        textures[u] = eng_texture_slot(t.location, t.offset, t.format,
--                                       t.width, t.height, t.mipmaps, t.pitch,
--                                       (int)t.cubemap, t.remap & 0xFFFFu);
++                    break;
++                }
++            if (textures[u]) continue;
++        }
 +        /* A colour format over a depth buffer reads the depth bytes (fog,
 +         * depth-of-field, SSAO); the copy reflects depth before this draw, so
 +         * the current zeta qualifies too. */
@@ -11251,10 +11313,13 @@ index 5c50e4a..fc2fca9 100644
 +                            : 0;
 +                        textures[u] = view ? view : snap;
 +                    }
-+                    break;
-+                }
-+            if (textures[u]) continue;
-+        }
+                     break;
+                 }
+             if (textures[u]) continue;
+         }
+-        textures[u] = eng_texture_slot(t.location, t.offset, t.format,
+-                                       t.width, t.height, t.mipmaps, t.pitch,
+-                                       (int)t.cubemap, t.remap & 0xFFFFu);
 +        { const u64 tx0 = eng_ds_enabled() ? eng_ds_now() : 0;
 +          textures[u] = eng_texture_slot(t.location, t.offset, t.format,
 +                                         t.width, t.height, t.mipmaps, t.pitch,
@@ -12307,17 +12372,23 @@ index 5c50e4a..fc2fca9 100644
  
      rsx_draw_engine_set_guest_memory(NULL, NULL);
      free(dc.refs); free(dc.cuts); free(dc.verts);
-@@ -1704,6 +5157,9 @@ void rsx_draw_engine_shutdown(void)
+@@ -1704,6 +5157,15 @@ void rsx_draw_engine_shutdown(void)
      const rsx_draw_backend* be = g.be;
      memset(&g, 0, sizeof g);
      g.be = be;
 +    memset(s_tmemo, 0, sizeof s_tmemo);   /* g.frames starts over */
 +    memset(s_tdec, 0, sizeof s_tdec);     /* and tex_wgen with the dispatcher */
 +    eng_tidx_rebuild();
++}
++
++void rsx_draw_engine_vp_consts(u32 m0, const u8* src, u32 n)
++{
++    if (!g.ready) return;
++    rsx_dispatch_vp_consts(&g.rsx, m0, src, n);
  }
  
  void rsx_draw_engine_method(u32 method, u32 arg)
-@@ -1717,6 +5173,272 @@ void rsx_draw_engine_method(u32 method, u32 arg)
+@@ -1717,6 +5179,272 @@ void rsx_draw_engine_method(u32 method, u32 arg)
       * preserve them with the wider mask. */
      u32 m = (method >= 0xE000u) ? (method & 0xFFFCu) : (method & 0x1FFCu);
      rsx_dispatch_method(&g.rsx, m, arg);
@@ -12590,7 +12661,7 @@ index 5c50e4a..fc2fca9 100644
  }
  
  void rsx_draw_engine_set_display_buffer(u32 buffer_id, u32 location, u32 offset,
-@@ -1746,13 +5468,17 @@ void rsx_draw_engine_present(void)
+@@ -1746,13 +5474,17 @@ void rsx_draw_engine_present(void)
       * re-present a double-buffered title's OTHER scanout. Presenting twice is
       * harmless either way -- the engine never clears the surface, so a second
       * present just blits the same image again. */
@@ -12609,7 +12680,7 @@ index 5c50e4a..fc2fca9 100644
  
  u32 rsx_draw_engine_guest_draws(void)
 diff --git a/libs/video/rsx_draw_engine.h b/libs/video/rsx_draw_engine.h
-index fa8b57d..7121795 100644
+index fa8b57d..d2c0ce9 100644
 --- a/libs/video/rsx_draw_engine.h
 +++ b/libs/video/rsx_draw_engine.h
 @@ -65,7 +65,9 @@ typedef enum {
@@ -12815,7 +12886,17 @@ index fa8b57d..7121795 100644
  } rsx_draw_backend;
  
  /* ---- the engine --------------------------------------------------------- */
-@@ -261,6 +421,70 @@ u32  rsx_draw_engine_guest_draws(void);
+@@ -233,6 +393,9 @@ void rsx_draw_engine_shutdown(void);
+  * SPU-built command lists bind NV4097 to another subchannel would otherwise
+  * write its state into the wrong register bank. */
+ void rsx_draw_engine_method(u32 method, u32 arg);
++/* n transform-constant words from method m0 (inside the 0x1F00 upload
++ * window), big-endian at src: rsx_draw_engine_method for each, at once. */
++void rsx_draw_engine_vp_consts(u32 m0, const u8* src, u32 n);
+ 
+ /* cellGcmSetDisplayBuffer, so the flip can resolve a buffer id to a surface
+  * the engine has actually rendered rather than to whatever is bound. */
+@@ -261,6 +424,70 @@ u32  rsx_draw_engine_guest_draws(void);
   * 8-bit-per-channel one. */
  u32  rsx_draw_engine_readback_center(void);
  
@@ -16590,7 +16671,7 @@ index ecc53fc..5752611 100644
   * program start). Branch targets are absolute slots; this makes them relative
   * to the ucode pointer handed in. Defaults to 0. */
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index e2687b7..7682d00 100644
+index e2687b7..fcaf442 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
 @@ -50,6 +50,10 @@
@@ -18726,7 +18807,7 @@ index e2687b7..7682d00 100644
          vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
          vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
          VkImageBlit blit = {
-@@ -2151,29 +3587,78 @@ static void vk_eng_present(void* user, u32 surface)
+@@ -2151,29 +3587,103 @@ static void vk_eng_present(void* user, u32 surface)
                          s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL, 1, &blit,
                          (o->w == s_vk.width && o->h == s_vk.height) ? VK_FILTER_NEAREST
                                                                      : VK_FILTER_LINEAR);
@@ -18754,6 +18835,31 @@ index e2687b7..7682d00 100644
 +    }
 +    s_vk.frame_img = VK_NULL_HANDLE;
 +    s_vk.frame_w = s_vk.frame_h = 0;
++    /* PS3RECOMP_FTLOG=1 (play.sh and the benches set it): every 10 s, the
++     * frame-time spread -- median, 99th percentile, worst frame and the
++     * "1% low" fps (the mean of the slowest 1% of frames). An average fps
++     * hides the hitches that make a frame rate feel unstable. */
++    { static int on = -1; static u64 last, t0; static u32 n; static float ft[8192];
++      if (on < 0) on = getenv("PS3RECOMP_FTLOG") ? 1 : 0;
++      if (on) {
++          const u64 now = vk_now_ns();
++          if (last && n < 8192) ft[n++] = (float)((now - last) / 1e6);
++          last = now;
++          if (!t0) t0 = now;
++          if (now - t0 >= 10000000000ull && n >= 10) {
++              static float s2[8192]; memcpy(s2, ft, n * sizeof *s2);   /* off the stack: the present may run on a small one */
++              for (u32 i = 1; i < n; i++) {   /* insertion sort: ~600-1200 entries */
++                  float v = s2[i]; u32 j = i;
++                  while (j && s2[j - 1] > v) { s2[j] = s2[j - 1]; j--; }
++                  s2[j] = v;
++              }
++              const u32 k = n / 100 ? n / 100 : 1;
++              double slow = 0; for (u32 i = n - k; i < n; i++) slow += s2[i];
++              fprintf(stderr, "[frametime] %u frames: p50 %.2f ms, p99 %.2f ms, worst %.1f ms, 1%% low %.1f fps\n",
++                      n, s2[n / 2], s2[(u32)(n * 0.99)], s2[n - 1], 1000.0 * k / slow);
++              n = 0; t0 = now;
++          }
++      } }
 +    /* PS3RECOMP_VK_HITCH=<ms>: every present more than <ms> after the one
 +     * before it, with what the backend spent in between. Builds and GPU wait
 +     * that do not add up to the gap put the stall upstream (PPU/SPU/FIFO). */
@@ -18815,7 +18921,7 @@ index e2687b7..7682d00 100644
          VkBufferMemoryBarrier hb = {
              .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
              .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
-@@ -2182,42 +3667,84 @@ static void vk_eng_readback(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h,
+@@ -2182,42 +3692,84 @@ static void vk_eng_readback(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h,
          };
          pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
                                0, 0, NULL, 1, &hb, 0, NULL);
@@ -18911,7 +19017,7 @@ index e2687b7..7682d00 100644
          .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
          .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
          .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
-@@ -2231,14 +3758,15 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+@@ -2231,14 +3783,15 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
                                   .allocationSize = req.size, .memoryTypeIndex = type };
      if (pvkAllocateMemory(s_vk.device, &mai, NULL, &o->im.mem) != VK_SUCCESS ||
          pvkBindImageMemory(s_vk.device, o->im.img, o->im.mem, 0) != VK_SUCCESS ||
@@ -18931,7 +19037,7 @@ index e2687b7..7682d00 100644
      return hd;
  fail:
      vk_destroy_image(&o->im);
-@@ -2246,53 +3774,1341 @@ fail:
+@@ -2246,53 +3799,1341 @@ fail:
      return 0;
  }
  
@@ -20310,7 +20416,7 @@ index e2687b7..7682d00 100644
          static int warned_fmt;
          if (!warned_fmt) { VK_LOG("engine: depth snapshots need D32_SFLOAT, this device uses %d\n",
                                    (int)s_vk.depth_format); warned_fmt = 1; }
-@@ -2318,19 +5134,21 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
+@@ -2318,19 +5159,21 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
          t->kind = VK_ENG_TEXTURE; t->fmt = VK_FORMAT_R32_SFLOAT; t->bpp = 4; t->w = w; t->h = h;
          z = vk_eng_get(depth, VK_ENG_DEPTH);          /* same slot; reload for clarity */
          z->surface = snap;
@@ -20341,7 +20447,7 @@ index e2687b7..7682d00 100644
          vk_barrier_image(t->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
          VkBufferImageCopy out = { .imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 },
                                    .imageExtent = { w, h, 1 } };
-@@ -2345,9 +5163,8 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
+@@ -2345,9 +5188,8 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
          VkBufferImageCopy in = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
                                   .imageExtent = { w, h, 1 } };
          pvkCmdCopyBufferToImage(s_vk.cmd, st.buf, t->im.img, VK_IMAGE_LAYOUT_GENERAL, 1, &in);
@@ -20352,7 +20458,7 @@ index e2687b7..7682d00 100644
      return rc ? 0 : snap;
  }
  /* ---- E2: pipelines and draws ---------------------------------------------
-@@ -2364,9 +5181,14 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
+@@ -2364,9 +5206,14 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
   * samplers s0..s3 would alias the pixel samplers' binding), FP16 and other
   * non-RGBA8 colour targets, depth-only passes, and stencil (the depth format
   * has no stencil aspect yet, so the test is inert). */
@@ -20369,7 +20475,7 @@ index e2687b7..7682d00 100644
  
  typedef struct vk_eng_pipe {
      int                 used;
-@@ -2377,6 +5199,9 @@ typedef struct vk_eng_pipe {
+@@ -2377,6 +5224,9 @@ typedef struct vk_eng_pipe {
  } vk_eng_pipe;
  
  static vk_eng_pipe s_epipe[VK_ENG_MAX_PIPE];
@@ -20379,7 +20485,7 @@ index e2687b7..7682d00 100644
  
  static struct {
      VkRenderPass rp[RSX_BE_MAX_COLOR_TARGETS + 1];      /* by colour count */
-@@ -2393,19 +5218,315 @@ static struct {
+@@ -2393,19 +5243,315 @@ static struct {
      u32          sc[4];
      int          have_vp, have_sc;
      u32          stencil_ref;
@@ -20697,7 +20803,7 @@ index e2687b7..7682d00 100644
  }
  
  /* The render pass for `n` RGBA8 colour attachments plus depth, LOAD/STORE in
-@@ -2421,8 +5542,8 @@ static VkRenderPass vk_eng_render_pass(u32 n)
+@@ -2421,8 +5567,8 @@ static VkRenderPass vk_eng_render_pass(u32 n)
              .format = (i < n) ? VK_FORMAT_R8G8B8A8_UNORM : s_vk.depth_format,
              .samples = VK_SAMPLE_COUNT_1_BIT,
              .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -20708,7 +20814,7 @@ index e2687b7..7682d00 100644
              .initialLayout = VK_IMAGE_LAYOUT_GENERAL, .finalLayout = VK_IMAGE_LAYOUT_GENERAL };
          if (i < n) cref[i] = (VkAttachmentReference){ i, VK_IMAGE_LAYOUT_GENERAL };
      }
-@@ -2495,43 +5616,138 @@ static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 z
+@@ -2495,43 +5641,138 @@ static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 z
      return s;
  }
  
@@ -20858,7 +20964,7 @@ index e2687b7..7682d00 100644
      P->stride = vertex_stride;
      P->rt_count = rt_count;
      P->used = 1;
-@@ -2542,12 +5758,15 @@ static void vk_eng_pipeline_release(void* user, u32 pipeline)
+@@ -2542,12 +5783,15 @@ static void vk_eng_pipeline_release(void* user, u32 pipeline)
  {
      (void)user;
      if (!pipeline || pipeline > VK_ENG_MAX_PIPE || !s_epipe[pipeline - 1].used) return;
@@ -20874,7 +20980,7 @@ index e2687b7..7682d00 100644
      if (s_e2.pipeline == pipeline) s_e2.pipeline = 0;
  }
  
-@@ -2573,7 +5792,8 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+@@ -2573,7 +5817,8 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
          va[s] = (VkVertexInputAttributeDescription){ s, 0, VK_FORMAT_R32G32B32A32_SFLOAT, s * 16u };
      VkPipelineVertexInputStateCreateInfo vi = {
          .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -20884,7 +20990,7 @@ index e2687b7..7682d00 100644
          .vertexAttributeDescriptionCount = P->nslots, .pVertexAttributeDescriptions = va };
      VkPipelineInputAssemblyStateCreateInfo ia = {
          .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-@@ -2593,6 +5813,8 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+@@ -2593,6 +5838,8 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
                                                                             : VK_CULL_MODE_BACK_BIT,
          .frontFace = (rs->front_face == 0x0901u) ? VK_FRONT_FACE_COUNTER_CLOCKWISE
                                                   : VK_FRONT_FACE_CLOCKWISE,
@@ -20893,7 +20999,7 @@ index e2687b7..7682d00 100644
          .lineWidth = 1.0f };
      VkPipelineMultisampleStateCreateInfo ms = {
          .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-@@ -2609,7 +5831,8 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+@@ -2609,7 +5856,8 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
          .depthWriteEnable = (rs->depth_test && rs->depth_write) ? VK_TRUE : VK_FALSE,
          .depthCompareOp = vk_gcm_compare(rs->depth_func),
          .stencilTestEnable = rs->stencil_enable ? VK_TRUE : VK_FALSE,
@@ -20903,7 +21009,7 @@ index e2687b7..7682d00 100644
      /* nv40 COLOR_MASK: B [0:7], G [8:15], R [16:23], A [24:31], any bit set.
       * Every attachment takes target A's blend and mask (see rsx_draw_engine.h). */
      VkColorComponentFlags wm = 0;
-@@ -2617,36 +5840,53 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+@@ -2617,36 +5865,53 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
      if ((rs->color_mask >>  8) & 0xFFu) wm |= VK_COLOR_COMPONENT_G_BIT;
      if ((rs->color_mask >>  0) & 0xFFu) wm |= VK_COLOR_COMPONENT_B_BIT;
      if ((rs->color_mask >> 24) & 0xFFu) wm |= VK_COLOR_COMPONENT_A_BIT;
@@ -20964,7 +21070,7 @@ index e2687b7..7682d00 100644
      return P->variant[topo_idx];
  }
  
-@@ -2654,35 +5894,80 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
+@@ -2654,35 +5919,80 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
  
  static void vk_eng2_shutdown(void* user)
  {
@@ -21055,7 +21161,7 @@ index e2687b7..7682d00 100644
      s_e2.ps_bytes = bytes;
  }
  static void vk_eng_bind_textures(void* user, const u32* textures,
-@@ -2702,17 +5987,31 @@ static void vk_eng_bind_vertex_textures(void* user, const u32* textures,
+@@ -2702,17 +6012,31 @@ static void vk_eng_bind_vertex_textures(void* user, const u32* textures,
      (void)user; (void)textures; (void)samplers;
      if (mask && !(s_e2.warned & 8u)) { VK_LOG("engine: vertex textures not supported yet\n"); s_e2.warned |= 8u; }
  }
@@ -21089,7 +21195,7 @@ index e2687b7..7682d00 100644
  
  static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, VkImageView dview,
                                          u32 dkey, u32 w, u32 h)
-@@ -2720,9 +6019,19 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
+@@ -2720,9 +6044,19 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
      u32 key[RSX_BE_MAX_COLOR_TARGETS + 1] = { 0 };
      for (u32 i = 0; i < n; i++) key[i] = rt[i];
      key[RSX_BE_MAX_COLOR_TARGETS] = dkey;
@@ -21112,7 +21218,7 @@ index e2687b7..7682d00 100644
      VkImageView views[RSX_BE_MAX_COLOR_TARGETS + 1];
      for (u32 i = 0; i < n; i++) views[i] = s_eobj[rt[i]].im.view;
      views[n] = dview;
-@@ -2733,6 +6042,8 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
+@@ -2733,6 +6067,8 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
      if (pvkCreateFramebuffer(s_vk.device, &fci, NULL, &fb) != VK_SUCCESS) return VK_NULL_HANDLE;
      memcpy(s_e2.fb[s_e2.fb_count].key, key, sizeof key);
      s_e2.fb[s_e2.fb_count++].fb = fb;
@@ -21121,7 +21227,7 @@ index e2687b7..7682d00 100644
      return fb;
  }
  
-@@ -2743,16 +6054,17 @@ static VkImageView vk_eng_scratch_depth(u32 w, u32 h)
+@@ -2743,16 +6079,17 @@ static VkImageView vk_eng_scratch_depth(u32 w, u32 h)
      if (s_e2.scratch_depth.view && s_e2.scratch_w >= w && s_e2.scratch_h >= h)
          return s_e2.scratch_depth.view;
      vk_eng_drop_framebuffers();
@@ -21143,7 +21249,7 @@ index e2687b7..7682d00 100644
      s_e2.scratch_w = w; s_e2.scratch_h = h;
      return s_e2.scratch_depth.view;
  }
-@@ -2773,12 +6085,25 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
+@@ -2773,12 +6110,25 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
  {
      u32 lo, hi;
      memcpy(&lo, &d->min_lod, 4); memcpy(&hi, &d->max_lod, 4);
@@ -21172,7 +21278,7 @@ index e2687b7..7682d00 100644
      float min_lod = d->min_lod, max_lod = d->mip_present ? d->max_lod : d->min_lod;
      if (max_lod < min_lod) max_lod = min_lod;
      VkSamplerCreateInfo sci = {
-@@ -2789,62 +6114,154 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
+@@ -2789,62 +6139,154 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
          .addressModeU = vk_gcm_wrap(d->wrap_s), .addressModeV = vk_gcm_wrap(d->wrap_t),
          .addressModeW = vk_gcm_wrap(d->wrap_r),
          .minLod = min_lod, .maxLod = max_lod,
@@ -21354,7 +21460,7 @@ index e2687b7..7682d00 100644
  
      /* Targets: every member of a set is target A's size (engine contract). */
      const u32 n = s_eng_bound.nrt;
-@@ -2867,24 +6284,152 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+@@ -2867,24 +6309,152 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
      VkFramebuffer fb = vk_eng_framebuffer(rp, s_eng_bound.rt, n, dview, dkey, w, h);
      if (!pipe || !rp || !fb) return;
  
@@ -21523,7 +21629,7 @@ index e2687b7..7682d00 100644
      pvkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
      VkViewport vp = { 0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f };
      if (s_e2.have_vp && s_e2.vp[2] > 0.0f && s_e2.vp[3] > 0.0f) {
-@@ -2902,20 +6447,113 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+@@ -2902,20 +6472,113 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
      pvkCmdSetViewport(s_vk.cmd, 0, 1, &vp);
      pvkCmdSetScissor(s_vk.cmd, 0, 1, &sc);
      pvkCmdSetStencilReference(s_vk.cmd, VK_STENCIL_FACE_FRONT_AND_BACK, s_e2.stencil_ref & 0xFFu);
@@ -21646,7 +21752,7 @@ index e2687b7..7682d00 100644
  static const rsx_draw_backend s_vk_engine_backend = {
      .user                 = NULL,
      .init                 = vk_eng_init,
-@@ -2929,23 +6567,47 @@ static const rsx_draw_backend s_vk_engine_backend = {
+@@ -2929,23 +6592,47 @@ static const rsx_draw_backend s_vk_engine_backend = {
      .surface_view         = vk_eng_surface_view,
      .depth_target_create  = vk_eng_depth_target_create,
      .depth_target_release = vk_eng_release,
@@ -21695,7 +21801,7 @@ index e2687b7..7682d00 100644
  };
  
  static rsx_backend s_vulkan_backend = {
-@@ -3017,6 +6679,31 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3017,6 +6704,31 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      pvkGetPhysicalDeviceFeatures(s_vk.phys, &have);
      want.textureCompressionBC = have.textureCompressionBC;
      s_vk.bc_ok = have.textureCompressionBC ? 1 : 0;
@@ -21727,7 +21833,7 @@ index e2687b7..7682d00 100644
      VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                                 .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
                                 .enabledExtensionCount = s_vk.windowed ? 1u : 0u,
-@@ -3036,9 +6723,15 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3036,9 +6748,15 @@ static int vk_init_all(u32 width, u32 height, const char* title)
                                          .commandPool = s_vk.pool,
                                          .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
                                          .commandBufferCount = 1 };
@@ -21744,7 +21850,7 @@ index e2687b7..7682d00 100644
  
      if (vk_pick_depth_format()) return -1;
      if (vk_create_image(&s_vk.color, VK_FORMAT_R8G8B8A8_UNORM, s_vk.width, s_vk.height,
-@@ -3046,9 +6739,9 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3046,9 +6764,9 @@ static int vk_init_all(u32 width, u32 height, const char* title)
                          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT)) return -1;
      if (vk_create_image(&s_vk.depth, s_vk.depth_format, s_vk.width, s_vk.height,
                          VK_IMAGE_USAGE_TRANSFER_DST_BIT |
@@ -21757,7 +21863,7 @@ index e2687b7..7682d00 100644
      if (vk_create_render_pass()) return -1;
      if (vk_create_pipeline_objects()) return -1;
      if (vk_guest_init()) {
-@@ -3063,18 +6756,24 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3063,18 +6781,24 @@ static int vk_init_all(u32 width, u32 height, const char* title)
       * null backend makes the same choice). */
      if (vk_begin()) return -1;
      vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
@@ -21784,7 +21890,7 @@ index e2687b7..7682d00 100644
              vk_create_swapchain())
              vk_window_drop("the swapchain could not be created");
      }
-@@ -3143,8 +6842,11 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -3143,8 +6867,11 @@ void rsx_vulkan_backend_shutdown(void)
          vk_destroy_image(&s_vk.dummy);
          vk_destroy_image(&s_vk.depth);
          vk_destroy_image(&s_vk.color);
@@ -21796,7 +21902,7 @@ index e2687b7..7682d00 100644
          if (s_vk.fence) pvkDestroyFence(s_vk.device, s_vk.fence, NULL);
          if (s_vk.pool)  pvkDestroyCommandPool(s_vk.device, s_vk.pool, NULL);
          pvkDestroyDevice(s_vk.device, NULL);
-@@ -3157,18 +6859,75 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -3157,18 +6884,75 @@ void rsx_vulkan_backend_shutdown(void)
  
  int rsx_vulkan_backend_pump_messages(void)
  {
