@@ -777,6 +777,44 @@ keep the word-by-word path.
 `PS3RECOMP_FTLOG=1` (set by `play.sh` and `heavy_bench.sh`) prints the
 frame-time spread every 10 s: median, 99th percentile, worst frame, 1% low.
 
+### Slow frames while turning (2026-10-18)
+
+`work/runs/hitch_trace.sh` (perf on CLOCK_MONOTONIC, the clock the
+`[vk hitch]` lines now carry) lines every slow frame up with what each thread
+did in it. Turning the camera in the city, the 43-49 ms frames are not
+pipeline builds (the hitch log counts those: ~0) and not GPU waits (~0):
+
+- the main thread is in its job-list polls,
+- the SPURS threads are on the CPU only ~45% of the frame (asleep the rest),
+- the RSX thread waits in `bq_wait_for`, the recording thread idles.
+
+The job mix in those frames is the usual one. A longer SPURS idle spin
+(`SPURS_IDLE_SPIN_US=20000`) does not change the slow frames, so it is not
+wake-up latency. `PS3RECOMP_BQ_STATS=1` lists the synchronous backend calls
+that drain the recording queue: per 10 s in play, `t_native_latch` ~1,100
+(~70 ms), `t_native_lighting` ~560 (~5 ms), and texture creation in bursts
+(~900, ~50 ms, when new areas come in).
+
+**The freeze (found 2026-10-18).** Three of three captures on the Rog
+(`freeze_hunt.sh`) stop at the same place: the main thread polls
+`CellGcmControl.ref` at 0x133640 (waiting for the RSX to pass a command
+segment), the FIFO walker is idle with `get == put`, and ref never reaches
+the value. The fence queue between the walker and the ref register published
+a stale value: `gcm_ref_push_at` stored the slot and then the tail with plain
+stores, the consumer (`cellGcm_ref_on_poll`, on whichever guest thread reads
+ref) read the tail and then the slot, and nothing kept either pair in order.
+A consumer that saw the new tail with the old slot wrote the slot's previous
+value to ref and consumed the slot: the real fence was gone, and with the FIFO
+drained nothing ever published another. The tail is now a release store and
+an acquire load, and once the walker has drained to `put` with the queue
+empty, ref is set to the newest fence if it shows anything else (logged).
+
+Earlier description: reproduced twice under load (Rog Ally and desktop, camera turning):
+presentation stops, the main thread spins in `sys_timer_usleep` forever, the
+SPURS threads sleep, the audio job chain keeps running its Wwise DSP jobs, the
+RSX thread waits for commands. `work/runs/freeze_hunt.sh` repeats the bench
+with `PS3_POLLTOP` and the stall stack capture until it happens again.
+
 ### What the main thread waits for in New Marais
 
 The `PS3_TIMELINE` usleep events name the main thread's three waits:

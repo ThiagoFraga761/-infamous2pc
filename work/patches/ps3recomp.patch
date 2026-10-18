@@ -4958,7 +4958,7 @@ index 1cb09ad..f473cc3 100644
  static unsigned calls;
  static int waiting;
 diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
-index cdb0464..42896e5 100644
+index cdb0464..7db040a 100644
 --- a/libs/video/cellGcmSys.c
 +++ b/libs/video/cellGcmSys.c
 @@ -199,7 +199,7 @@ static void ydkj_restore_handler_opd(u32 opd, u32 code) {
@@ -5360,7 +5360,18 @@ index cdb0464..42896e5 100644
                    printf("[GCM2D] inline write dst=0x%08X (off=0x%X dma=0x%X pt=%u,%u pitch=%u) = 0x%08X\n",
                           base + py * dst_pitch + px * 4, s_gcm2d.dst_offset,
                           s_gcm2d.dst_dma, px, py, dst_pitch, data); }
-@@ -1169,7 +1437,7 @@ static volatile u32 s_ref_qhead = 0, s_ref_qtail = 0;   /* single producer+consu
+@@ -1158,7 +1426,9 @@ int cellGcm_take_flip_pending_synced(void)
+  * instead starved wrap recycles and wedged the backend -- don't.) */
+ #define GCM_REF_QLEN 4096
+ static u32 s_ref_q[GCM_REF_QLEN];
+-static volatile u32 s_ref_qhead = 0, s_ref_qtail = 0;   /* single producer+consumer: the ticker */
++static volatile u32 s_ref_qhead = 0, s_ref_qtail = 0;   /* one producer (the walker); consumers serialised by s_ref_pub_lock */
++static volatile u32 s_ref_last = 0;                     /* the newest fence drained */
++static volatile int s_ref_any = 0;                      /* one has been */
+ 
+ /* A JUMP/CALL whose target has no IO mapping must not be taken. Taking one
+  * teleports the walker into unmapped space, where it can never reach `put`
+@@ -1169,7 +1439,7 @@ static volatile u32 s_ref_qhead = 0, s_ref_qtail = 0;   /* single producer+consu
  static void gcm_fifo_bad_branch(const char* kind, u32 target, u32 word)
  {
      static int n = 0;
@@ -5369,7 +5380,7 @@ index cdb0464..42896e5 100644
          fprintf(stderr, "[cellGcmSys] FIFO %s to unmapped IO 0x%08X (word 0x%08X) "
                  "-- not taken, drain stops here\n", kind, target, word);
  }
-@@ -1282,7 +1550,7 @@ static u32 gcm_spu_block_for_put(u32 put)
+@@ -1282,7 +1552,7 @@ static u32 gcm_spu_block_for_put(u32 put)
  static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
  {
      static int n = 0;
@@ -5378,7 +5389,7 @@ index cdb0464..42896e5 100644
          fprintf(stderr, "[cellGcmSys] FIFO resync (%s) 0x%08X -> put 0x%08X\n",
                  why, *getoff, put);
      /* If an SPU DMA'd a pushbuffer that ends just short of `put`, that is the
-@@ -1293,7 +1561,7 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
+@@ -1293,7 +1563,7 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
       * by the backend as prim=0. */
      u32 land = gcm_spu_block_for_put(put);
      if (land == 0xFFFFFFFFu) land = put;
@@ -5387,7 +5398,7 @@ index cdb0464..42896e5 100644
          fprintf(stderr, "[cellGcmSys] resync landing on SPU pushbuffer "
                  "0x%08X (put 0x%08X) instead of skipping to put\n", land, put); }
  
-@@ -1311,7 +1579,7 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
+@@ -1311,7 +1581,7 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
              gcm_ref_push_at(vm_read32(dea), io);
              rescued++;
          }
@@ -5396,7 +5407,7 @@ index cdb0464..42896e5 100644
              fprintf(stderr, "[cellGcmSys] resync rescued %u fence(s) from"
                      " 0x%08X..0x%08X\n", rescued, from, land); }
      }
-@@ -1347,7 +1615,7 @@ static void gcm_ref_push_at(u32 v, u32 getoff)
+@@ -1347,10 +1617,19 @@ static void gcm_ref_push_at(u32 v, u32 getoff)
      if (t - s_ref_qhead >= GCM_REF_QLEN) {   /* overflow: drop oldest (keeps liveness) */
          s_ref_qhead++;
          static int _o = 0;
@@ -5404,8 +5415,30 @@ index cdb0464..42896e5 100644
 +        if (__atomic_load_n(&_o, __ATOMIC_RELAXED) < 4 && __atomic_fetch_add(&_o, 1, __ATOMIC_RELAXED) < 4) fprintf(stderr, "[cellGcmSys] fence queue overflow -- oldest dropped\n");
      }
      s_ref_q[t % GCM_REF_QLEN] = v;
-     s_ref_qtail = t + 1;
-@@ -1401,6 +1669,15 @@ static void gcm_ref_publish_one(void)
+-    s_ref_qtail = t + 1;
++    /* Release: the slot before the tail that shows it. The consumer is another
++     * thread (cellGcm_ref_on_poll runs on whichever guest thread reads ref),
++     * and with plain stores the compiler was free to publish the tail first:
++     * the consumer then wrote the slot's previous value to ref and moved on,
++     * the real fence was never published, and a title waiting for it hung
++     * with the FIFO drained (the camera-turn freeze, three of three captures
++     * stuck at the ref poll 0x133640 with the walker idle). */
++    __atomic_store_n(&s_ref_qtail, t + 1, __ATOMIC_RELEASE);
++    __atomic_store_n(&s_ref_last, v, __ATOMIC_RELEASE);
++    s_ref_any = 1;
+ }
+ 
+ /* Global fence-publication counter: lets the lwmutex convoy trace correlate a
+@@ -1371,7 +1650,7 @@ unsigned long long ps3_qpc_us(void)
+ static void gcm_ref_publish_one(void)
+ {
+     u32 h = s_ref_qhead;
+-    if (h == s_ref_qtail) return;
++    if (h == __atomic_load_n(&s_ref_qtail, __ATOMIC_ACQUIRE)) return;
+     vm_write32(GCM_CONTROL_GUEST_ADDR + 8, s_ref_q[h % GCM_REF_QLEN]);
+     /* stderr, deliberately: [DRAIN] uses printf and stdout is block-buffered
+      * when redirected, so its interleaving with an stderr probe is not a
+@@ -1401,6 +1680,15 @@ static void gcm_ref_publish_one(void)
  static SRWLOCK s_gcm_fifo_lock = SRWLOCK_INIT;
  static void gcm_rsx_process_fifo_unlocked(void);
  
@@ -5421,7 +5454,7 @@ index cdb0464..42896e5 100644
  /* Kick event: a game thread whose fence wait finds the queue DRY signals the
   * present thread to run the FIFO walker NOW instead of on its next 16 ms
   * tick. A movie frame issues ~46 one-ahead cellGcmFinish waits; paying a
-@@ -1447,7 +1724,10 @@ void cellGcm_ref_on_poll(void)
+@@ -1447,7 +1735,10 @@ void cellGcm_ref_on_poll(void)
          return;
      if (!s_freq.QuadPart) QueryPerformanceFrequency(&s_freq);
      LARGE_INTEGER now; QueryPerformanceCounter(&now);
@@ -5433,7 +5466,7 @@ index cdb0464..42896e5 100644
      int dry = 0;
      if (now.QuadPart - s_last_pub >= min_gap) {
          gcm_ref_publish_one();
-@@ -1459,6 +1739,34 @@ void cellGcm_ref_on_poll(void)
+@@ -1459,6 +1750,34 @@ void cellGcm_ref_on_poll(void)
          SetEvent(s_gcm_kick_ev);       /* dry: ask the present thread to walk */
  }
  
@@ -5468,7 +5501,7 @@ index cdb0464..42896e5 100644
  void cellGcm_rsx_process_fifo(void)
  {
      AcquireSRWLockExclusive(&s_gcm_fifo_lock);
-@@ -1468,10 +1776,11 @@ void cellGcm_rsx_process_fifo(void)
+@@ -1468,10 +1787,11 @@ void cellGcm_rsx_process_fifo(void)
  
  static void gcm_rsx_process_fifo_unlocked(void)
  {
@@ -5482,7 +5515,7 @@ index cdb0464..42896e5 100644
            unsigned long long now = ps3_ms_now();
            if (_t0 == 0) _t0 = now;
            if (now - _t0 >= 2000) {
-@@ -1512,7 +1821,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1512,7 +1832,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
       * once at init; if the title repoints gCellGcmCurrentContext at a buffer of
       * its own, every field below moves with it and the FIFO the runtime walks
       * stops being the one the title fills. Reported on change, not per tick. */
@@ -5493,7 +5526,7 @@ index cdb0464..42896e5 100644
          static u32 last_ptr = 0xFFFFFFFFu, last_cur = 0xFFFFFFFFu;
          u32 ptr = vm_read32(s_gcm_ctx_out_ea);
          u32 cur = ptr ? vm_read32(ptr + 0x8) : 0;
-@@ -1528,7 +1839,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1528,7 +1850,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
      }
  
      u32 start_off = s_fifo_getoff;
@@ -5502,7 +5535,7 @@ index cdb0464..42896e5 100644
          static int n = 0;
          if (n++ % 60 == 0)
              printf("[DRAIN] getoff=%08X put=%08X ref=%08X ctx.current=%08X\n",
-@@ -1541,7 +1852,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1541,7 +1863,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
       * two very different causes -- we missed the command, or it was never
       * submitted -- and only a direct scan of the ring separates them. */
      { static int scanned = 0;
@@ -5513,7 +5546,7 @@ index cdb0464..42896e5 100644
          unsigned found = 0;
          for (u32 io = 0; io + 8 <= put; io += 4) {
              u32 ea = gcm_io2ea(io); if (!ea) continue;
-@@ -1578,6 +1891,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1578,6 +1902,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
        } }
  
      int budget = 0x100000;                    /* words per tick cap */
@@ -5522,7 +5555,7 @@ index cdb0464..42896e5 100644
      /* GCM_DRAINDBG also reports WHY each pass stopped. A drain that ends far
       * short of `put` every tick is the signature of a FIFO that can never
       * catch up, and the reason is the whole diagnosis. */
-@@ -1596,7 +1911,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1596,7 +1922,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
              static u32 last_bad; static int n;
              if (s_fifo_getoff != last_bad || n < 4) {
                  last_bad = s_fifo_getoff;
@@ -5531,7 +5564,7 @@ index cdb0464..42896e5 100644
                      fprintf(stderr, "[cellGcmSys] FIFO get=0x%08X has no IO "
                              "mapping -- resyncing to put=0x%08X\n",
                              s_fifo_getoff, put);
-@@ -1678,8 +1993,46 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1678,8 +2004,46 @@ static void gcm_rsx_process_fifo_unlocked(void)
                     * park standing -- it only patches a park when it reuses that
                     * block. Waiting for a patch that will not come freezes the
                     * FIFO for the rest of the run, so follow the write head. */
@@ -5580,7 +5613,7 @@ index cdb0464..42896e5 100644
                    break;
                }
                s_fifo_getoff = tgt; }
-@@ -1713,7 +2066,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1713,7 +2077,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
                    u32 mi = (method >> 2) & 2047;
                    hist[mi]++; tot[mi] += count;
                    static u64 seen = 0;
@@ -5591,7 +5624,7 @@ index cdb0464..42896e5 100644
                        fprintf(stderr, "[TCFIFO] method histogram (blocks, dwords):%c", 10);
                        for (u32 k = 0; k < 2048; k++) if (hist[k])
                            fprintf(stderr, "[TCFIFO]   0x%04X  %8u blocks %10u dwords%c",
-@@ -1740,42 +2095,115 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1740,42 +2106,115 @@ static void gcm_rsx_process_fifo_unlocked(void)
                      u32 m = (type == 0) ? method + i * 4 : method;
                      u32 v = vm_read32(dea);
                      u32 la = GCM_LABEL_GUEST_BASE + (s_sema_offset & 0xFFFFu);
@@ -5720,7 +5753,7 @@ index cdb0464..42896e5 100644
                      continue;
                  }
                  /* GCM_SUBCH1_3D=1: treat subchannel 1 as the 3D object too.
-@@ -1788,11 +2216,11 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1788,11 +2227,11 @@ static void gcm_rsx_process_fifo_unlocked(void)
                   * title binds to a subchannel is what says which engine that
                   * subchannel drives; comparing subchannel 1 against subchannel 0
                   * turns the routing below from a guess into a reading. */
@@ -5734,7 +5767,7 @@ index cdb0464..42896e5 100644
                        if (subch < 8 && (!have[subch] || seen[subch] != h)) {
                            have[subch] = 1; seen[subch] = h;
                            printf("[GCM-OBJ] subch=%u SET_OBJECT handle=0x%08X%c",
-@@ -1816,46 +2244,61 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1816,46 +2255,61 @@ static void gcm_rsx_process_fifo_unlocked(void)
                  if (s1_2d < 0) { const char* e = getenv("GCM_SUBCH1_2D"); s1_2d = e ? atoi(e) : 0; }
                  /* GCM_SUBCH_GATE=<file>: while <file> exists, log every method on a
                   * non-zero subchannel -- what each binding slot actually carries. */
@@ -5808,7 +5841,7 @@ index cdb0464..42896e5 100644
                    if (fdbg < 0) fdbg = getenv("RSX_LIVE_FEED_DBG") ? 1 : 0;
                    if (fdbg) {
                        static long long n_be = 0, n_va = 0, n_ia = 0, tick = 0;
-@@ -1874,11 +2317,14 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1874,11 +2328,14 @@ static void gcm_rsx_process_fifo_unlocked(void)
                   * the draw-engine call above does. */
                  { const u32 mfull = (subch << 13) | m;
                  if (mfull == 0xEB00u || mfull == 0xEB04u) {
@@ -5826,7 +5859,7 @@ index cdb0464..42896e5 100644
                      /* NV406E_SET_REFERENCE: queue the fence value for PACED
                       * publication (gcm_ref_publish below) instead of letting a
                       * later fence in the same batch overwrite it. */
-@@ -1887,22 +2333,47 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1887,22 +2344,47 @@ static void gcm_rsx_process_fifo_unlocked(void)
                       * area. Sample counts are not measured, so a ZPASS query
                       * reports "visible" -- the conservative answer; reading 0
                       * tells the title every queried object is occluded. */
@@ -5881,7 +5914,7 @@ index cdb0464..42896e5 100644
              fprintf(stderr, "[FIFOUW] unknown word 0x%08X at getoff 0x%X\n", w, s_fifo_getoff); }
          s_fifo_getoff += 4;                    /* unknown word: skip */
      }
-@@ -1938,7 +2409,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1938,7 +2420,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
        if (passes && budget <= 0 && s_fifo_getoff != put) {
            if (++burned >= passes) {
                static int n = 0;
@@ -5890,7 +5923,7 @@ index cdb0464..42896e5 100644
                    fprintf(stderr, "[cellGcmSys] FIFO walker circling (get=0x%08X, "
                            "put=0x%08X, full budget burned x%d) -- following the "
                            "write head\n", s_fifo_getoff, put, burned);
-@@ -1947,8 +2418,17 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1947,8 +2429,17 @@ static void gcm_rsx_process_fifo_unlocked(void)
            }
        } else burned = 0; }
  
@@ -5909,7 +5942,7 @@ index cdb0464..42896e5 100644
            if (++stuck >= 8) { gcm_fifo_dump_around(s_fifo_getoff);
                               gcm_fifo_resync_why("stuck-get", &s_fifo_getoff, put); stuck = 0; }
        } else { stuck = 0; last = s_fifo_getoff; } }
-@@ -1957,7 +2437,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1957,7 +2448,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
       * per tick (gcm_ref_push/gcm_ref_publish_one above) so every SET_REFERENCE
       * value stays observable to equality-waiters. The wrap recycle path polls
       * the drained EA. */
@@ -5918,7 +5951,7 @@ index cdb0464..42896e5 100644
          static int n2 = 0;
          if (n2++ % 60 == 0)
              fprintf(stderr, "[DRAINEND] %s: %08X -> %08X (%u bytes), put=%08X\n",
-@@ -2040,7 +2520,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -2040,7 +2531,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
                  s_fifo_getoff = io_begin;                          /* get */
                  put = io_begin;
                  static int n = 0;
@@ -5927,7 +5960,26 @@ index cdb0464..42896e5 100644
                      fprintf(stderr, "[cellGcmSys] recycled the title's own ring "
                              "(ctx=0x%08X begin=0x%08X end=0x%08X) -- its callback "
                              "does not%c", ctx, begin, end, 10);
-@@ -2122,7 +2602,7 @@ void cellGcm_fifo_recycle(u32 ctx_ea)
+@@ -2061,6 +2552,18 @@ static void gcm_rsx_process_fifo_unlocked(void)
+ 
+     AcquireSRWLockExclusive(&s_ref_pub_lock);                           /* ref */
+     gcm_ref_publish_one();
++    /* Drained to `put` with nothing left to publish: ref must show the newest
++     * fence. If it does not, a publication was lost; showing it now is what the
++     * hardware would show, and nothing waits on a value older than that. */
++    if (s_fifo_getoff == put && s_ref_any && s_ref_qhead == __atomic_load_n(&s_ref_qtail, __ATOMIC_ACQUIRE)) {
++        const u32 want = __atomic_load_n(&s_ref_last, __ATOMIC_ACQUIRE);
++        if (vm_read32(GCM_CONTROL_GUEST_ADDR + 8) != want) {
++            static int n;
++            if (n++ < 8) fprintf(stderr, "[cellGcmSys] ref 0x%08X behind the last fence drained 0x%08X -- published\n",
++                                 vm_read32(GCM_CONTROL_GUEST_ADDR + 8), want);
++            vm_write32(GCM_CONTROL_GUEST_ADDR + 8, want);
++        }
++    }
+     ReleaseSRWLockExclusive(&s_ref_pub_lock);
+ }
+ 
+@@ -2122,7 +2625,7 @@ void cellGcm_fifo_recycle(u32 ctx_ea)
      while (g_gcm_fifo_drained_ea != begin && spins < 2000) { Sleep(1); spins++; }
      if (spins >= 2000) {
          static int warned = 0;
@@ -5936,7 +5988,7 @@ index cdb0464..42896e5 100644
              printf("[cellGcmSys] fifo recycle: drain stalled (drained=0x%08X begin=0x%08X)\n",
                     g_gcm_fifo_drained_ea, begin);
      }
-@@ -2230,7 +2710,7 @@ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
+@@ -2230,7 +2733,7 @@ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
            }
        } }
  
@@ -5945,7 +5997,7 @@ index cdb0464..42896e5 100644
          fprintf(stderr, "[FLIP] SetFlipCommand(buf=%u) set=%d\n",
                  bufferId, bufferId < CELL_GCM_MAX_DISPLAY_BUFFER_NUM ? s_display_buffer_set[bufferId] : -1); }
      if (bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM)
-@@ -2554,7 +3034,7 @@ s32 cellGcmAddressToOffset(u32 address, u32* offset)
+@@ -2554,7 +3057,7 @@ s32 cellGcmAddressToOffset(u32 address, u32* offset)
      printf("[cellGcmSys] WARNING: AddressToOffset failed for 0x%08X\n", address);
      vm_write32(off_ea, 0);
      { static int _d = -1; if (_d < 0) _d = getenv("A2O_FAILDBG") ? 1 : 0;
@@ -5954,7 +6006,7 @@ index cdb0464..42896e5 100644
            fprintf(stderr, "[A2O] FAILED ea=0x%08X (not in local or IO space)%c",
                    address, 10); } }
      return CELL_GCM_ERROR_FAILURE;
-@@ -2802,7 +3282,7 @@ CellGcmReportData* cellGcmGetReportDataAddress(u32 index)
+@@ -2802,7 +3305,7 @@ CellGcmReportData* cellGcmGetReportDataAddress(u32 index)
  u32 cellGcmGetReport(u32 type, u32 index)
  {
      { static int n = 0;
@@ -5963,7 +6015,7 @@ index cdb0464..42896e5 100644
                            index < CELL_GCM_MAX_REPORT_COUNT ? s_report_data[index].value : 0u, 10); }
      if (index >= CELL_GCM_MAX_REPORT_COUNT) return 0;
      return s_report_data[index].value;
-@@ -2943,7 +3423,7 @@ u32 cellGcmGetTiledPitchSize(u32 size)
+@@ -2943,7 +3446,7 @@ u32 cellGcmGetTiledPitchSize(u32 size)
              if (s_valid_pitches[i] >= size) { r = s_valid_pitches[i]; break; }
          }
      }
@@ -5987,10 +6039,10 @@ index f039abf..828ecf4 100644
  
 diff --git a/libs/video/rsx_be_thread.c b/libs/video/rsx_be_thread.c
 new file mode 100644
-index 0000000..f3c2014
+index 0000000..ea22ad7
 --- /dev/null
 +++ b/libs/video/rsx_be_thread.c
-@@ -0,0 +1,967 @@
+@@ -0,0 +1,1033 @@
 +/*
 + * ps3recomp - the draw engine's backend calls, recorded on a thread of their own
 + *
@@ -6060,7 +6112,7 @@ index 0000000..f3c2014
 +    OP_DRAW, OP_DRAW_GEO, OP_CLEAR_COLOR, OP_CLEAR_DS, OP_PRESENT,
 +    OP_TEX_UPLOAD, OP_TEX_RELEASE, OP_COLOR_RELEASE, OP_DEPTH_RELEASE,
 +    OP_PIPE_RELEASE, OP_GEO_DROP, OP_SNAP_COLOR, OP_SNAP_DEPTH, OP_SNAP_RGBA8,
-+    OP_DRAW_PULLED,
++    OP_DRAW_PULLED, OP_NATIVE_LATCH, OP_TEX_CREATE,
 +};
 +
 +typedef struct { u32 op, size, pad[2]; } bq_hdr;
@@ -6095,6 +6147,7 @@ index 0000000..f3c2014
 +    u32 n_done;
 +    u64 n_sync, n_async;            /* PS3RECOMP_BE_THREAD_STATS */
 +    u64 presents_sent;              /* producer: OP_PRESENT queued */
++    int latch_failed;               /* worker: a queued native_latch failed */
 +    u64 presents_done;              /* worker: OP_PRESENT executed */
 +    u32 seen_gen;                   /* the backend's free_gen when the caches were last right */
 +} Q;
@@ -6191,6 +6244,14 @@ index 0000000..f3c2014
 +    case OP_DEPTH_RELEASE: be->depth_target_release(u, *(const u32*)p); break;
 +    case OP_PIPE_RELEASE:  be->pipeline_release(u, *(const u32*)p); break;
 +    case OP_GEO_DROP:      be->geo_drop(u, *(const u32*)p); break;
++    case OP_TEX_CREATE: {
++        const u32* a = (const u32*)p;    /* handle, fmt, w, h, mips, faces, remap, rsx_fmt */
++        be->texture_create_at(u, a[0], (rsx_be_format)a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
++        break; }
++    case OP_NATIVE_LATCH: {
++        const u32* a = (const u32*)p;
++        if (be->native_latch(u, a[0], a[1])) __atomic_store_n(&Q.latch_failed, 1, __ATOMIC_RELEASE);
++        break; }
 +    case OP_SNAP_COLOR: case OP_SNAP_DEPTH: case OP_SNAP_RGBA8: {
 +        const u32* a = (const u32*)p;            /* target, w, h, expected */
 +        const u32 got = h->op == OP_SNAP_COLOR ? be->color_snapshot(u, a[0])
@@ -6336,11 +6397,43 @@ index 0000000..f3c2014
 +
 +/* A call that needs the backend now: on the engine's thread, after the
 + * queue; on any other, between two batches. Pair with bq_direct_end. */
-+static void bq_direct_begin(void)
++/* PS3RECOMP_BQ_STATS=1: every 10 s, which synchronous calls made the engine
++ * thread wait for the worker to drain the queue, how often and how long. A
++ * drain in the middle of a frame stops the two threads overlapping. */
++static void bq_sync_note(const char* who, unsigned long long ns)
 +{
-+    if (Q.on && bq_mine()) { bq_wait_for(&Q.r, Q.w); Q.n_sync++; }
++    static int on = -1;
++    if (on < 0) on = getenv("PS3RECOMP_BQ_STATS") ? 1 : 0;
++    if (!on) return;
++    enum { N = 32 };
++    static const char* name[N]; static unsigned long long tot[N], cnt[N], t0;
++    int i = 0;
++    while (i < N && name[i] && name[i] != who) i++;
++    if (i == N) return;
++    name[i] = who; tot[i] += ns; cnt[i]++;
++    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++    const unsigned long long now = (unsigned long long)ts.tv_sec * 1000000000ull + (unsigned long long)ts.tv_nsec;
++    if (!t0) t0 = now;
++    if (now - t0 < 10000000000ull) return;
++    fprintf(stderr, "[bq-sync] last 10 s:");
++    for (int k = 0; k < N && name[k]; k++)
++        if (cnt[k]) fprintf(stderr, " %s %llux %.1f ms;", name[k], cnt[k], tot[k] / 1e6);
++    fputc('\n', stderr);
++    memset(tot, 0, sizeof tot); memset(cnt, 0, sizeof cnt); t0 = now;
++}
++
++static void bq_direct_begin_named(const char* who)
++{
++    if (Q.on && bq_mine()) {
++        struct timespec a, b;
++        clock_gettime(CLOCK_MONOTONIC, &a);
++        bq_wait_for(&Q.r, Q.w); Q.n_sync++;
++        clock_gettime(CLOCK_MONOTONIC, &b);
++        bq_sync_note(who, (unsigned long long)(b.tv_sec - a.tv_sec) * 1000000000ull + (unsigned long long)b.tv_nsec - (unsigned long long)a.tv_nsec);
++    }
 +    pthread_mutex_lock(&Q.lock);
 +}
++#define bq_direct_begin() bq_direct_begin_named(__func__)
 +static void bq_gen_check(void);
 +static void bq_direct_end(void)
 +{
@@ -6505,6 +6598,19 @@ index 0000000..f3c2014
 +                            u32 remap, u32 rsx_fmt)
 +{
 +    (void)user;
++    /* A handle now, the image built in order on the worker: creating it here
++     * waited for the whole queue, ~900 times in the 10 s a new area streams in. */
++    static int on = -1;
++    /* Off by default: built on the worker mid-batch, the images made the
++     * turning-camera p99 worse (155-178 ms windows against ~21). */
++    if (on < 0) { const char* e = getenv("PS3RECOMP_BQ_TEXASYNC"); on = e && e[0] == '1'; }
++    if (on && bq_async() && Q.be->texture_reserve && Q.be->texture_create_at) {
++        const u32 hd = Q.be->texture_reserve(U, fmt, w, h, mips, faces);
++        if (!hd) return 0;
++        u32* a = (u32*)BQ_P(bq_reserve(OP_TEX_CREATE, 32));
++        a[0] = hd; a[1] = (u32)fmt; a[2] = w; a[3] = h; a[4] = mips; a[5] = faces; a[6] = remap; a[7] = rsx_fmt;
++        return hd;
++    }
 +    bq_direct_begin();
 +    const u32 r = Q.be->texture_create(U, fmt, w, h, mips, faces, remap, rsx_fmt);
 +    bq_direct_end();
@@ -6896,11 +7002,23 @@ index 0000000..f3c2014
 +    bq_direct_begin(); const int r = Q.be->native_ssao(U, normals, depth, params, out); bq_direct_end();
 +    return r;
 +}
++/* Queued: it is a GPU copy, and waiting for the worker to drain before it
++ * cost two drains a frame. Its failures are structural (format, size) and
++ * repeat every frame, so the answer given is the previous queued one's: a
++ * failure turns native lighting off one call late. */
 +static int t_native_latch(void* user, u32 which, u32 src)
 +{
 +    (void)user;
-+    bq_direct_begin(); const int r = Q.be->native_latch(U, which, src); bq_direct_end();
-+    return r;
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("PS3RECOMP_BQ_LATCHASYNC"); on = !(e && e[0] == '0'); }
++    if (!on || !bq_async()) {
++        bq_direct_begin(); const int r = Q.be->native_latch(U, which, src); bq_direct_end();
++        return r;
++    }
++    if (__atomic_load_n(&Q.latch_failed, __ATOMIC_ACQUIRE)) return -1;
++    u32* a = (u32*)BQ_P(bq_reserve(OP_NATIVE_LATCH, 8));
++    a[0] = which; a[1] = src;
++    return 0;
 +}
 +static int t_native_lighting(void* user, const u32* words, u32 count, u32 out[2])
 +{
@@ -12680,7 +12798,7 @@ index 5c50e4a..e4c433a 100644
  
  u32 rsx_draw_engine_guest_draws(void)
 diff --git a/libs/video/rsx_draw_engine.h b/libs/video/rsx_draw_engine.h
-index fa8b57d..d2c0ce9 100644
+index fa8b57d..45fed1e 100644
 --- a/libs/video/rsx_draw_engine.h
 +++ b/libs/video/rsx_draw_engine.h
 @@ -65,7 +65,9 @@ typedef enum {
@@ -12774,7 +12892,7 @@ index fa8b57d..d2c0ce9 100644
      /* One draw. `indices` is NULL for a non-indexed one. Everything the
       * hardware has and the host does not -- quads, quad strips, fans,
       * polygons -- has already been expanded into a triangle list by the time
-@@ -205,6 +260,111 @@ typedef struct rsx_draw_backend {
+@@ -205,6 +260,118 @@ typedef struct rsx_draw_backend {
      void (*present)(void* user, u32 surface);
      void (*readback)(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h,
                       void* out, u32 out_pitch);
@@ -12878,6 +12996,13 @@ index fa8b57d..d2c0ce9 100644
 +     * without waiting for the queue to empty -- a new pipeline used to stall
 +     * the engine for as long as the whole queue took). */
 +    int pipeline_create_any_thread;
++    /* Optional, both or neither: texture_create in two halves. texture_reserve
++     * checks the request and takes a handle, from any thread; the handle is
++     * not usable until texture_create_at, on the backend's own thread, has
++     * built the image in it (rsx_be_thread.c queues that half). */
++    u32  (*texture_reserve)(void* user, rsx_be_format fmt, u32 w, u32 h, u32 mips, u32 faces);
++    void (*texture_create_at)(void* user, u32 handle, rsx_be_format fmt, u32 w, u32 h,
++                              u32 mips, u32 faces, u32 remap, u32 rsx_fmt);
 +    /* Optional: a count every released handle bumps, those the backend
 +     * releases by itself (a target's snapshots and views, a snapshot made
 +     * again at another size) included. rsx_be_thread.c drops the answers it
@@ -12886,7 +13011,7 @@ index fa8b57d..d2c0ce9 100644
  } rsx_draw_backend;
  
  /* ---- the engine --------------------------------------------------------- */
-@@ -233,6 +393,9 @@ void rsx_draw_engine_shutdown(void);
+@@ -233,6 +400,9 @@ void rsx_draw_engine_shutdown(void);
   * SPU-built command lists bind NV4097 to another subchannel would otherwise
   * write its state into the wrong register bank. */
  void rsx_draw_engine_method(u32 method, u32 arg);
@@ -12896,7 +13021,7 @@ index fa8b57d..d2c0ce9 100644
  
  /* cellGcmSetDisplayBuffer, so the flip can resolve a buffer id to a surface
   * the engine has actually rendered rather than to whatever is bound. */
-@@ -261,6 +424,70 @@ u32  rsx_draw_engine_guest_draws(void);
+@@ -261,6 +431,70 @@ u32  rsx_draw_engine_guest_draws(void);
   * 8-bit-per-channel one. */
  u32  rsx_draw_engine_readback_center(void);
  
@@ -16671,7 +16796,7 @@ index ecc53fc..5752611 100644
   * program start). Branch targets are absolute slots; this makes them relative
   * to the ucode pointer handed in. Defaults to 0. */
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index e2687b7..fcaf442 100644
+index e2687b7..9dc049e 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
 @@ -50,6 +50,10 @@
@@ -18433,7 +18558,14 @@ index e2687b7..fcaf442 100644
  }
  
  static void vk_cb_present(void* ud, u32 buffer_id)
-@@ -1877,16 +3173,27 @@ typedef struct vk_eng_obj {
+@@ -1871,22 +3167,33 @@ static void vk_cb_present(void* ud, u32 buffer_id)
+  * -------------------------------------------------------------------------*/
+ #define VK_ENG_MAX_OBJ 2048          /* the engine's texture cache is 1024 */
+ 
+-enum { VK_ENG_FREE = 0, VK_ENG_COLOR, VK_ENG_DEPTH, VK_ENG_TEXTURE, VK_ENG_VIEW };
++enum { VK_ENG_FREE = 0, VK_ENG_COLOR, VK_ENG_DEPTH, VK_ENG_TEXTURE, VK_ENG_VIEW, VK_ENG_RESERVED };
+ 
+ typedef struct vk_eng_obj {
      u8       kind;
      VkFormat fmt;
      u32      bpp;                    /* bytes per texel, 0 for depth     */
@@ -18462,7 +18594,29 @@ index e2687b7..fcaf442 100644
  static void vk_eng2_shutdown(void* user);
  
  static struct {
-@@ -1933,22 +3240,22 @@ static int vk_eng_upload_rows(VkImage img, u32 layer, u32 mip, u32 w, u32 h,
+@@ -1912,10 +3219,20 @@ static VkFormat vk_eng_format(rsx_be_format f, u32* bpp)
+     }
+ }
+ 
++/* A free slot, marked taken: texture_reserve allocates from the engine's
++ * thread while the recording thread allocates the rest. Every caller sets the
++ * real kind on success and clears the slot on failure. */
++static pthread_mutex_t s_eobj_lock = PTHREAD_MUTEX_INITIALIZER;
+ static u32 vk_eng_alloc(void)
+ {
++    pthread_mutex_lock(&s_eobj_lock);
+     for (u32 i = 1; i < VK_ENG_MAX_OBJ; i++)
+-        if (s_eobj[i].kind == VK_ENG_FREE) return i;
++        if (s_eobj[i].kind == VK_ENG_FREE) {
++            s_eobj[i].kind = VK_ENG_RESERVED;
++            pthread_mutex_unlock(&s_eobj_lock);
++            return i;
++        }
++    pthread_mutex_unlock(&s_eobj_lock);
+     VK_LOG("engine: object table full (%d)\n", VK_ENG_MAX_OBJ);
+     return 0;
+ }
+@@ -1933,22 +3250,22 @@ static int vk_eng_upload_rows(VkImage img, u32 layer, u32 mip, u32 w, u32 h,
                                size_t tight, u32 rows, const void* src, u32 row_bytes)
  {
      if (tight > row_bytes) tight = row_bytes;
@@ -18493,7 +18647,7 @@ index e2687b7..fcaf442 100644
      return rc;
  }
  
-@@ -1981,33 +3288,50 @@ static VkComponentMapping vk_remap(u32 remap, u32 rsx_fmt)
+@@ -1981,33 +3298,50 @@ static VkComponentMapping vk_remap(u32 remap, u32 rsx_fmt)
                               vk_remap_sel(sel[3]), vk_remap_sel(sel[0]) };
      return m;
  }
@@ -18550,7 +18704,7 @@ index e2687b7..fcaf442 100644
                  memset(&s_eobj[i], 0, sizeof s_eobj[i]);
              }
      if (s_eobj[handle].kind == VK_ENG_DEPTH && s_eobj[handle].surface) {
-@@ -2015,9 +3339,24 @@ static void vk_eng_release(void* user, u32 handle)
+@@ -2015,9 +3349,24 @@ static void vk_eng_release(void* user, u32 handle)
          s_eobj[handle].surface = 0;
          if (vk_eng_get(snap, VK_ENG_TEXTURE)) vk_eng_release(user, snap);
      }
@@ -18577,7 +18731,7 @@ index e2687b7..fcaf442 100644
      memset(&s_eobj[handle], 0, sizeof s_eobj[handle]);
  }
  
-@@ -2027,20 +3366,90 @@ static void vk_eng_shutdown(void* user)
+@@ -2027,20 +3376,90 @@ static void vk_eng_shutdown(void* user)
      for (u32 i = 1; i < VK_ENG_MAX_OBJ; i++) vk_eng_release(user, i);
  }
  
@@ -18670,7 +18824,7 @@ index e2687b7..fcaf442 100644
          VK_LOG("engine: colour target format %d %ux%u not supported yet\n", (int)fmt, w, h);
          return 0;
      }
-@@ -2053,46 +3462,60 @@ static u32 vk_eng_color_target_create(void* user, rsx_be_format fmt, u32 w, u32
+@@ -2053,46 +3472,60 @@ static u32 vk_eng_color_target_create(void* user, rsx_be_format fmt, u32 w, u32
                          VK_IMAGE_ASPECT_COLOR_BIT)) {
          vk_destroy_image(&o->im); return 0;
      }
@@ -18742,7 +18896,7 @@ index e2687b7..fcaf442 100644
      (void)user;
      if (count > RSX_BE_MAX_COLOR_TARGETS) count = RSX_BE_MAX_COLOR_TARGETS;
      for (u32 i = 0; i < RSX_BE_MAX_COLOR_TARGETS; i++)
-@@ -2103,6 +3526,7 @@ static void vk_eng_bind_targets(void* user, const u32* surfaces, u32 count, u32
+@@ -2103,6 +3536,7 @@ static void vk_eng_bind_targets(void* user, const u32* surfaces, u32 count, u32
  
  static void vk_eng_clear_color(void* user, u32 surface, const float rgba[4])
  {
@@ -18750,7 +18904,7 @@ index e2687b7..fcaf442 100644
      (void)user;
      /* The debug hook reports the last colour asked for, as Metal's does. */
      s_vk.clear_argb = ((u32)(rgba[3] * 255.0f + 0.5f) << 24) |
-@@ -2110,35 +3534,47 @@ static void vk_eng_clear_color(void* user, u32 surface, const float rgba[4])
+@@ -2110,35 +3544,47 @@ static void vk_eng_clear_color(void* user, u32 surface, const float rgba[4])
                        ((u32)(rgba[1] * 255.0f + 0.5f) <<  8) |
                         (u32)(rgba[2] * 255.0f + 0.5f);
      vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
@@ -18807,7 +18961,7 @@ index e2687b7..fcaf442 100644
          vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
          vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
          VkImageBlit blit = {
-@@ -2151,29 +3587,103 @@ static void vk_eng_present(void* user, u32 surface)
+@@ -2151,29 +3597,103 @@ static void vk_eng_present(void* user, u32 surface)
                          s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL, 1, &blit,
                          (o->w == s_vk.width && o->h == s_vk.height) ? VK_FILTER_NEAREST
                                                                      : VK_FILTER_LINEAR);
@@ -18867,8 +19021,8 @@ index e2687b7..fcaf442 100644
 +      if (hitch == -2) { const char* e = getenv("PS3RECOMP_VK_HITCH"); hitch = e ? atol(e) : -1; }
 +      const u64 now = vk_now_ns();
 +      if (hitch >= 0 && last && now - last > (u64)hitch * 1000000ull)
-+          fprintf(stderr, "[vk hitch] %.1f ms frame: %llu shader/pipeline builds %.1f ms,"
-+                  " %llu flushes %.1f ms on the GPU\n", (now - last) / 1e6,
++          fprintf(stderr, "[vk hitch] %.1f ms frame ending at %llu ns: %llu shader/pipeline builds %.1f ms,"
++                  " %llu flushes %.1f ms on the GPU\n", (now - last) / 1e6, (unsigned long long)now,
 +                  (unsigned long long)s_fr_compiles, s_fr_compile_ns / 1e6,
 +                  (unsigned long long)s_fr_flushes, s_fr_wait_ns / 1e6);
 +      last = now;
@@ -18921,7 +19075,7 @@ index e2687b7..fcaf442 100644
          VkBufferMemoryBarrier hb = {
              .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
              .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
-@@ -2182,42 +3692,84 @@ static void vk_eng_readback(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h,
+@@ -2182,42 +3702,95 @@ static void vk_eng_readback(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h,
          };
          pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
                                0, 0, NULL, 1, &hb, 0, NULL);
@@ -18983,16 +19137,18 @@ index e2687b7..fcaf442 100644
 - * becomes the image view's component mapping. Cube maps are not handled yet:
 - * the pixel decompiler declares cube units as separate bindings, which the
 - * shared set layout does not have, so faces == 6 reports 0 (placeholder). */
+-static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+-                                 u32 mips, u32 faces, u32 remap, u32 rsx_fmt)
 + * becomes the image view's component mapping. A cube map (faces == 6) is a
 + * six-layer cube-compatible image with a cube view, sampled through the
 + * decompiler's cube bank (RSX_FP_CUBE_BANK, binding RSX_SPIRV_CUBE_BINDING);
 + * without it the fog pass in inFAMOUS 2 sampled nothing for its sky colour and
 + * the whole post chain after it came out yellow. */
- static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
-                                  u32 mips, u32 faces, u32 remap, u32 rsx_fmt)
++/* texture_reserve: the request's checks, and a handle. Any thread. */
++static u32 vk_eng_texture_reserve(void* user, rsx_be_format fmt, u32 w, u32 h, u32 mips, u32 faces)
  {
-+    VK_CS(CS_TEXTURE_CREATE);
-     (void)user;
+-    (void)user;
++    (void)user; (void)mips;
      u32 bpp;
      const VkFormat vf = vk_eng_format(fmt, &bpp);
      const int bc = (fmt == RSX_BE_FMT_BC1 || fmt == RSX_BE_FMT_BC2 || fmt == RSX_BE_FMT_BC3);
@@ -19005,9 +19161,23 @@ index e2687b7..fcaf442 100644
 -    }
 +    const int cube = (faces == 6);
 +    if ((faces != 1 && !cube) || (cube && (w != h || !s_g.cube_ok))) return 0;   /* cube faces are square */
++    return vk_eng_alloc();
++}
++
++/* texture_create_at: the image, in a reserved handle. The recording thread. */
++static void vk_eng_texture_create_at(void* user, u32 hd, rsx_be_format fmt, u32 w, u32 h,
++                                     u32 mips, u32 faces, u32 remap, u32 rsx_fmt)
++{
++    VK_CS(CS_TEXTURE_CREATE);
++    (void)user;
++    if (!hd || hd >= VK_ENG_MAX_OBJ || s_eobj[hd].kind != VK_ENG_RESERVED) return;
++    u32 bpp;
++    const VkFormat vf = vk_eng_format(fmt, &bpp);
++    const int bc = (fmt == RSX_BE_FMT_BC1 || fmt == RSX_BE_FMT_BC2 || fmt == RSX_BE_FMT_BC3);
++    const int cube = (faces == 6);
      if (!mips) mips = 1;
-     const u32 hd = vk_eng_alloc();
-     if (!hd) return 0;
+-    const u32 hd = vk_eng_alloc();
+-    if (!hd) return 0;
      vk_eng_obj* o = &s_eobj[hd];
      VkImageCreateInfo ici = {
          .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
@@ -19017,7 +19187,7 @@ index e2687b7..fcaf442 100644
          .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
          .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
          .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
-@@ -2231,14 +3783,15 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+@@ -2231,68 +3804,1369 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
                                   .allocationSize = req.size, .memoryTypeIndex = type };
      if (pvkAllocateMemory(s_vk.device, &mai, NULL, &o->im.mem) != VK_SUCCESS ||
          pvkBindImageMemory(s_vk.device, o->im.img, o->im.mem, 0) != VK_SUCCESS ||
@@ -19033,16 +19203,27 @@ index e2687b7..fcaf442 100644
 +    if (vk_op_begin()) goto fail;
      vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
 -    if (vk_submit_and_wait()) goto fail;
+-    return hd;
 +    if (vk_op_end()) goto fail;
-     return hd;
++    return;
  fail:
      vk_destroy_image(&o->im);
-@@ -2246,53 +3799,1341 @@ fail:
-     return 0;
- }
- 
--static void vk_eng_texture_upload(void* user, u32 texture, u32 face, u32 mip, u32 w, u32 h,
--                                  const void* src, u32 row_bytes, u32 rows)
+     memset(o, 0, sizeof *o);
++    /* Still the engine's handle: freed by its release, not reused before. */
++    o->kind = VK_ENG_RESERVED;
++}
++
++static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
++                                 u32 mips, u32 faces, u32 remap, u32 rsx_fmt)
++{
++    const u32 hd = vk_eng_texture_reserve(user, fmt, w, h, mips, faces);
++    if (!hd) return 0;
++    vk_eng_texture_create_at(user, hd, fmt, w, h, mips, faces, remap, rsx_fmt);
++    if (s_eobj[hd].kind == VK_ENG_TEXTURE) return hd;
++    memset(&s_eobj[hd], 0, sizeof s_eobj[hd]);
++    return 0;
++}
++
 +static void vk_eng_texture_upload(void* user, u32 texture, u32 face, u32 mip, u32 w, u32 h,
 +                                  const void* src, u32 row_bytes, u32 rows)
 +{
@@ -19363,9 +19544,11 @@ index e2687b7..fcaf442 100644
 +    pvkCmdClearColorImage(s_vk.cmd, s_zc.zero_stencil.img, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &r);
 +    vk_op_end();
 +    s_zc.ok = 1;
-+    return 0;
-+}
-+
+     return 0;
+ }
+ 
+-static void vk_eng_texture_upload(void* user, u32 texture, u32 face, u32 mip, u32 w, u32 h,
+-                                  const void* src, u32 row_bytes, u32 rows)
 +static void vk_zc_shutdown(void)
 +{
 +    if (s_zc.pipe) pvkDestroyPipeline(s_vk.device, s_zc.pipe, NULL);
@@ -20416,7 +20599,7 @@ index e2687b7..fcaf442 100644
          static int warned_fmt;
          if (!warned_fmt) { VK_LOG("engine: depth snapshots need D32_SFLOAT, this device uses %d\n",
                                    (int)s_vk.depth_format); warned_fmt = 1; }
-@@ -2318,19 +5159,21 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
+@@ -2318,19 +5192,21 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
          t->kind = VK_ENG_TEXTURE; t->fmt = VK_FORMAT_R32_SFLOAT; t->bpp = 4; t->w = w; t->h = h;
          z = vk_eng_get(depth, VK_ENG_DEPTH);          /* same slot; reload for clarity */
          z->surface = snap;
@@ -20447,7 +20630,7 @@ index e2687b7..fcaf442 100644
          vk_barrier_image(t->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
          VkBufferImageCopy out = { .imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 },
                                    .imageExtent = { w, h, 1 } };
-@@ -2345,9 +5188,8 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
+@@ -2345,9 +5221,8 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
          VkBufferImageCopy in = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
                                   .imageExtent = { w, h, 1 } };
          pvkCmdCopyBufferToImage(s_vk.cmd, st.buf, t->im.img, VK_IMAGE_LAYOUT_GENERAL, 1, &in);
@@ -20458,7 +20641,7 @@ index e2687b7..fcaf442 100644
      return rc ? 0 : snap;
  }
  /* ---- E2: pipelines and draws ---------------------------------------------
-@@ -2364,9 +5206,14 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
+@@ -2364,9 +5239,14 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
   * samplers s0..s3 would alias the pixel samplers' binding), FP16 and other
   * non-RGBA8 colour targets, depth-only passes, and stencil (the depth format
   * has no stencil aspect yet, so the test is inert). */
@@ -20475,7 +20658,7 @@ index e2687b7..fcaf442 100644
  
  typedef struct vk_eng_pipe {
      int                 used;
-@@ -2377,6 +5224,9 @@ typedef struct vk_eng_pipe {
+@@ -2377,6 +5257,9 @@ typedef struct vk_eng_pipe {
  } vk_eng_pipe;
  
  static vk_eng_pipe s_epipe[VK_ENG_MAX_PIPE];
@@ -20485,7 +20668,7 @@ index e2687b7..fcaf442 100644
  
  static struct {
      VkRenderPass rp[RSX_BE_MAX_COLOR_TARGETS + 1];      /* by colour count */
-@@ -2393,19 +5243,315 @@ static struct {
+@@ -2393,19 +5276,315 @@ static struct {
      u32          sc[4];
      int          have_vp, have_sc;
      u32          stencil_ref;
@@ -20803,7 +20986,7 @@ index e2687b7..fcaf442 100644
  }
  
  /* The render pass for `n` RGBA8 colour attachments plus depth, LOAD/STORE in
-@@ -2421,8 +5567,8 @@ static VkRenderPass vk_eng_render_pass(u32 n)
+@@ -2421,8 +5600,8 @@ static VkRenderPass vk_eng_render_pass(u32 n)
              .format = (i < n) ? VK_FORMAT_R8G8B8A8_UNORM : s_vk.depth_format,
              .samples = VK_SAMPLE_COUNT_1_BIT,
              .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -20814,7 +20997,7 @@ index e2687b7..fcaf442 100644
              .initialLayout = VK_IMAGE_LAYOUT_GENERAL, .finalLayout = VK_IMAGE_LAYOUT_GENERAL };
          if (i < n) cref[i] = (VkAttachmentReference){ i, VK_IMAGE_LAYOUT_GENERAL };
      }
-@@ -2495,43 +5641,138 @@ static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 z
+@@ -2495,43 +5674,138 @@ static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 z
      return s;
  }
  
@@ -20964,7 +21147,7 @@ index e2687b7..fcaf442 100644
      P->stride = vertex_stride;
      P->rt_count = rt_count;
      P->used = 1;
-@@ -2542,12 +5783,15 @@ static void vk_eng_pipeline_release(void* user, u32 pipeline)
+@@ -2542,12 +5816,15 @@ static void vk_eng_pipeline_release(void* user, u32 pipeline)
  {
      (void)user;
      if (!pipeline || pipeline > VK_ENG_MAX_PIPE || !s_epipe[pipeline - 1].used) return;
@@ -20980,7 +21163,7 @@ index e2687b7..fcaf442 100644
      if (s_e2.pipeline == pipeline) s_e2.pipeline = 0;
  }
  
-@@ -2573,7 +5817,8 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+@@ -2573,7 +5850,8 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
          va[s] = (VkVertexInputAttributeDescription){ s, 0, VK_FORMAT_R32G32B32A32_SFLOAT, s * 16u };
      VkPipelineVertexInputStateCreateInfo vi = {
          .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -20990,7 +21173,7 @@ index e2687b7..fcaf442 100644
          .vertexAttributeDescriptionCount = P->nslots, .pVertexAttributeDescriptions = va };
      VkPipelineInputAssemblyStateCreateInfo ia = {
          .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-@@ -2593,6 +5838,8 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+@@ -2593,6 +5871,8 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
                                                                             : VK_CULL_MODE_BACK_BIT,
          .frontFace = (rs->front_face == 0x0901u) ? VK_FRONT_FACE_COUNTER_CLOCKWISE
                                                   : VK_FRONT_FACE_CLOCKWISE,
@@ -20999,7 +21182,7 @@ index e2687b7..fcaf442 100644
          .lineWidth = 1.0f };
      VkPipelineMultisampleStateCreateInfo ms = {
          .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-@@ -2609,7 +5856,8 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+@@ -2609,7 +5889,8 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
          .depthWriteEnable = (rs->depth_test && rs->depth_write) ? VK_TRUE : VK_FALSE,
          .depthCompareOp = vk_gcm_compare(rs->depth_func),
          .stencilTestEnable = rs->stencil_enable ? VK_TRUE : VK_FALSE,
@@ -21009,7 +21192,7 @@ index e2687b7..fcaf442 100644
      /* nv40 COLOR_MASK: B [0:7], G [8:15], R [16:23], A [24:31], any bit set.
       * Every attachment takes target A's blend and mask (see rsx_draw_engine.h). */
      VkColorComponentFlags wm = 0;
-@@ -2617,36 +5865,53 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+@@ -2617,36 +5898,53 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
      if ((rs->color_mask >>  8) & 0xFFu) wm |= VK_COLOR_COMPONENT_G_BIT;
      if ((rs->color_mask >>  0) & 0xFFu) wm |= VK_COLOR_COMPONENT_B_BIT;
      if ((rs->color_mask >> 24) & 0xFFu) wm |= VK_COLOR_COMPONENT_A_BIT;
@@ -21070,7 +21253,7 @@ index e2687b7..fcaf442 100644
      return P->variant[topo_idx];
  }
  
-@@ -2654,35 +5919,80 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
+@@ -2654,35 +5952,80 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
  
  static void vk_eng2_shutdown(void* user)
  {
@@ -21161,7 +21344,7 @@ index e2687b7..fcaf442 100644
      s_e2.ps_bytes = bytes;
  }
  static void vk_eng_bind_textures(void* user, const u32* textures,
-@@ -2702,17 +6012,31 @@ static void vk_eng_bind_vertex_textures(void* user, const u32* textures,
+@@ -2702,17 +6045,31 @@ static void vk_eng_bind_vertex_textures(void* user, const u32* textures,
      (void)user; (void)textures; (void)samplers;
      if (mask && !(s_e2.warned & 8u)) { VK_LOG("engine: vertex textures not supported yet\n"); s_e2.warned |= 8u; }
  }
@@ -21195,7 +21378,7 @@ index e2687b7..fcaf442 100644
  
  static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, VkImageView dview,
                                          u32 dkey, u32 w, u32 h)
-@@ -2720,9 +6044,19 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
+@@ -2720,9 +6077,19 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
      u32 key[RSX_BE_MAX_COLOR_TARGETS + 1] = { 0 };
      for (u32 i = 0; i < n; i++) key[i] = rt[i];
      key[RSX_BE_MAX_COLOR_TARGETS] = dkey;
@@ -21218,7 +21401,7 @@ index e2687b7..fcaf442 100644
      VkImageView views[RSX_BE_MAX_COLOR_TARGETS + 1];
      for (u32 i = 0; i < n; i++) views[i] = s_eobj[rt[i]].im.view;
      views[n] = dview;
-@@ -2733,6 +6067,8 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
+@@ -2733,6 +6100,8 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
      if (pvkCreateFramebuffer(s_vk.device, &fci, NULL, &fb) != VK_SUCCESS) return VK_NULL_HANDLE;
      memcpy(s_e2.fb[s_e2.fb_count].key, key, sizeof key);
      s_e2.fb[s_e2.fb_count++].fb = fb;
@@ -21227,7 +21410,7 @@ index e2687b7..fcaf442 100644
      return fb;
  }
  
-@@ -2743,16 +6079,17 @@ static VkImageView vk_eng_scratch_depth(u32 w, u32 h)
+@@ -2743,16 +6112,17 @@ static VkImageView vk_eng_scratch_depth(u32 w, u32 h)
      if (s_e2.scratch_depth.view && s_e2.scratch_w >= w && s_e2.scratch_h >= h)
          return s_e2.scratch_depth.view;
      vk_eng_drop_framebuffers();
@@ -21249,7 +21432,7 @@ index e2687b7..fcaf442 100644
      s_e2.scratch_w = w; s_e2.scratch_h = h;
      return s_e2.scratch_depth.view;
  }
-@@ -2773,12 +6110,25 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
+@@ -2773,12 +6143,25 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
  {
      u32 lo, hi;
      memcpy(&lo, &d->min_lod, 4); memcpy(&hi, &d->max_lod, 4);
@@ -21278,7 +21461,7 @@ index e2687b7..fcaf442 100644
      float min_lod = d->min_lod, max_lod = d->mip_present ? d->max_lod : d->min_lod;
      if (max_lod < min_lod) max_lod = min_lod;
      VkSamplerCreateInfo sci = {
-@@ -2789,62 +6139,154 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
+@@ -2789,62 +6172,154 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
          .addressModeU = vk_gcm_wrap(d->wrap_s), .addressModeV = vk_gcm_wrap(d->wrap_t),
          .addressModeW = vk_gcm_wrap(d->wrap_r),
          .minLod = min_lod, .maxLod = max_lod,
@@ -21460,7 +21643,7 @@ index e2687b7..fcaf442 100644
  
      /* Targets: every member of a set is target A's size (engine contract). */
      const u32 n = s_eng_bound.nrt;
-@@ -2867,24 +6309,152 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+@@ -2867,24 +6342,152 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
      VkFramebuffer fb = vk_eng_framebuffer(rp, s_eng_bound.rt, n, dview, dkey, w, h);
      if (!pipe || !rp || !fb) return;
  
@@ -21581,7 +21764,7 @@ index e2687b7..fcaf442 100644
 +        if (!((s_e2.tex_mask >> u) & 1u) || !s_e2.tex[u] || s_e2.tex[u] >= VK_ENG_MAX_OBJ) continue;
 +        vk_eng_obj* o = &s_eobj[s_e2.tex[u]];
 +        if (o->kind == VK_ENG_VIEW && o->surface && o->surface < VK_ENG_MAX_OBJ) o = &s_eobj[o->surface];
-+        if (o->kind != VK_ENG_FREE) smp[nsmp++] = o;
++        if (o->kind != VK_ENG_FREE && o->kind != VK_ENG_RESERVED) smp[nsmp++] = o;
 +    }
 +    const u32 cur = s_rp.epoch + 1u;
 +    /* The first draw of a batch too: nothing else makes what the previous
@@ -21629,7 +21812,7 @@ index e2687b7..fcaf442 100644
      pvkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
      VkViewport vp = { 0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f };
      if (s_e2.have_vp && s_e2.vp[2] > 0.0f && s_e2.vp[3] > 0.0f) {
-@@ -2902,20 +6472,113 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+@@ -2902,26 +6505,121 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
      pvkCmdSetViewport(s_vk.cmd, 0, 1, &vp);
      pvkCmdSetScissor(s_vk.cmd, 0, 1, &sc);
      pvkCmdSetStencilReference(s_vk.cmd, VK_STENCIL_FACE_FRONT_AND_BACK, s_e2.stencil_ref & 0xFFu);
@@ -21752,7 +21935,15 @@ index e2687b7..fcaf442 100644
  static const rsx_draw_backend s_vk_engine_backend = {
      .user                 = NULL,
      .init                 = vk_eng_init,
-@@ -2929,23 +6592,47 @@ static const rsx_draw_backend s_vk_engine_backend = {
+     .shutdown             = vk_eng_shutdown,
+     .submit_and_wait      = vk_eng_submit_and_wait,
+     .texture_create       = vk_eng_texture_create,
++    .texture_reserve      = vk_eng_texture_reserve,
++    .texture_create_at    = vk_eng_texture_create_at,
+     .texture_upload       = vk_eng_texture_upload,
+     .texture_release      = vk_eng_release,
+     .color_target_create  = vk_eng_color_target_create,
+@@ -2929,23 +6627,47 @@ static const rsx_draw_backend s_vk_engine_backend = {
      .surface_view         = vk_eng_surface_view,
      .depth_target_create  = vk_eng_depth_target_create,
      .depth_target_release = vk_eng_release,
@@ -21801,7 +21992,7 @@ index e2687b7..fcaf442 100644
  };
  
  static rsx_backend s_vulkan_backend = {
-@@ -3017,6 +6704,31 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3017,6 +6739,31 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      pvkGetPhysicalDeviceFeatures(s_vk.phys, &have);
      want.textureCompressionBC = have.textureCompressionBC;
      s_vk.bc_ok = have.textureCompressionBC ? 1 : 0;
@@ -21833,7 +22024,7 @@ index e2687b7..fcaf442 100644
      VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                                 .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
                                 .enabledExtensionCount = s_vk.windowed ? 1u : 0u,
-@@ -3036,9 +6748,15 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3036,9 +6783,15 @@ static int vk_init_all(u32 width, u32 height, const char* title)
                                          .commandPool = s_vk.pool,
                                          .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
                                          .commandBufferCount = 1 };
@@ -21850,7 +22041,7 @@ index e2687b7..fcaf442 100644
  
      if (vk_pick_depth_format()) return -1;
      if (vk_create_image(&s_vk.color, VK_FORMAT_R8G8B8A8_UNORM, s_vk.width, s_vk.height,
-@@ -3046,9 +6764,9 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3046,9 +6799,9 @@ static int vk_init_all(u32 width, u32 height, const char* title)
                          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT)) return -1;
      if (vk_create_image(&s_vk.depth, s_vk.depth_format, s_vk.width, s_vk.height,
                          VK_IMAGE_USAGE_TRANSFER_DST_BIT |
@@ -21863,7 +22054,7 @@ index e2687b7..fcaf442 100644
      if (vk_create_render_pass()) return -1;
      if (vk_create_pipeline_objects()) return -1;
      if (vk_guest_init()) {
-@@ -3063,18 +6781,24 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3063,18 +6816,24 @@ static int vk_init_all(u32 width, u32 height, const char* title)
       * null backend makes the same choice). */
      if (vk_begin()) return -1;
      vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
@@ -21890,7 +22081,7 @@ index e2687b7..fcaf442 100644
              vk_create_swapchain())
              vk_window_drop("the swapchain could not be created");
      }
-@@ -3143,8 +6867,11 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -3143,8 +6902,11 @@ void rsx_vulkan_backend_shutdown(void)
          vk_destroy_image(&s_vk.dummy);
          vk_destroy_image(&s_vk.depth);
          vk_destroy_image(&s_vk.color);
@@ -21902,7 +22093,7 @@ index e2687b7..fcaf442 100644
          if (s_vk.fence) pvkDestroyFence(s_vk.device, s_vk.fence, NULL);
          if (s_vk.pool)  pvkDestroyCommandPool(s_vk.device, s_vk.pool, NULL);
          pvkDestroyDevice(s_vk.device, NULL);
-@@ -3157,18 +6884,75 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -3157,18 +6919,75 @@ void rsx_vulkan_backend_shutdown(void)
  
  int rsx_vulkan_backend_pump_messages(void)
  {
@@ -32553,7 +32744,7 @@ index d9f86bb..c610dad 100644
              ctx->pc = pc;
              __attribute__((musttail)) return fn(ctx);
 diff --git a/runtime/spu/spu_dma.h b/runtime/spu/spu_dma.h
-index 90f3221..cfda176 100644
+index 90f3221..56ef4ee 100644
 --- a/runtime/spu/spu_dma.h
 +++ b/runtime/spu/spu_dma.h
 @@ -16,6 +16,7 @@
@@ -32582,7 +32773,7 @@ index 90f3221..cfda176 100644
        }
      }
      return 1;
-@@ -161,6 +162,161 @@ static inline int mfc_is_fence(uint32_t cmd)
+@@ -161,50 +162,290 @@ static inline int mfc_is_fence(uint32_t cmd)
      return (cmd & 0x02) != 0; /* fence variants have bit 1 set */
  }
  
@@ -32635,7 +32826,7 @@ index 90f3221..cfda176 100644
 +        "SPU_DMA_STACK_CHECK", "SPU_DMATRACE_ALL", "SPU_DMA_WATCH", "SPU_DSP_IMAGE_EA",
 +        "SPU_DUMP_GET", "SPU_GET_EA", "SPU_GET_HAS", "SPU_GETHIST", "SPU_IMG_DMA",
 +        "SPU_MFC_TRACE", "SPU_OVL_DIAG", "SPU_OVL_DMA", "SPU_POISON_DMA", "SPU_PUT_EA",
-+        "SPU_PUTHIST", "SPU_PUT_RANGE", "SPU_PUT_WATCH", "SPU_SMC_WATCH", "SPU_STACKEA_WATCH",
++        "SPU_PUTHIST", "SPU_PUT_RANGE", "SPU_PUT_WATCH", "SPU_SMC_WATCH", "SPU_STACKEA_WATCH", "SPU_PUT_DUMP",
 +        "YDKJ_DMA_IMG", "SPU_LS_WATCH", "SPU_DMA_SLOW",
 +    };
 +    for (unsigned i = 0; i < sizeof names / sizeof names[0]; i++)
@@ -32744,7 +32935,30 @@ index 90f3221..cfda176 100644
  /*
   * Execute a single DMA transfer between local store and main memory.
   * Returns 0 on success, -1 on error.
-@@ -168,43 +324,105 @@ static inline int mfc_is_fence(uint32_t cmd)
+  */
++/* SPU_PUT_DUMP=<overlay>,<n>,<dir>: the first n transfers a job running as
++ * that overlay makes, GETs and PUTs in one sequence, each as
++ * <dir>/<k>_<get|put>_<ea>_<lsa>.bin (the bytes after a GET, before a PUT):
++ * what a job reads and what it hands the RSX or the PPU, to decode offline. */
++static inline void spu_dma_dump_note(const spu_context* spu, uint32_t ea, uint32_t lsa, uint32_t size,
++                              int get, const uint8_t* ls_ptr)
++{
++    static int s_ov = -2, s_n; static char s_dir[300]; static int s_k;
++    if (s_ov == -2) { const char* e = getenv("SPU_PUT_DUMP"); s_ov = -1;
++        if (e) { char* c; s_ov = (int)strtol(e, &c, 10);
++                 if (*c == ',') { s_n = (int)strtol(c + 1, &c, 10);
++                                  if (*c == ',') snprintf(s_dir, sizeof s_dir, "%s", c + 1); else s_ov = -1; }
++                 else s_ov = -1; } }
++    if (s_ov < 0 || spu->resident_ovl != s_ov) return;
++    const int k = __atomic_fetch_add(&s_k, 1, __ATOMIC_RELAXED);
++    if (k >= s_n) return;
++    char path[400];
++    /* The context's address names the SPU: several run the same job at once. */
++    snprintf(path, sizeof path, "%s/%05d_c%04X_%s_%08X_%05X.bin", s_dir, k,
++             (unsigned)(((uintptr_t)spu >> 12) & 0xFFFFu), get ? "get" : "put", ea, lsa);
++    FILE* f = fopen(path, "wb"); if (f) { fwrite(ls_ptr, 1, size, f); fclose(f); }
++}
++
  static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
                                     uint32_t size, uint32_t cmd)
  {
@@ -32860,7 +33074,7 @@ index 90f3221..cfda176 100644
      /* Malformed transfers are REJECTED, as the hardware MFC does. The rules
       * are the ones the SDK's own dma.h asserts: a non-zero size, at most
       * 16 KB, a multiple of 16 once >= 16 bytes, and LSA/EA sharing 16-byte
-@@ -216,7 +434,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -216,7 +457,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
       * "code 0x00000000 not registered".
       *
       * SPU_DMA_LAX=1 restores the old permissive behaviour. */
@@ -32869,7 +33083,7 @@ index 90f3221..cfda176 100644
        if (!s_lax) {
            /* A PUT into the null page is the same class of accident: lv2 reserves
             * the low 64 KB and no title DMAs there on purpose, so an EA that
-@@ -227,13 +445,16 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -227,13 +468,16 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
             * nothing useful and buries the real destinations in the histogram.
             * GETs from low EAs stay allowed: they only read garbage, and
             * LBP_SKIP_NULL_DMA already exists to test zeroing them instead. */
@@ -32888,7 +33102,7 @@ index 90f3221..cfda176 100644
                    fprintf(stderr, "[mfc] REJECTED malformed transfer: img=%d pc=0x%05X"
                                    " cmd=0x%X lsa=0x%05X ea=0x%08X size=%u\n",
                            spu->image_id, (uint32_t)spu->pc & SPU_LS_MASK, cmd,
-@@ -243,12 +464,12 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -243,12 +487,12 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
      /* SPU_DMACHK=1: report transfers that break the MFC rules the guest's own
       * dma.h asserts on -- size 0 or > 16 KB, size not a multiple of 16 for
       * transfers of 16+ bytes, or LSA/EA not sharing 16-byte alignment. */
@@ -32903,7 +33117,7 @@ index 90f3221..cfda176 100644
                fprintf(stderr, "[dmachk] BAD pc=0x%05X cmd=0x%X lsa=0x%05X ea=0x%08X size=%u%c",
                        (uint32_t)spu->pc & SPU_LS_MASK, cmd, lsa, (uint32_t)ea, size, 10); } }
      /* SPU_PUTHIST=1: histogram of PUT destinations by 1 MB bucket. "the SPU
-@@ -257,7 +478,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -257,7 +501,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
      /* SPU_GETHIST=1: the same accounting for GETs, on the SOURCE side. A solver
       * whose inputs read back as zeros produces zeros no matter how many
       * instructions it runs. */
@@ -32912,7 +33126,7 @@ index 90f3221..cfda176 100644
        if (s_gh && mfc_is_get(cmd) && vm_base) {
            static uint32_t seen[48]; static int ns = 0;
            uint32_t k = (uint32_t)ea & ~0xFFFFu;
-@@ -267,7 +488,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -267,7 +511,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
                for (uint32_t i7 = 0; i7 < size && i7 < 0x4000u; i7 += 7) if (q[i7]) nzs++;
                fprintf(stderr, "[getea] spu=0x%X 0x%08X size=%u srcNonZero=%u%c",
                        spu->spu_id, (uint32_t)ea, size, nzs, 10); } } }
@@ -32921,7 +33135,7 @@ index 90f3221..cfda176 100644
        if (s_ph) { static unsigned long long ngets, nputs, nother;
            if (mfc_is_get(cmd)) ngets++; else if (mfc_is_put(cmd)) nputs++; else nother++;
            if (((ngets + nputs + nother) % 5000) == 0)
-@@ -309,7 +530,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -309,7 +553,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
      /* SPU_MFC_TRACE: attribute silent DMA-poll loops (a wedged task whose
       * host thread samples "in ntdll" because VirtualQuery dominates). Prints
       * every 64k-th transfer per thread: enough to see the loop's pc/ea. */
@@ -32930,7 +33144,7 @@ index 90f3221..cfda176 100644
          s_t = e ? atoi(e) : 0; if (e && !s_t) s_t = 1; }
        if (s_t) { static _Thread_local unsigned long long _n; ++_n;
          /* level 2+: also print each thread's first 192 transfers (setup DMAs
-@@ -355,12 +576,12 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -355,12 +599,12 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
          } } }
      /* cellAudio port-ring window: log every guest write into it (rare, load-
       * bearing -- the audio OUTPUT path). Same env gate as the sampler. */
@@ -32945,7 +33159,7 @@ index 90f3221..cfda176 100644
                fprintf(stderr, "[ring-PUT] img=%d pc=0x%05X ea=0x%08X size=%u lsa=0x%05X\n",
                        spu->image_id, (uint32_t)spu->pc & SPU_LS_MASK,
                        (uint32_t)ea, size, lsa);
-@@ -383,7 +604,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -383,7 +627,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
       * rather than a host segfault. */
      if (!mfc_ea_range_committed(ea, size)) {
          static int s_warned = 0;
@@ -32954,7 +33168,7 @@ index 90f3221..cfda176 100644
              fprintf(stderr, "[spu-dma] SKIP %s img=%d pc=0x%05X lsa=0x%05X ea=0x%08X "
                      "size=%u%s (EA not committed -- bad/garbage DMA target)\n",
                      mfc_is_get(cmd) ? "GET" : "PUT", spu->image_id,
-@@ -393,7 +614,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -393,7 +637,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
           * A job that DMAs a small buffer to a garbage EA in a tight loop is
           * usually an SPU-side assert/print path, and the payload names the
           * actual complaint -- far more useful than the address it failed at. */
@@ -32963,7 +33177,7 @@ index 90f3221..cfda176 100644
            if (s_d && s_warned <= 2) {
              const uint8_t* q = spu->ls + (lsa & SPU_LS_MASK);
              fprintf(stderr, "  LS[0x%05X] ascii: ", lsa);
-@@ -413,12 +634,12 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -413,12 +657,12 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
       * -- a completion-write attempt -- and (b) any GET payload carrying a
       * 0xD00Cxxxx dword -- the completion EA arriving in a loaded job buffer.
       * Answers whether the EA ever reaches / is ever written by the SPU. */
@@ -32978,7 +33192,7 @@ index 90f3221..cfda176 100644
                  uint32_t v0 = mfc_is_put(cmd) && size>=4 ?
                      ((ls_ptr[0]<<24)|(ls_ptr[1]<<16)|(ls_ptr[2]<<8)|ls_ptr[3]) : 0;
                  fprintf(stderr, "[stackea] %s ea=0x%08X lsa=0x%05X size=%u img=%d pc=0x%05X"
-@@ -432,7 +653,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -432,7 +676,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
          fprintf(stderr, "[spu-dma] %s lsa=0x%05X ea=0x%08X size=%u\n",
                  mfc_is_get(cmd) ? "GET" : "PUT", lsa, (uint32_t)ea, size); }
  #endif
@@ -32987,7 +33201,7 @@ index 90f3221..cfda176 100644
        if (s_t < 0) s_t = getenv("SPU_DMATRACE_ALL") ? 1 : 0;
        if (s_img == -2) { const char* e = getenv("YDKJ_DMA_IMG"); s_img = e ? atoi(e) : -1; }
        /* YDKJ_DMA_IMG=N: trace ONLY image N, uncapped (the 300-cap otherwise fills
-@@ -445,7 +666,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -445,7 +689,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
                  fprintf(stderr, "[dmatrace] %s lsa=0x%05X ea=0x%08X size=%u img=%d pc=0x%05X\n",
                          mfc_is_get(cmd) ? "GET" : "PUT", lsa, (uint32_t)ea, size, spu->image_id,
                          (uint32_t)spu->pc);
@@ -32996,7 +33210,7 @@ index 90f3221..cfda176 100644
              fprintf(stderr, "[dmatrace] %s lsa=0x%05X ea=0x%08X size=%u img=%d pc=0x%05X\n",
                      mfc_is_get(cmd) ? "GET" : "PUT", lsa, (uint32_t)ea, size, spu->image_id,
                      (uint32_t)spu->pc); }
-@@ -473,7 +694,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -473,7 +717,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
       * from that address. Fixed BSS structures have the same address in a
       * reference run, so this is what a dump from real hardware diffs against. */
      if (mfc_is_get(cmd) && size && vm_base) {
@@ -33005,7 +33219,7 @@ index 90f3221..cfda176 100644
          if (s_dg == 0xFFFFFFFFu) { const char* e = getenv("SPU_DUMP_GET");
                                     s_dg = e ? (uint32_t)strtoul(e, 0, 0) : 0; }
          if (s_dg && (uint32_t)ea == s_dg) {
-@@ -500,12 +721,12 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -500,12 +744,12 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
      static uint32_t s_desc_ea = 0;
      if (mfc_is_get(cmd) && size == 368) s_desc_ea = (uint32_t)ea;
      if (mfc_is_get(cmd) && !(uint32_t)ea && size) {
@@ -33020,7 +33234,7 @@ index 90f3221..cfda176 100644
                  fprintf(stderr, "[dsp-image] img%d GET ea=0 size=%u dest=0x%05X -> 0x%08X "
                          "(last imported SPU image: ls_start=0x%X span=%u) descriptor@0x%08X\n",
                          spu->image_id, size, lsa, g_spu_image_src_ea,
-@@ -522,49 +743,69 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -522,49 +766,70 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
       * event flag) vs still loops. If it progresses, the null buffers are tolerable
       * and our lift is DMAing where HW skips; if not, the buffers must be real. */
      if (mfc_is_get(cmd) && (uint32_t)ea < 0x10000u) {
@@ -33091,6 +33305,7 @@ index 90f3221..cfda176 100644
 -        memcpy(ls_ptr, ea_ptr, size);
 +        gm_copy_from(ls_ptr, (const uint8_t*)ea_ptr, size);
 +        if (size == 0x80) spu_edge_viewport_scale(ls_ptr);
++        spu_dma_dump_note(spu, (uint32_t)ea, lsa, size, 1, ls_ptr);
          /* SPU_STACKEA_WATCH (b): scan the just-loaded payload for a 0xD00Cxxxx
           * dword = the completion-word EA arriving in a job buffer. */
 -        { static int s_se = -1; if (s_se < 0) s_se = getenv("SPU_STACKEA_WATCH") ? 1 : 0;
@@ -33098,7 +33313,7 @@ index 90f3221..cfda176 100644
            if (s_se && size >= 4) { static int _n = 0;
              for (uint32_t o = 0; o + 4 <= size && _n < 60; o += 4) {
                  uint32_t w = (ls_ptr[o]<<24)|(ls_ptr[o+1]<<16)|(ls_ptr[o+2]<<8)|ls_ptr[o+3];
-@@ -576,7 +817,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -576,7 +841,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
                      fflush(stderr); } } } }
          /* SPU_SMC_WATCH: a DMA GET that lands inside the image's own code
           * segment is a code overlay = self-modification. */
@@ -33107,7 +33322,7 @@ index 90f3221..cfda176 100644
            if (s == -2) { const char* e = getenv("SPU_SMC_WATCH");
              s = e ? atoi(e) : -1; img = (uint32_t)s;
              const char* l = getenv("SPU_SMC_LO"); lo = l ? (uint32_t)strtoul(l,0,0) : 0xA00;
-@@ -584,30 +825,65 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -584,30 +849,66 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
            if (s >= 0 && (uint32_t)spu->image_id == img &&
                lsa < hi && lsa + size > lo) {
                static int _n = 0;
@@ -33166,6 +33381,7 @@ index 90f3221..cfda176 100644
            } }
      } else if (mfc_is_put(cmd)) {
 +        spu->ext_writes++;
++        spu_dma_dump_note(spu, (uint32_t)ea, lsa, size, 0, ls_ptr);
 +        /* SPU_PUT_WATCH=<hex ea>[,<len>]: every SPU PUT into that guest range,
 +         * with the image and pc -- the SPU-side half of PPU_WWATCH. */
 +        { static uint32_t w_lo = 1, w_len;
@@ -33181,7 +33397,7 @@ index 90f3221..cfda176 100644
          /* PUT: local store -> main memory.
           *
           * A plain PUT is a store by another processor as far as every SPU
-@@ -633,8 +909,10 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -633,8 +934,10 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
              extern int  spu_coh_is_reserved(uint32_t);
              extern void spu_coh_notify_write(uint32_t);
              extern void spu_coh_notify_write_except(uint32_t, const void*);
@@ -33194,7 +33410,7 @@ index 90f3221..cfda176 100644
              extern void spu_lockguard_check(spu_context*, uint32_t, const uint8_t*, uint32_t, const char*);
              spu_lockguard_check(spu, (uint32_t)ea, (const uint8_t*)ls_ptr, size, "PUT");
              uint32_t a0 = (uint32_t)ea & ~127u;
-@@ -645,20 +923,24 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -645,20 +948,24 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
                  if (a == a1) break;
              }
              if (span_reserved) {
@@ -33225,7 +33441,7 @@ index 90f3221..cfda176 100644
                      }
                      if (a == a1) break;
                  }
-@@ -673,13 +955,26 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -673,13 +980,26 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
           * find the pushbuffer; NULL for every title that does not. */
          { extern void (*g_spu_put_hook)(uint32_t ea, uint32_t size);
            if (g_spu_put_hook) g_spu_put_hook((uint32_t)ea, size); }
@@ -33253,7 +33469,7 @@ index 90f3221..cfda176 100644
                    /* spuNum lives in the kernel context at LS 0x1C8 (BE u32). */
                    uint32_t sn = ((uint32_t)spu->ls[0x1C8]<<24)|((uint32_t)spu->ls[0x1C9]<<16)|
                                  ((uint32_t)spu->ls[0x1CA]<<8)|spu->ls[0x1CB];
-@@ -694,16 +989,19 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -694,16 +1014,19 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
           * (0x40003000-0x40005000) or carry the 0xC708C708 poison? This host-side
           * memcpy bypasses vm_write32/AWATCH, so it's the prime suspect for the
           * garbage fn-ptr fields that cause the 0xC708C708 vcall crash. */
@@ -33277,7 +33493,7 @@ index 90f3221..cfda176 100644
                    fprintf(stderr, "[POISON-DMA] img%u PUT ea=0x%08X size=0x%X lsa=0x%X hitregion=%d haspoison=%d\n",
                            spu->image_id, e, size, lsa, hitregion, haspoison);
            } }
-@@ -741,6 +1039,23 @@ static inline int mfc_run_list(spu_context* spu, uint32_t elem_lsa,
+@@ -741,6 +1064,23 @@ static inline int mfc_run_list(spu_context* spu, uint32_t elem_lsa,
  
          uint64_t ea = (ea_base & 0xFFFFFFFF00000000ull) | eal;
  
@@ -33301,7 +33517,7 @@ index 90f3221..cfda176 100644
          if (xfer_size) {
              /* Each list element occupies whole LS quadwords, even for
               * 1/2/4/8-byte transfers. The EA supplies its byte offset within
-@@ -760,20 +1075,19 @@ static inline int mfc_run_list(spu_context* spu, uint32_t elem_lsa,
+@@ -760,20 +1100,19 @@ static inline int mfc_run_list(spu_context* spu, uint32_t elem_lsa,
              spu->list_stall_cmd[t]       = base_cmd;
              spu->list_stall_mask |= (1u << t);  /* this tag now has a parked list */
              spu->list_stall_stat |= (1u << t);  /* accumulate into the notify mask */
@@ -33326,7 +33542,7 @@ index 90f3221..cfda176 100644
                  fprintf(stderr, "[mfc-list] STALL img=%d tag=%u elem@0x%05X "
                          "left=%u dest=0x%05X (SN raised, parked mask=0x%X) "
                          "loadJobState@12A0=%02X%02X%02X%02X %02X%02X%02X%02X\n",
-@@ -797,13 +1111,13 @@ static inline int mfc_list_stall_ack(struct mfc_engine* mfc, spu_context* spu,
+@@ -797,13 +1136,13 @@ static inline int mfc_list_stall_ack(struct mfc_engine* mfc, spu_context* spu,
      uint32_t t = tag & 0x1F;
      if (!(spu->list_stall_mask & (1u << t))) {
          static int _n = 0;
@@ -33342,7 +33558,7 @@ index 90f3221..cfda176 100644
          fprintf(stderr, "[mfc-list] RESUME img=%d tag=%u elem@0x%05X left=%u\n",
                  spu->image_id, t, spu->list_stall_elem_lsa[t],
                  spu->list_stall_remaining[t]); }
-@@ -811,13 +1125,14 @@ static inline int mfc_list_stall_ack(struct mfc_engine* mfc, spu_context* spu,
+@@ -811,13 +1150,14 @@ static inline int mfc_list_stall_ack(struct mfc_engine* mfc, spu_context* spu,
       * about to land. If the handler was supposed to fill in the claimed job's
       * EA and did not, the elements read back empty and the transfer is a no-op
       * -- which looks identical to "the pipeline never ran" from the PPU side. */
@@ -33359,14 +33575,14 @@ index 90f3221..cfda176 100644
      int rc = mfc_run_list(spu, spu->list_stall_elem_lsa[t], spu->list_stall_remaining[t],
                            spu->list_stall_dest_lsa[t], spu->list_stall_ea_base[t],
                            spu->list_stall_cmd[t], t);
-@@ -863,12 +1178,45 @@ static inline int mfc_enqueue(mfc_engine* mfc, spu_context* spu)
+@@ -863,12 +1203,45 @@ static inline int mfc_enqueue(mfc_engine* mfc, spu_context* spu)
   * Submit and immediately execute an MFC command.
   * This is the main entry point called when the SPU writes to MFC_Cmd.
   */
 -static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
 +/* The submit path's own opt-in diagnostics (see mfc_fast_ok for the transfer's). */
 +static inline int mfc_submit_diag_env(void)
-+{
+ {
 +    static const char* const names[] = {
 +        "SPU_CMDHIST", "SPU_WATCHEA", "SPU_WATCHLSA", "SPU_ROWCOV", "SPU_VRAMPC", "SPU_H2LSRC",
 +        "SPU_PUTEA", "SPU_PUTHIST", "YDKJ_CRI_CHAIN", "SPU_DMA_REPEAT_LIMIT", "SPU_DMATRACE_ALL",
@@ -33378,7 +33594,7 @@ index 90f3221..cfda176 100644
 +}
 +
 +static inline int mfc_submit_body(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
- {
++{
 +    /* A plain GET or PUT with no diagnostic on: what the path below does for
 +     * one, without testing each diagnostic. Lists, the policy modules (whose
 +     * first commands are logged) and the WWS batch fetch (counted) go below. */
@@ -33407,7 +33623,7 @@ index 90f3221..cfda176 100644
        if (s_ch) { static unsigned long long h[256][8]; static unsigned long long n;
            h[cmd & 0xFF][spu->image_id & 7]++;
            if ((++n % 300) == 0) {
-@@ -897,7 +1245,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -897,7 +1270,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       * Nothing in that module's code stores +0x88, so the consumer count is
       * written from outside -- an SPU DMA is the obvious candidate, and this
       * says outright whether that is true. Watch 0x002DF008. */
@@ -33416,7 +33632,7 @@ index 90f3221..cfda176 100644
        if (s_we == -2) { const char* e = getenv("SPU_WATCHEA");
                          s_we = e ? 1 : 0;
                          s_wa = e ? (uint32_t)strtoul(e, 0, 16) : 0u; }
-@@ -933,7 +1281,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -933,7 +1306,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       * writes that mirror back to a stale value AFTER the GETLLAR, and a DMA is
       * the only thing that can do it without going through spu_ls_write128.
       * Watch LS 0x10800. */
@@ -33425,7 +33641,7 @@ index 90f3221..cfda176 100644
        if (s_wl == -2) { const char* e7 = getenv("SPU_WATCHLSA");
                          s_wl = e7 ? 1 : 0;
                          s_wlsa = e7 ? (uint32_t)strtoul(e7, 0, 16) : 0u; }
-@@ -960,7 +1308,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -960,7 +1333,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       * covering it. Those cannot both be true as stated. Coverage per block over
       * a whole row says whether the row is fully written with wrong DATA, or
       * partly written, and those are completely different bugs. */
@@ -33434,7 +33650,7 @@ index 90f3221..cfda176 100644
        if (s_rc == -2) { const char* e8 = getenv("SPU_ROWCOV");
                          s_rc = e8 ? 1 : 0;
                          s_rcb = e8 ? (uint32_t)strtoul(e8, 0, 16) : 0u; }
-@@ -1004,7 +1352,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1004,7 +1377,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       * 0x004DC/0x00598 (Host2Local_Body) and none from the DrawRect/DrawEdge
       * range, which would mean no geometry is rasterised at all -- the missing
       * 3D. That was noticed from three sampled addresses, so count them all. */
@@ -33443,7 +33659,7 @@ index 90f3221..cfda176 100644
        if (s_vp < 0) s_vp = getenv("SPU_VRAMPC") ? 1 : 0;
        if (s_vp && mfc_is_put(cmd) &&
            (uint32_t)ea >= 0x40600000u && (uint32_t)ea < 0x40700000u) {
-@@ -1061,7 +1409,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1061,7 +1434,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       *   LS holds real pixels   -> the destination comparison was wrong
       *
       * Host2Local_Body is LS 0x00350..0x00757 (from the firmware .symtab). */
@@ -33452,7 +33668,7 @@ index 90f3221..cfda176 100644
        if (s_hs < 0) s_hs = getenv("SPU_H2LSRC") ? 1 : 0;
        if (s_hs && vm_base && mfc_is_put(cmd) && size >= 16u &&
            (uint32_t)ea >= 0x40600000u && (uint32_t)ea < 0x40700000u) {
-@@ -1090,7 +1438,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1090,7 +1463,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       * (RSX local + 0x400000). Buckets keep only 4 address bits, so that may be
       * an artifact of where RSX local memory actually sits; the full EA settles
       * it. */
@@ -33461,7 +33677,7 @@ index 90f3221..cfda176 100644
        if (s_pe && (cmd & 0xFF) >= 0x20u && (cmd & 0xFF) <= 0x2Fu) {
            static int shown[8];
            const unsigned sp2 = spu->spu_id & 7u;
-@@ -1108,7 +1456,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1108,7 +1481,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       * of VRAM decodes to correct game art -- so the rasteriser runs and the
       * asset upload works, and the question is what geometry these transfers
       * actually have. */
@@ -33470,7 +33686,7 @@ index 90f3221..cfda176 100644
        if (s_ph && (cmd & 0xFF) >= 0x20u && (cmd & 0xFF) <= 0x2Fu) {
            static unsigned long long n[8][16], byt[8][16], nsz[8][8], tot;
            const unsigned sp = spu->spu_id & 7u;
-@@ -1141,7 +1489,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1141,7 +1514,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       * instead of image-22's lift_pol (sys-service). The cri task (0x3000+) is
       * registered under both 22 and 23, so it still resolves after the switch. */
      if (lsa == 0xA00u && (uint32_t)ea == 0x30023680u) {
@@ -33479,7 +33695,7 @@ index 90f3221..cfda176 100644
          if (s_cc) {
              spu->image_id = 23;
              fprintf(stderr, "[cri-chain] taskset policy DMA'd to LS 0xA00 -> SPU image -> 23\n");
-@@ -1170,28 +1518,31 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1170,28 +1543,31 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
          }
      }
  
@@ -33533,7 +33749,7 @@ index 90f3221..cfda176 100644
  
      /* Mark tag as in-progress */
      mfc->tag_completed &= ~(1u << tag);
-@@ -1208,7 +1559,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1208,7 +1584,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       * can see the work-fetch GET (func_000040F0) that precedes the branch-to-0 and
       * whether its source EA holds valid work-queue data. Env SPU_DMATRACE_ALL. */
      {
@@ -33542,7 +33758,7 @@ index 90f3221..cfda176 100644
          /* SPU_DMATRACE=<img> traces one image; SPU_DMATRACE_ALL keeps the old
           * hardcoded pair. Seeing a job's FIRST transfers is how you tell a bad
           * parameter block from a bad address computed later. */
-@@ -1218,7 +1569,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1218,7 +1594,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
           * SPU issues no DMA at all". That produced a confidently wrong writeup
           * for Guitar Hero III, whose task is in fact busy. Accept "all", and
           * announce once what was armed so silence is never ambiguous. */
@@ -33551,7 +33767,7 @@ index 90f3221..cfda176 100644
          if (only==-2){ const char* e=getenv("SPU_DMATRACE");
              only = !e ? -1 : ((strcmp(e,"all")==0 || strcmp(e,"ALL")==0) ? -3
                                                                          : strtol(e,0,0));
-@@ -1228,14 +1579,17 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1228,14 +1604,17 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
          }
          if ((dt && (spu->image_id==22 || spu->image_id==23)) ||
              only==-3 || (only >= 0 && spu->image_id == only)) {
@@ -33571,7 +33787,7 @@ index 90f3221..cfda176 100644
                  mfc_ea_range_committed(ea, size)) {
                  const uint8_t* s = vm_base + (uint32_t)ea;
                  fprintf(stderr, "        got:");
-@@ -1247,7 +1601,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1247,7 +1626,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
               * SpursTasksetContext (LS 0x2700..0x27E0) so we can see which field
               * fed the bad EA. taskset@0x27B8, kernelMgmt@0x27C0, syscall@0x27C4. */
              if (spu->image_id==23 && lsa==0x2780u && ((ea>>32)&0xFFFF)) {
@@ -33580,7 +33796,7 @@ index 90f3221..cfda176 100644
                      fprintf(stderr, "[cri-r4] BAD-DMA ea=0x%09llX; SpursTasksetContext LS[0x2700..0x27E0]:\n",
                              (unsigned long long)ea);
                      for (uint32_t o=0x2700; o<0x27E0; o+=16)
-@@ -1259,7 +1613,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1259,7 +1638,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
              /* kernel bootstrap DMA: dump LS[0x1C0] (=r17, the packed instance EA via
               * the entry's cdd/cwd/shufb) to check if the EA got byte-mangled. */
              if (cmd==0x40 && lsa==0x3FFE0) {
@@ -33589,7 +33805,7 @@ index 90f3221..cfda176 100644
                      const uint8_t* p=&spu->ls[0x1C0];
                      fprintf(stderr, "[DMA] LS[0x1C0] (r17, packed instance) = %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X\n",
                          p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7],p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15]);
-@@ -1284,7 +1638,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1284,7 +1663,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
       * SPURS job-queue kernel, never dispatching decode); if plane-sized PUTs
       * appear we learn where the decoded frame actually lands. Env SPU_DMATRACE_RAW. */
      {
@@ -33598,7 +33814,7 @@ index 90f3221..cfda176 100644
          if (bt && spu->image_id==3) {
              uint32_t ea32 = (uint32_t)ea;
              int is_put   = ((cmd & 0x20) && !(cmd & 0x40));   /* PUT-family */
-@@ -1373,7 +1727,9 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1373,7 +1752,9 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
                      cmd, lsa, (unsigned long long)ea, size, tag);
          } else if (_pn == 96)
              fprintf(stderr, "[spurs-pm] DMA trace suppressed from here\n");
@@ -33609,7 +33825,7 @@ index 90f3221..cfda176 100644
      }
  
      /* Execute the transfer.
-@@ -1386,11 +1742,25 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1386,11 +1767,25 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
           * they are easy to miss entirely while diagnosing a pipeline that
           * never fills. Always report the issue: the DESTINATION lsa is the
           * value the whole transfer hangs on. */
@@ -33636,7 +33852,7 @@ index 90f3221..cfda176 100644
          rc = mfc_do_list_transfer(spu, (uint32_t)ea & SPU_LS_MASK,
                                    ea & 0xFFFFFFFF00000000ull, size, cmd);
      } else {
-@@ -1406,7 +1776,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1406,7 +1801,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
           * dispatch that CLAIMS a ticket but never stages its job. */
          { extern volatile unsigned g_wws_batch_gets; g_wws_batch_gets++; }
          static int _n = 0;
@@ -33645,7 +33861,7 @@ index 90f3221..cfda176 100644
              const uint8_t* p = spu->ls + 0xC00;
              fprintf(stderr, "[wws-batch] GET 0xC00 ea=0x%09llX size=0x%X:",
                      (unsigned long long)ea, size);
-@@ -1419,8 +1789,8 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1419,8 +1814,8 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
           * shareableWriteIfDiscarded=(f>>12)&1, logBufSet=(f>>5)&0xF, logBuf=f&0x1F.
           * Answers lifter-vs-builder: are shareable-output UseBuffer + kRunJob +
           * store commands PRESENT in the list the PPU built? */
@@ -33656,7 +33872,7 @@ index 90f3221..cfda176 100644
              static const char* NM[8] = {"kNop","kReserveBufSet","kUseBuffer",
                  "kUnreserveBufSets","kReqDepDec","kRunJob","kEndCommand","kInvalid"};
              const uint8_t* p = spu->ls + 0xC00;
-@@ -1439,9 +1809,9 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1439,9 +1834,9 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
      /* After a cri-task GET, dump the bytes it just read (the task context) so we
       * can tell if eaContext holds valid SPURS work data or garbage. */
      {
@@ -33668,7 +33884,7 @@ index 90f3221..cfda176 100644
                  const uint8_t* p = spu->ls + (lsa & 0x3FFFF);
                  fprintf(stderr, "[DMA] GET data @LS0x%05X (from ea=0x%09llX):", lsa, (unsigned long long)ea);
                  for (uint32_t i=0;i<size && i<0x40;i+=4)
-@@ -1460,6 +1830,43 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+@@ -1460,6 +1855,43 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
      return rc;
  }
  
@@ -33712,7 +33928,7 @@ index 90f3221..cfda176 100644
  /* ---------------------------------------------------------------------------
   * Tag group synchronization
   * -----------------------------------------------------------------------*/
-@@ -1539,9 +1946,9 @@ static inline void mfc_channel_write(mfc_engine* mfc, spu_context* spu,
+@@ -1539,9 +1971,9 @@ static inline void mfc_channel_write(mfc_engine* mfc, spu_context* spu,
           * RdTagStat must equal the mask EXACTLY (mask 2 = tag 1 =
           * kLoadJob_readBuffers). Log the inputs so we can see whether the tag
           * really is reported complete. Env SPU_TAGPROBE=1. */
