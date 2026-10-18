@@ -40,6 +40,7 @@
 /work/tools/*
 !/work/tools/lift_spu.py
 !/work/tools/ppm2png.py
+!/work/tools/rsx_decode.py
 
 /work/tests/*
 !/work/tests/*.sh
