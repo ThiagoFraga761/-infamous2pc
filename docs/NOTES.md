@@ -759,6 +759,54 @@ physical core changes nothing measurable.
 - `second_frame` failed once in the suite (presentation stopped in the opening
   video, the known rare boot hang) and passed four reruns of the same binary.
 
+### The SPU runtime's own cost, round 4 (2026-10-18)
+
+Measured with `work/runs/spuovh_cyc.sh`: fixed-period cycle samples on the
+SPURS threads during `move_bench` (120-180 s), as shares of the SPU work
+(everything but the idle loop). Desktop, three alternating pairs, every
+switch below off against on. All four cuts leave the output unchanged.
+
+- **Float fix-ups without the full save.** `spu_cold_thunk` first calls
+  `spu_cold_fast` (clang `no_caller_saved_registers`: it saves only the ~11
+  registers it writes) and runs the double-precision fix-up. Only when a lane
+  does not settle does it go on to the old full thunk (`spu_cold_thunk_full`,
+  32 zmm + 8 k). A startup self-test checks the result and that every zmm, k
+  and caller-saved GPR comes back unchanged; if anything differs the full
+  thunk is used throughout. `tools/spu_cc.sh` builds `spu_cold.c` with
+  `-mllvm -x86-use-vzeroupper=0`; without it the self-test fails and the
+  full thunk is used. 30 M random cases agree with `spu_cold_dispatch` bit
+  for bit. Cold path 3.9% -> 3.2%. `SPU_COLD_FAST=0` turns it off.
+- **Overlay notes.** `spu_overlay_note_get` buckets the signature sources by
+  their first 8 bytes. A fixed-address lift already resident is skipped
+  before its bytes are compared. 1.9% -> 1.5%. `SPU_OVL_FAST=0` turns it off.
+- **Marking a reserved line.** Every GETLLAR (and every PPU lwarx) did a
+  locked fetch_or on the coherence bitmap and a seq_cst store to the armed
+  flag that every PPU store reads. Neither is ever cleared, so a marked line
+  now only takes a fence. `coh_mark_line` 0.58% -> 0.31%.
+  `SPU_COH_MARK_FAST=0` turns it off.
+- **MWAITX in the idle spin.** On CPUs with MONITORX the 200 us idle spin
+  waits in MWAITX on the instance's first line (2000 TSC cycles, then the
+  other lines are checked). Idle cycles on the SPURS threads go from ~37 to
+  ~20 M a frame. They count as busy CPU time, but the core is free for its
+  SMT sibling. Waking takes ~0.2 us longer than PAUSE (Rog: 1166 against
+  591 TSC). `SPURS_IDLE_MWAITX=<cycles>`, 0 = PAUSE.
+
+The fps did not move (62.4 against 62.6, inside the run-to-run spread):
+together this is ~1.3% of SPU work.
+
+What is left of the runtime, and why it was not cut:
+- `spu_indirect_branch_slow`: `SPU_IB_SLOW_STATS=1` shows ~97% of its calls
+  come with `irq_saved` set (the WWS interrupt handlers run jobs with the
+  save armed). Letting the fast path take them moved the cost from the
+  resolver into the fast path and measured nothing, so it was dropped.
+- Lock-line contention: on the Rog `ll_take` is 5-7% of SPU work.
+  `SPU_LL_STATS=1` names the callers: SPU PUTLLC (~300k locks/s, ~19 pause
+  turns each), the PPU's coherent stores to marked lines (`vm_write32` 1.3 M/s)
+  and `stwcx`. Every line an SPU ever reserved stays marked, so every PPU
+  store to it takes the stripe. That is the next thing to look at.
+- `spu_drain_call` (~2.7%) is the per-hop trampoline loop. Cutting it means
+  fewer hops (lifter work).
+
 ### The job that writes the draw list, and constant bursts (2026-10-18)
 
 Job module `ec5f11015784` (overlay 225), the busiest SPU job (~20% of SPURS
