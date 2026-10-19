@@ -25,6 +25,8 @@
 !/work/port/port_cpu_check.c
 !/work/port/native_passes.c
 !/work/port/re_trace.c
+!/work/port/ppu_native.cpp
+!/work/port/ppu_native.h
 !/work/port/job2025_kernels_native.c
 !/work/port/ec5f_native.c
 !/work/port/job2025_native.c
@@ -52,6 +54,7 @@
 
 /work/tools/*
 !/work/tools/lift_spu.py
+!/work/tools/ppu_native_entries.py
 !/work/tools/ppm2png.py
 !/work/tools/rsx_decode.py
 !/work/tools/re/

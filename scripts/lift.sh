@@ -27,5 +27,7 @@ mkdir -p "$ROOT/work/out" "$ROOT/work/src"
     --functions "$ROOT/work/out/$name.functions.json" \
     --hle-stubs "$ROOT/work/out/$name.imports.json" \
     --code-end 0x8c96e8 --local-regs --output "$ROOT/work/src/recomp"
+# Native stand-ins for some lifted functions and loops (work/port/ppu_native.cpp).
+"$PY" "$ROOT/work/tools/ppu_native_entries.py" --recomp "$ROOT/work/src/recomp"
 "$PY" "$ROOT/work/tools/lift_spu.py" --toolkit "$DIR" --eboot "$ELF" --spu-dir "$ROOT/work/port/spu"
 echo "lifted: work/src/recomp (PPU), work/port/spu (SPU)"

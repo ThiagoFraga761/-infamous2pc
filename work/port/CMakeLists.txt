@@ -218,6 +218,7 @@ add_executable(${PROJECT_NAME}
     port_cpu_check.c
     native_passes.c
     re_trace.c
+    ppu_native.cpp          # native stand-ins for lifted PPU code (tools/ppu_native_entries.py)
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
     ${RECOMP_SOURCES}
