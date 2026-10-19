@@ -41,6 +41,7 @@
 #include "win32_compat.h"
 
 #include "guest_vm.h"
+#include "rsx_hitch.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -321,14 +322,20 @@ static DWORD WINAPI frame_clock(LPVOID)
      * at a semaphore (an SPU label), at a park, behind `put`, idle (nothing
      * queued: the PPU is the one behind), draining, presenting. */
     const int stats = getenv("PS3_CLOCK_STATS") != NULL;
+    /* PS3RECOMP_VK_HITCH: the same split for every gap between two presents. */
+    const int hs = rsx_hs_on();
+    rsx_hs_thread("rsx");
     unsigned long long st_t0 = next_tick, st_wait[4] = {0, 0, 0, 0}, st_drain = 0, st_present = 0;
     unsigned long long last_boot_present = 0;
-#define CLOCK_TIMED(acc, stmt) do { const unsigned long long _a = stats ? ps3_qpc_us() : 0; stmt; \
-                                    if (stats) (acc) += ps3_qpc_us() - _a; } while (0)
+#define CLOCK_TIMED(acc, stmt) do { const unsigned long long _a = (stats || hs) ? ps3_qpc_us() : 0; stmt; \
+                                    const unsigned long long _d = (stats || hs) ? ps3_qpc_us() - _a : 0; \
+                                    if (stats) (acc) += _d; \
+                                    if (hs) rsx_hs_add(&(acc) == &st_drain ? HS_RSX_DRAIN : HS_RSX_PRESENT, _d * 1000ull); \
+                                } while (0)
 
     for (;;) {
         const int busy = rsx_ok ? cellGcm_fifo_busy() : 0;
-        const unsigned long long w0 = stats ? ps3_qpc_us() : 0;
+        const unsigned long long w0 = (stats || hs) ? ps3_qpc_us() : 0;
         if (busy) {
 #ifdef _WIN32
             Sleep(nap_us >= 1000 ? (DWORD)(nap_us / 1000) : 0);
@@ -337,6 +344,9 @@ static DWORD WINAPI frame_clock(LPVOID)
 #endif
         } else cellGcm_fifo_kick_wait(1);
         unsigned long long now = ps3_qpc_us();
+        if (hs) rsx_hs_add((busy & 1) ? HS_RSX_SEMA : (busy & 2) ? HS_RSX_PARK : (busy & 4) ? HS_RSX_BEHIND
+                                                                                : HS_RSX_IDLE,
+                           (now - w0) * 1000ull);
         if (stats) {
             st_wait[(busy & 1) ? 0 : (busy & 2) ? 1 : (busy & 4) ? 2 : 3] += now - w0;
             if (now - st_t0 >= 5000000ull) {
@@ -654,10 +664,18 @@ int main(int argc, char** argv)
      * work over with its own atomics, which wake nobody, and a sleeping SPU
      * saw them only at its 1 ms timeout (libs/spurs/spurs_kernel.c). */
     env_default("SPURS_IDLE_SPIN_US", "200");
+    /* The main PPU thread, rsx, rsx-record and the five SPURS SPUs each on a
+     * physical core of their own, everything else on the other siblings
+     * (runtime/platform/ps3_hot_pin.c; needs SMT and 8+ cores). Heavy area,
+     * three alternating pairs: 87.6 -> 90.4 fps, job-list waits 12.9% ->
+     * 9.7% of the main thread. PS3_HOT_PIN=0 turns it off. */
+    env_default("PS3_HOT_PIN", "1");
     /* A Wwise job that ran and did not finish (the title had already refilled
      * its descriptor) gets no synthetic completion either: the WWS handlers
      * read one as a message and call through NULL. */
     env_default("SPURS_JC_NO_SYNTH", "1");
+    /* Texture builds off the recording queue: off until measured. */
+    env_default("PS3RECOMP_BQ_TEXBUILD", "0");
     /* Its frames are built on the SPU: the FIFO parks at the end of what is
      * ready and the title patches the park with the rest. Wait at a park the
      * way the RSX does instead of following the write head. */

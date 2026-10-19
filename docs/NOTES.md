@@ -863,6 +863,51 @@ SPURS threads sleep, the audio job chain keeps running its Wwise DSP jobs, the
 RSX thread waits for commands. `work/runs/freeze_hunt.sh` repeats the bench
 with `PS3_POLLTOP` and the stall stack capture until it happens again.
 
+### The SPU slack, measured (2026-10-19)
+
+Heavy area standing, ~90 fps, recording thread on. The main thread spends
+~13% of its time in the WWS job-list polls and ~26% in the
+`CellGcmControl.ref` poll; the five SPURS SPUs are busy ~60%.
+
+- **The polls.** `func_00504D90` reads a row of the job list's header
+  (`header + 0x40 + 16 * list`): u16 0 and 1 are the next job to grab, u16
+  2..6 are SPU 0..4's oldest unfinished job (0xFFFF: none). It waits until the
+  minimum reaches the target: every job before it grabbed and finished.
+  `func_00505490` waits for the whole list. The policy module grabs a job one
+  ahead (prefetch) and writes the row with PUTLLC at each grab and release.
+- **Where the SPUs' idle time is** (`PS3_TIMELINE`, `kspu` samples):
+  while the main thread waits on a job list, 0.16 of the 5 SPUs are idle;
+  while it waits on the RSX ref, 4.95 are; while it computes, ~1.1.
+  The idle time is the PPU and RSX critical path, not SPU latency.
+- **Not latency.** A kick wakes an idle SPU in ~1 us (spinning) or ~3 us
+  (sleeping); ~10 idle sleeps per 10 s time out onto work; the poll sees the
+  completing PUTLLC ~1 us after it; jobs queued behind a running one on the
+  same SPU cost ~0.05-0.5 ms per 10 frames.
+- **What the waits are made of.** ~35% unclaimed jobs while all five SPUs
+  run other lists (SpuLight is priority 2, the Render workloads 4: by the
+  title's design), the rest single jobs on the critical path: `d7096a8ffc1c`
+  (Render4, ~30% of the wait), `eac33ee65aa1` and `e34204e872fe` (General,
+  ~25%). Those are the jobs worth making native.
+- **SMT.** The 9800X3D has 8 cores for ~8 hot threads, and the scheduler
+  kept two of them on one core's siblings while another core idled ~35% of
+  the time (they spin, so nothing moves them). `PS3_HOT_PIN=1` (on in
+  `main.cpp`, `runtime/platform/ps3_hot_pin.c`) gives the main PPU thread,
+  `rsx`, `rsx-record` and `spurs0..4` one CPU each on separate cores and the
+  other threads the remaining siblings. Three alternating pairs: 87.6 ->
+  90.4 fps, job-list waits 12.9% -> 9.7%, SPU busy 59.8% -> 54.6% (the same
+  jobs in less time); the frame is now more RSX-bound (ref 25.7% -> 30.6%).
+- **Tried, no gain:** MWAITX instead of PAUSE in the short `usleep` spin
+  (88.7 against 90.4 fps).
+- **Tools.** `PS3_TIMELINE` now records `jlw` (each job-list poll with its
+  row and target), `jlp` (each SPU PUTLLC/PUT on a polled row: SPU, overlay,
+  row after), `kspu` (each kernel SPU's workload, overlay, pc, idle) every
+  `PS3_TIMELINE_US` (default 250), `knotify`/`kwake`, and the workload
+  priorities. Scripts in `work/runs/spuslack/` (`tl_state.py`,
+  `jl_crit.py`, `tl_ascii.py`, ...). `PS3_WAITSTATS=1`: the main thread's
+  poll time by kind every 10 s. `SPURS_BUSY_STATS=1`: SPU time outside kidle.
+  The sampler thread needs more than 64 KB of stack now (192 KB of static
+  TLS); with 64 KB it silently never started.
+
 ### What the main thread waits for in New Marais
 
 The `PS3_TIMELINE` usleep events name the main thread's three waits:
@@ -1128,6 +1173,68 @@ walking, running into new ground, jumping, fighting.
   - glslang is initialised once, thread-safely.
   - The dummy cube is left to the first draw that samples it, since building
     it submits.
+
+### What the slow frames are made of (2026-10-19)
+
+`PS3RECOMP_VK_HITCH=<ms>` now also says, for each slow frame, where every
+thread's time went (`libs/video/rsx_hitch.h`). With `=0` every frame gets a
+line, and `work/runs/hitches/hitch_classify.py` puts each slow frame down to
+the bucket that grew most over its median:
+
+- the RSX walker: waiting on a label, at a park, idle (the PPU is behind),
+  draining, presenting;
+- the engine thread waiting for the recording thread (`bq_sync`, with the
+  call that waited longest);
+- texture work: misses, decode, hash, create, `vkAllocateMemory`, uploads;
+- pipeline builds, GPU waits;
+- the main PPU thread's sleeps (its ref poll apart), file reads;
+- each named thread's CPU time in the gap.
+
+`work/runs/hitches/usoak.sh` is the soak with the player's settings (1440p,
+the recording thread, vertex pulling) and no screenshots: those read the
+frame back every 1200 frames and show up as 25-35 ms frames of their own.
+`ab_report.py` compares arms of a queue of runs, counting world frames only
+(over 1000 draws), so loading screens and respawns do not count.
+
+What was found, desktop, 5-minute soaks:
+
+- **The texture cache was too small.** In the dense city a frame binds more
+  than 1024 distinct textures, so every frame evicted and rebuilt ~500 of
+  them (~45 MB decoded and uploaded, ~800 images freed): 40 ms frames, one
+  after another. The engine keeps 4096 now (`RSX_DRAW_ENGINE_TEXTURE_CACHE`,
+  `VK_ENG_MAX_OBJ` 8192). The object table is searched from a rotating
+  cursor, and a release skips the view scan unless a view was made.
+  `PS3RECOMP_ENG_TEXCACHE=1024` restores the old size.
+- **Pipeline builds that missed Mesa's cache.** Mesa's disk cache is shared
+  with every other Vulkan program and capped at 1 GB (full on this desktop),
+  so pipelines were evicted and built again: 10 builds took 105 ms in one
+  frame. The backend now keeps its own `VkPipelineCache` in
+  `~/.cache/ps3recomp/vkpipe-<vendor>-<device>-<uuid>.bin`, loaded at start
+  and written from a thread of its own when it has grown.
+  `PS3RECOMP_VK_PIPECACHE=0` turns it off.
+- **Building textures without draining the queue** (`PS3RECOMP_BQ_TEXBUILD=1`,
+  off) was tried and made things worse. The uploads pile up in the queue, and
+  the next call that must wait (native SSAO, every frame) waits for all of
+  them.
+
+Three alternating pairs each, old settings (`PIPECACHE=0 TEXCACHE=1024`)
+against the new ones, same binary, world frames:
+
+| | p50 | p99 | p99.9 | worst | 1% low | frames > 40 ms |
+|---|---|---|---|---|---|---|
+| Desktop, before | 9.4 ms | 15.9 ms | 40.4 ms | 52 ms | 46 fps | 72 a run |
+| Desktop, after | 9.3 ms | 15.8 ms | 19.0 ms | 38 ms | 57 fps | 0 |
+| Rog Ally, before | 37.7 ms | 69.9 ms | 77 ms | 84 ms | 13.9 fps | 3110 |
+| Rog Ally, after | 30.8 ms | 55.6 ms | 65 ms | 92 ms | 16.4 fps | 1304 |
+
+What is left in the desktop's slow frames, which are now at most ~35 ms:
+
+- frames with more draws (11,000 against 7,600): the RSX and recording
+  threads' own work;
+- the main PPU thread's own game code (`func_000CAF64` and friends, no
+  sleeps): about 6 a minute, 20-35 ms;
+- the first frame in a new area or after a respawn, ~800 new textures at
+  once: 100-150 ms.
 
 ## The start screen and the in-game menu
 
