@@ -1,0 +1,2 @@
+{"name": "w_1A570", "lo": "1A570", "hi": "1A870", "count": "r5", "per_group": 8,
+ "groups_c": "(N + 7) >> 3", "groups": 6, "mode": "tag"}

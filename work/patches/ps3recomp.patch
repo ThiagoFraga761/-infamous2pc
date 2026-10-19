@@ -835,7 +835,7 @@ index 8be6664..34c4e1b 100644
          if (s_sockets[s].p2p && n > 0) {
              uint32_t un = (uint32_t)n;
 diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
-index 688ff04..702ea21 100644
+index 688ff04..9c5bb0b 100644
 --- a/libs/spurs/cellSpurs.c
 +++ b/libs/spurs/cellSpurs.c
 @@ -14,11 +14,15 @@
@@ -1584,7 +1584,7 @@ index 688ff04..702ea21 100644
 +    if (hook) {
 +        vm_write64(f1 + 0x30, hook);
 +        vm_write64(f1 + 0x38, hook_arg);
-+    }
+     }
 +    spurs_ctl_begin(ea, snap);
 +    if (hook) b[SPURS_WKL_EVENT1 + wnum] |= 0x02;
 +    b[SPURS_WKL_IDLE2 + wnum]   = 0;
@@ -1608,7 +1608,7 @@ index 688ff04..702ea21 100644
 +        if (vm_read64(other) == pm) { uid = vm_base[other + 0x14]; break; }
 +        taken |= 0x80000000u >> vm_base[other + 0x14];
 +        uid = ~taken ? (u32)__builtin_clz(~taken) : 32;
-     }
++    }
 +    vm_base[info + 0x14] = (u8)uid;
 +    spurs_ctl_begin(ea, snap);
 +    spurs_be32_update(ea + SPURS_WKL_MSKB, 0x80000000u >> wnum, 0);
@@ -2376,7 +2376,7 @@ index 688ff04..702ea21 100644
          printf("[cellSpurs] CreateJobChain(jc=0x%08X entry=0x%08X sizeDesc=%u maxGrab=%u "
                 "maxCont=%u autoReq=%u)\n",
                 (u32)jc_ea, (u32)entry_ea, sizeJobDescriptor, maxGrabbedJob,
-@@ -2322,12 +2239,86 @@ enum {                              /* CellSpursJobHeader (48 B) */
+@@ -2322,12 +2239,90 @@ enum {                              /* CellSpursJobHeader (48 B) */
      JH_SIZE          = 0x30,
  };
  
@@ -2384,6 +2384,8 @@ index 688ff04..702ea21 100644
 +/* Returns spu_workload_dispatch_job's result: 0 = the job did not run,
 + * 1 = its lifted image ran, 2 = it ran on the interpreter. */
 +static int jc_trace_on(void);                   /* SPURS_JC_TRACE, see the job guards */
++static void jc_ring_note(int kind, u32 a, u64 b); /* SPURS_JC_RING, see the job guards */
++enum { JR_CMD = 1, JR_JOB, JR_JOBRET, JR_NOTIFY, JR_OPEN, JR_EVENT, JR_RACE, JR_SNAP };
 +static unsigned long long jc_trace_us(void);
 +#ifdef _MSC_VER
 +#  define JC_TLS __declspec(thread)
@@ -2452,6 +2454,8 @@ index 688ff04..702ea21 100644
 +    if (dsz > sizeof desc) dsz = sizeof desc;
 +    const u8* pre = jc_prefetched(pc, job_ea, desc, dsz);
 +    if (!pre) memcpy(desc, vm_base + job_ea, dsz);
++    jc_ring_note(JR_JOB, job_ea, ((u64)(pre ? 1u : 0u) << 32) |
++                 ((u32)desc[4] << 24 | (u32)desc[5] << 16 | (u32)desc[6] << 8 | desc[7]));
 +    if (jc_trace_on())
 +        fprintf(stderr, "[jc-trace] %llu job 0x%08X bin=0x%02X%02X%02X%02X ndma=%u %s\n", jc_trace_us(),
 +                job_ea, desc[4], desc[5], desc[6], desc[7], ((u32)desc[10] << 8 | desc[11]) / 8u,
@@ -2467,7 +2471,7 @@ index 688ff04..702ea21 100644
  
      { static int _n = 0;
        if (_n < 8) {
-@@ -2339,14 +2330,14 @@ static void jc_run_one_job(u32 job_ea, int idx, u32 size_desc)
+@@ -2339,14 +2334,14 @@ static void jc_run_one_job(u32 job_ea, int idx, u32 size_desc)
            }
            printf("\n");
        }
@@ -2485,7 +2489,7 @@ index 688ff04..702ea21 100644
      }
      /* A jobchain job is NOT a SPURS task: Sony's jm2 stages the whole working
       * set in local store and enters the job's CRT with r3 = CellSpursJobContext2*
-@@ -2355,7 +2346,7 @@ static void jc_run_one_job(u32 job_ea, int idx, u32 size_desc)
+@@ -2355,7 +2350,7 @@ static void jc_run_one_job(u32 job_ea, int idx, u32 size_desc)
       * DMA traffic at all. spu_workload_dispatch_job reproduces jm2's staging.
       * Synchronous by design: a job runs to completion, and the chain's own
       * NEXT/CALL/RET commands are what order them. */
@@ -2494,7 +2498,7 @@ index 688ff04..702ea21 100644
  }
  
  /* Walk one chain's command stream. Bounded: a malformed or self-looping stream
-@@ -2381,6 +2372,26 @@ static void jc_run_one_job(u32 job_ea, int idx, u32 size_desc)
+@@ -2381,6 +2376,70 @@ static void jc_run_one_job(u32 job_ea, int idx, u32 size_desc)
   * what makes "run this job when I say so" mean anything.
   * -----------------------------------------------------------------------*/
  
@@ -2518,10 +2522,54 @@ index 688ff04..702ea21 100644
 +#endif
 +}
 +
++/* SPURS_JC_RING=1: the chain walkers' last 16K steps -- every command read,
++ * job, guard notify/opening and event a job sent -- kept in memory and
++ * written out once a guard stays closed for 20 s. What led to a freeze,
++ * without logging hours of laps. */
++#define JC_RING_N 16384u
++static struct { unsigned long long t; u64 b; u32 a; u16 kind; u16 tid; } s_jc_ring[JC_RING_N];
++static volatile unsigned s_jc_ring_i;
++static int jc_ring_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("SPURS_JC_RING"); on = e && e[0] == '1'; }
++    return on;
++}
++static void jc_ring_note(int kind, u32 a, u64 b)
++{
++    if (!jc_ring_on()) return;
++    static JC_TLS u16 tid;
++    static volatile unsigned short next_tid;
++    if (!tid) tid = (u16)__atomic_add_fetch(&next_tid, 1, __ATOMIC_RELAXED);
++    const unsigned i = __atomic_fetch_add(&s_jc_ring_i, 1, __ATOMIC_RELAXED) % JC_RING_N;
++    s_jc_ring[i].kind = 0;
++    s_jc_ring[i].t = jc_trace_us(); s_jc_ring[i].a = a; s_jc_ring[i].b = b; s_jc_ring[i].tid = tid;
++    __atomic_store_n(&s_jc_ring[i].kind, (u16)kind, __ATOMIC_RELEASE);
++}
++static void jc_ring_dump(const char* why)
++{
++    if (!jc_ring_on()) return;
++    static volatile long dumped;
++    if (__atomic_exchange_n(&dumped, 1, __ATOMIC_ACQ_REL)) return;
++    static const char* const name[] = { "?", "cmd", "job", "ret", "notify", "open", "event", "RACE", "snap" };
++    const unsigned end = __atomic_load_n(&s_jc_ring_i, __ATOMIC_ACQUIRE);
++    const unsigned n = end < JC_RING_N ? end : JC_RING_N;
++    fprintf(stderr, "[jc-ring] %s: last %u steps\n", why, n);
++    for (unsigned k = end - n; k != end; k++) {
++        const unsigned i = k % JC_RING_N;
++        const unsigned kind = __atomic_load_n(&s_jc_ring[i].kind, __ATOMIC_ACQUIRE);
++        fprintf(stderr, "[jc-ring] %llu t%u %-6s 0x%08X 0x%016llX\n", s_jc_ring[i].t, s_jc_ring[i].tid,
++                kind < sizeof name / sizeof name[0] ? name[kind] : "?", s_jc_ring[i].a,
++                (unsigned long long)s_jc_ring[i].b);
++    }
++    fprintf(stderr, "[jc-ring] end\n");
++    fflush(stderr);
++}
++
  #define MAX_JOBGUARDS 32
  static struct {
      u32 ea;          /* guest CellSpursJobGuard address (128-byte aligned) */
-@@ -2388,9 +2399,30 @@ static struct {
+@@ -2388,9 +2447,30 @@ static struct {
      u32 reset;       /* value to restore when autoReset is set             */
      u32 pending;     /* notifications received, not yet consumed        */
      u32 auto_reset;
@@ -2552,7 +2600,7 @@ index 688ff04..702ea21 100644
  static int jg_find(u32 ea)
  {
      for (int i = 0; i < MAX_JOBGUARDS; i++)
-@@ -2411,17 +2443,21 @@ s32 cellSpursJobGuardInitialize(u64 jc_ea, u64 guard_ea, u32 notify_count,
+@@ -2411,17 +2491,21 @@ s32 cellSpursJobGuardInitialize(u64 jc_ea, u64 guard_ea, u32 notify_count,
      u32 ea = (u32)guard_ea;
      if (!ea) return CELL_SPURS_TASK_ERROR_NULL_POINTER;
  
@@ -2575,7 +2623,7 @@ index 688ff04..702ea21 100644
  
      /* Mirror the count into guest memory. The SPU side reads the guard on
       * hardware; keeping the two consistent costs nothing and makes a guest-side
-@@ -2447,13 +2483,47 @@ s32 cellSpursJobGuardNotify(u64 guard_ea)
+@@ -2447,13 +2531,48 @@ s32 cellSpursJobGuardNotify(u64 guard_ea)
       * OBSERVED zero, which threw away any notify that arrived while the job
       * was still running -- the title notified 6 times and the chain completed
       * 2 laps, so the thread waiting on the other 4 completions never woke. */
@@ -2614,6 +2662,7 @@ index 688ff04..702ea21 100644
                      ? 0u : s_jobguards[i].reset - s_jobguards[i].pending;
        s_jobguards[i].count = remaining;
        vm_write32(ea, remaining); }
++    jc_ring_note(JR_NOTIFY, ea, s_jobguards[i].pending);
 +    JG_BROADCAST();
 +    if (jc_trace_on())
 +        fprintf(stderr, "[jc-trace] %llu notify guard=0x%08X pending=%u\n", jc_trace_us(), ea,
@@ -2625,7 +2674,7 @@ index 688ff04..702ea21 100644
            printf("[cellSpurs] JobGuardNotify(0x%08X) -> %u remaining\n",
                   ea, s_jobguards[i].count); }
      return CELL_OK;
-@@ -2465,8 +2535,13 @@ s32 cellSpursJobGuardReset(u64 guard_ea)
+@@ -2465,8 +2584,13 @@ s32 cellSpursJobGuardReset(u64 guard_ea)
      u32 ea = (u32)guard_ea;
      int i = jg_find(ea);
      if (i < 0) return CELL_SPURS_TASK_ERROR_INVAL;
@@ -2639,7 +2688,7 @@ index 688ff04..702ea21 100644
      return CELL_OK;
  }
  
-@@ -2474,11 +2549,26 @@ s32 cellSpursJobGuardReset(u64 guard_ea)
+@@ -2474,11 +2598,26 @@ s32 cellSpursJobGuardReset(u64 guard_ea)
   * chain then gives up this pass rather than spinning the walker thread
   * forever). An unknown guard opens immediately -- a chain guarded by something
   * we never saw initialised must not deadlock the walker. */
@@ -2668,10 +2717,11 @@ index 688ff04..702ea21 100644
          if (s_jobguards[i].pending >= s_jobguards[i].reset) {
              /* Consume exactly one release worth of credits, so notifies that
               * arrived during the previous lap still count. */
-@@ -2486,15 +2576,31 @@ static int jg_wait(u32 ea)
+@@ -2486,15 +2625,47 @@ static int jg_wait(u32 ea)
              if (!s_jobguards[i].auto_reset) s_jobguards[i].reset = 0;
              s_jobguards[i].count = s_jobguards[i].reset;
              vm_write32(ea, s_jobguards[i].count);
++            jc_ring_note(JR_OPEN, ea, s_jobguards[i].pending);
 +            if (jc_trace_on())
 +                fprintf(stderr, "[jc-trace] %llu open guard=0x%08X pending_left=%u\n", jc_trace_us(), ea,
 +                        s_jobguards[i].pending);
@@ -2696,6 +2746,21 @@ index 688ff04..702ea21 100644
 +        if (timed_out && !said) {
 +            said = 1;
 +            printf("[cellSpurs] guard 0x%08X still closed after 20 s -- still waiting\n", ea);
++            if (jc_ring_on()) {
++                JG_UNLOCK();
++                fflush(stdout);
++                jc_ring_dump("guard closed for 20 s");
++                if (slot >= 0) {
++                    const u32 e0 = s_jobchains[slot].entry_ea;
++                    fprintf(stderr, "[jc-ring] chain 0x%08X commands from 0x%08X:", s_jobchains[slot].jc_ea, e0);
++                    for (u32 k = 0; k < 160; k++)
++                        fprintf(stderr, "%s%016llX", k % 8 ? " " : "\n[jc-ring]   ",
++                                (unsigned long long)vm_read64(e0 + 8 * k));
++                    fprintf(stderr, "\n");
++                    fflush(stderr);
++                }
++                JG_LOCK();
++            }
 +        }
      }
 -    printf("[cellSpurs] guard 0x%08X still closed after 20 s -- chain gives up\n", ea);
@@ -2704,7 +2769,7 @@ index 688ff04..702ea21 100644
      return 0;
  }
  
-@@ -2527,6 +2633,13 @@ static u64 spurs_event_data3_probe(void)
+@@ -2527,6 +2698,13 @@ static u64 spurs_event_data3_probe(void)
      return (u64)(unsigned)v;
  }
  
@@ -2718,7 +2783,7 @@ index 688ff04..702ea21 100644
  static void jc_signal_done(u32 jc_ea, int job_index)
  {
      /* Carry the job's mailbox answer in the completion event. On hardware the
-@@ -2574,7 +2687,7 @@ static void jc_signal_done(u32 jc_ea, int job_index)
+@@ -2574,7 +2752,7 @@ static void jc_signal_done(u32 jc_ea, int job_index)
                                                  ? spurs_event_data3_probe()
                                                  : (answers_a_count ? mbox : 0));
          static int n = 0;
@@ -2727,7 +2792,7 @@ index 688ff04..702ea21 100644
              printf("[cellSpurs] chain 0x%08X job %d done -> event queue %u "
                     "(data2=%llu rc=%d)\n",
                     jc_ea, job_index, s_spurs_event_queue[i],
-@@ -2582,10 +2695,79 @@ static void jc_signal_done(u32 jc_ea, int job_index)
+@@ -2582,10 +2760,158 @@ static void jc_signal_done(u32 jc_ea, int job_index)
      }
  }
  
@@ -2799,6 +2864,85 @@ index 688ff04..702ea21 100644
 +    }
 +}
 +
++/* ---------------------------------------------------------------------------
++ * A lap's commands, as they stood when its guard opened.
++ *
++ * The title appends a lap's jobs behind a closed guard, terminates the lap and
++ * notifies. Everything up to the lap's first control transfer is complete at
++ * that moment, and stays valid only until the lap's own completion reaches the
++ * title. inFAMOUS 2's Wwise chain (0x00B19600, func_0057B700/0057B88C):
++ *
++ *     buffer X: GUARD, JOB.., SYNC, JOB end (0x00B154E0), NEXT -> buffer Y
++ *     buffer Y: GUARD, ...
++ *
++ * The end job throw_events the AK thread, which takes that as "X is free":
++ * it kicks Y and starts writing X's next lap over X at once -- JOB commands
++ * first, each descriptor after its command. jm2 fetched X's NEXT long before
++ * the end job ran. The walker read it live, after the end job returned; when
++ * it lost the CPU for that long, it read the title's new JOB words instead,
++ * ran their half-written descriptors (garbage DMA, an end job out of turn),
++ * and the chain and the AK thread ended up waiting on each other with the
++ * guard closed.
++ *
++ * So a lap walks from this copy, taken at the guard opening under the guard
++ * lock (the notify that opened it is ordered after the title's writes). It
++ * covers the straight run from the guard to the first NEXT / RESET / CALL /
++ * GUARD / END / RET / ABORT or zero word; past that the walker reads live, as
++ * before. PS3RECOMP_JC_SNAPSHOT=0 reads live throughout (the mismatch is still
++ * reported). Either way a command rewritten under the walker is reported
++ * ("[jc-race]"). */
++#define JC_LAP_MAX 256
++static JC_TLS u64 t_lap_cmd[JC_LAP_MAX];
++static JC_TLS u32 t_lap_pc, t_lap_n;
++static JC_TLS unsigned long long t_lap_open_us;
++static volatile long s_jc_race_n;
++
++static int jc_snapshot_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("PS3RECOMP_JC_SNAPSHOT"); on = !e || e[0] != '0'; }
++    return on;
++}
++
++static void jc_lap_snapshot(u32 pc)
++{
++    t_lap_pc = pc; t_lap_n = 0; t_lap_open_us = jc_trace_us();
++    for (u32 k = 0; k < JC_LAP_MAX; k++) {
++        const u64 c = vm_read64(pc + 8 * k);
++        if (c == 0) break;
++        t_lap_cmd[t_lap_n++] = c;
++        const u32 op = (u32)(c & 7);
++        if (op == 1 || op == 3 || op == 4 || op == 7) break;
++    }
++}
++
++/* SPURS_JC_RACE_DELAY_US=<n>: test only. After a job that sent an event,
++ * hold the walker for n us before it reads on -- the window in which a
++ * preempted walker lost the race above. */
++static JC_TLS u32 t_jc_events;          /* events this walker's jobs sent */
++void spurs_jc_event_pushed(uint32_t queue, uint32_t port, uint64_t data)
++{
++    t_jc_events++;
++    jc_ring_note(JR_EVENT, queue, ((u64)port << 32) | (u32)data);
++}
++
++static u64 jc_read_cmd(u32 jc_ea, u32 pc)
++{
++    const u64 live = vm_read64(pc);
++    if (!t_lap_n || pc < t_lap_pc || pc >= t_lap_pc + 8 * t_lap_n) return live;
++    const u64 snap = t_lap_cmd[(pc - t_lap_pc) / 8];
++    if (live != snap) {
++        const long n = __atomic_add_fetch(&s_jc_race_n, 1, __ATOMIC_RELAXED);
++        jc_ring_note(JR_RACE, pc, live);
++        if (n <= 32 || n % 1000 == 0)
++            fprintf(stderr, "[jc-race] chain 0x%08X: cmd @0x%08X rewritten under the walker "
++                    "(lap opened %llu us ago): 0x%016llX -> 0x%016llX, %s (#%ld)\n",
++                    jc_ea, pc, jc_trace_us() - t_lap_open_us, (unsigned long long)snap,
++                    (unsigned long long)live, jc_snapshot_on() ? "walking the copy" : "walking live", n);
++    }
++    return jc_snapshot_on() ? snap : live;
++}
++
 +static int jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
  {
      u32 pc = entry_ea, ret_pc = 0;
@@ -2809,13 +2953,31 @@ index 688ff04..702ea21 100644
      /* Bound IDLE steps, not total steps. A SPURS job chain is frequently a
       * SERVICE LOOP -- guard, job, sync, next, repeat -- and is meant to run for
       * the lifetime of the subsystem. A flat cap on total commands therefore
-@@ -2603,14 +2785,26 @@ static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
+@@ -2596,21 +2922,43 @@ static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
+     int idle = 0;
+     for (;; idle++) {
+         if (idle > 4096) break;
+-        u64 cmd = vm_read64(pc);
++        u64 cmd = jc_read_cmd(jc_ea, pc);
+         u32 op  = (u32)(cmd & 7);
+         u32 ext = (u32)(cmd & 127);
++        jc_ring_note(JR_CMD, pc, cmd);
++        /* A transfer leaves the lap's straight run: read live from there. */
++        if (op == 1 || op == 3 || op == 4 || (op == 7 && ext != (7 | (1 << 3)))) t_lap_n = 0;
+ 
          if (cmd != 0 && op == 0) {                    /* JOB */
              { extern u32 g_spurs_job_ls_handle; g_spurs_job_ls_handle = jc_ea; }
              int idx = jobs++;
 -            jc_run_one_job((u32)(cmd & ~7ull), idx, size_desc);
++            const u32 ev0 = t_jc_events;
 +            int ran = jc_run_one_job(pc, (u32)(cmd & ~7ull), idx, size_desc);
++            jc_ring_note(JR_JOBRET, (u32)(cmd & ~7ull), (u64)(unsigned)ran);
              idle = 0;                    /* real work: the chain is healthy */
++            if (t_jc_events != ev0) {
++                static int delay_us = -1;
++                if (delay_us < 0) { const char* e = getenv("SPURS_JC_RACE_DELAY_US"); delay_us = e ? atoi(e) : 0; }
++                if (delay_us > 0) usleep((useconds_t)delay_us);
++            }
              /* Signal per JOB, not per lap. The application waits once for each
               * unit of work it queued -- this title notified the guard 7 times
               * and sat in event_queue_receive 30 times -- so batching the
@@ -2839,7 +3001,7 @@ index 688ff04..702ea21 100644
              pc += 8; continue;
          }
          if (op == 1) { pc = (u32)(cmd & ~7ull); continue; }   /* RESET_PC */
-@@ -2619,22 +2813,31 @@ static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
+@@ -2619,22 +2967,34 @@ static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
          if (op == 7) {
              if (ext == (7 | (15 << 3))) {                     /* END */
                  printf("[cellSpurs] chain 0x%08X: END after %d job(s)\n", jc_ea, jobs);
@@ -2865,7 +3027,10 @@ index 688ff04..702ea21 100644
 -            pc += 8; continue;
 +            jc_lap_check(pc + 8, 0);
 +            jc_lap_timing(jc_ea, jobs, 0);
++            t_lap_n = 0;
 +            if (!jg_wait(g_ea, slot)) goto out;          /* shut down */
++            jc_lap_snapshot(pc + 8);
++            jc_ring_note(JR_SNAP, pc + 8, t_lap_n);
 +            jc_lap_timing(jc_ea, jobs, 1);
 +            jc_lap_check(pc + 8, 1);
 +            pc += 8;
@@ -2877,7 +3042,7 @@ index 688ff04..702ea21 100644
          }
          /* NOP(0) / SYNC+LWSYNC(2, one virtual SPU: nothing to wait for) /
           * FLUSH(5) / JOBLIST(6, nested arrays TODO) / SET_LABEL */
-@@ -2643,6 +2846,8 @@ static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
+@@ -2643,6 +3003,8 @@ static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
      printf("[cellSpurs] chain 0x%08X: 4096 commands with no job run after %d "
             "job(s) -- malformed?\n",
             jc_ea, jobs);
@@ -2886,7 +3051,7 @@ index 688ff04..702ea21 100644
  }
  
  static DWORD WINAPI jc_thread(LPVOID p)
-@@ -2655,12 +2860,12 @@ static DWORD WINAPI jc_thread(LPVOID p)
+@@ -2655,12 +3017,12 @@ static DWORD WINAPI jc_thread(LPVOID p)
       * Confirms timing-vs-never before committing to the async rewrite. */
      { const char* d = getenv("SPURS_JC_DELAY");
        if (d && *d) Sleep((unsigned)atoi(d)); }
@@ -2902,7 +3067,7 @@ index 688ff04..702ea21 100644
      return 0;
  }
  
-@@ -2693,7 +2898,9 @@ static s32 jc_start(u64 jc_ea, const char* who)
+@@ -2693,7 +3055,9 @@ static s32 jc_start(u64 jc_ea, const char* who)
          if (s_off || !s_jobchains[i].entry_ea) return CELL_OK;
          /* Coalesce: a chain already being walked must not start twice. */
          if (_InterlockedCompareExchange(&s_jobchains[i].running, 1, 0) == 0) {
@@ -2913,7 +3078,7 @@ index 688ff04..702ea21 100644
              if (th) CloseHandle(th);
              else s_jobchains[i].running = 0;
          }
-@@ -2724,10 +2931,11 @@ s32 cellSpursRunJobChain(u64 jc_ea)
+@@ -2724,10 +3088,11 @@ s32 cellSpursRunJobChain(u64 jc_ea)
  s32 cellSpursShutdownJobChain(u64 jc_ea)
  {
      static int _n = 0;
@@ -2926,7 +3091,7 @@ index 688ff04..702ea21 100644
              return CELL_OK;
          }
      }
-@@ -2739,7 +2947,7 @@ s32 cellSpursShutdownJobChain(u64 jc_ea)
+@@ -2739,7 +3104,7 @@ s32 cellSpursShutdownJobChain(u64 jc_ea)
  s32 cellSpursJoinJobChain(u64 jc_ea)
  {
      static int _n = 0;
@@ -2935,7 +3100,7 @@ index 688ff04..702ea21 100644
      /* Run/Kick walk the chain on a host thread, so Join has to wait for it.
       * Returning at once told the title its jobs were done while they were
       * still running. The Simpsons Arcade Game runs and joins a chain every
-@@ -2764,7 +2972,7 @@ s32 cellSpursJoinJobChain(u64 jc_ea)
+@@ -2764,7 +3129,7 @@ s32 cellSpursJoinJobChain(u64 jc_ea)
  s32 cellSpursJobChainGetError(u64 jc_ea, u64 cause_out_ea)
  {
      static int _n = 0;
@@ -2944,7 +3109,7 @@ index 688ff04..702ea21 100644
      if (cause_out_ea) vm_write32((u32)cause_out_ea, 0);
      return CELL_OK;
  }
-@@ -2827,7 +3035,7 @@ s32 _cellSpursQueueInitialize(u64 spurs_ea, u64 taskset_ea, u64 queue_ea,
+@@ -2827,7 +3192,7 @@ s32 _cellSpursQueueInitialize(u64 spurs_ea, u64 taskset_ea, u64 queue_ea,
      memset(vm_base + (uint32_t)buffer_ea, 0, (size_t)size * depth);
  
      static int _n = 0;
@@ -2953,7 +3118,7 @@ index 688ff04..702ea21 100644
          printf("[cellSpurs] _QueueInitialize(taskset=0x%08X q=0x%08X buf=0x%08X size=%u depth=%u dir=%u) -> BE line written\n",
                 (u32)taskset_ea, (u32)queue_ea, (u32)buffer_ea, size, depth, direction);
      return CELL_OK;
-@@ -2836,7 +3044,7 @@ s32 _cellSpursQueueInitialize(u64 spurs_ea, u64 taskset_ea, u64 queue_ea,
+@@ -2836,7 +3201,7 @@ s32 _cellSpursQueueInitialize(u64 spurs_ea, u64 taskset_ea, u64 queue_ea,
  s32 cellSpursQueueClear(u64 queue_ea)
  {
      static int _n = 0;
@@ -2962,7 +3127,7 @@ index 688ff04..702ea21 100644
      return CELL_OK;
  }
  
-@@ -2867,7 +3075,7 @@ s32 cellSpursQueuePushBody(u64 queue_ea, u64 data_ea, u32 isBlocking)
+@@ -2867,7 +3232,7 @@ s32 cellSpursQueuePushBody(u64 queue_ea, u64 data_ea, u32 isBlocking)
                     (u32)queue_ea, (u32)data_ea, isBlocking);
          else if (_n == 8)
              printf("[cellSpurs] QueuePushBody further logs suppressed\n");
@@ -2971,7 +3136,7 @@ index 688ff04..702ea21 100644
          return CELL_OK;
      }
  
-@@ -2941,7 +3149,7 @@ s32 cellSpursQueuePushBody(u64 queue_ea, u64 data_ea, u32 isBlocking)
+@@ -2941,7 +3306,7 @@ s32 cellSpursQueuePushBody(u64 queue_ea, u64 data_ea, u32 isBlocking)
          spu_taskset_signal_task(tsp, (uint32_t)woke);
      }
  
@@ -2980,7 +3145,7 @@ index 688ff04..702ea21 100644
          printf("[cellSpurs] QueuePush#%d q=0x%08X slot=%u (cur=%u->%u) buf=0x%08X+0x%X "
                 "size=%u depth=%u waiters=%u woke=%d sync=%d/%d tail=%d->%d taskset=0x%08X\n",
                 _n, q, slot, cur, nxt, buf, slot * sz, sz, dep, waiters, woke, sync, nsync, tail, ntail, tsp);
-@@ -2952,83 +3160,143 @@ s32 cellSpursQueuePushBody(u64 queue_ea, u64 data_ea, u32 isBlocking)
+@@ -2952,83 +3317,143 @@ s32 cellSpursQueuePushBody(u64 queue_ea, u64 data_ea, u32 isBlocking)
   * Misc SPURS surface the title links (logged CELL_OK stubs).
   * =====================================================================*/
  
@@ -3170,7 +3335,7 @@ index 688ff04..702ea21 100644
      return CELL_OK;
  }
  
-@@ -3119,7 +3387,7 @@ s32 cellSpursTaskGetReadOnlyAreaPattern(u64 pattern_ea, u64 elf_ea)
+@@ -3119,7 +3544,7 @@ s32 cellSpursTaskGetReadOnlyAreaPattern(u64 pattern_ea, u64 elf_ea)
      vm_write64((uint32_t)pattern_ea + 8, word[1]);
  
      static int _n = 0;
@@ -3179,7 +3344,7 @@ index 688ff04..702ea21 100644
          printf("[cellSpurs] TaskGetReadOnlyAreaPattern(elf=0x%08X) -> %016llX %016llX\n",
                 (u32)elf_ea, (unsigned long long)word[0], (unsigned long long)word[1]);
      return CELL_OK;
-@@ -3146,7 +3414,7 @@ s32 cellSpursTaskGetContextSaveAreaSize(u64 size_out_ea, u64 pattern_ea)
+@@ -3146,7 +3571,7 @@ s32 cellSpursTaskGetContextSaveAreaSize(u64 size_out_ea, u64 pattern_ea)
      vm_write32((uint32_t)size_out_ea, size);
  
      static int _n = 0;
@@ -3188,7 +3353,7 @@ index 688ff04..702ea21 100644
          printf("[cellSpurs] TaskGetContextSaveAreaSize(ls=%016llX %016llX, %u blocks) -> %u (0x%X)\n",
                 (unsigned long long)hi, (unsigned long long)lo, blocks, size, size);
      return CELL_OK;
-@@ -3159,7 +3427,7 @@ s32 cellSpursTasksetAttributeSetTasksetSize(CellSpursTasksetAttribute* attr, u32
+@@ -3159,7 +3584,7 @@ s32 cellSpursTasksetAttributeSetTasksetSize(CellSpursTasksetAttribute* attr, u32
  {
      if (!attr) return CELL_SPURS_TASK_ERROR_NULL_POINTER;
      static int _n = 0;
@@ -3197,7 +3362,7 @@ index 688ff04..702ea21 100644
      return CELL_OK;
  }
  
-@@ -3169,42 +3437,61 @@ s32 cellSpursTasksetAttributeSetTasksetSize(CellSpursTasksetAttribute* attr, u32
+@@ -3169,42 +3594,61 @@ s32 cellSpursTasksetAttributeSetTasksetSize(CellSpursTasksetAttribute* attr, u32
  s32 cellSpursQueueAttachLv2EventQueue(u64 queue_ea)
  {
      static int _n = 0;
@@ -3213,10 +3378,14 @@ index 688ff04..702ea21 100644
 - * reads the queue out of main memory itself. Disassembling image 1 around the
 - * task's WAIT_SIGNAL call site (LS 0x12B80) shows the real protocol: it builds
 - * a 128-byte line at LS 0x80 and commits it with
-+/* ---- SPURS LFQueue (CellSpursLFQueue == the 128-byte CellSyncLFQueue line) ----
-  *
+- *
 - *   wrch MFC_LSA,0x80 / MFC_EAH / MFC_EAL / MFC_Size,128 / MFC_Cmd,0xB4 (PUTLLC)
 - *   rdch MFC_RdAtomicStat ; brnz -> retry
++/* ---- SPURS LFQueue (CellSpursLFQueue == the 128-byte CellSyncLFQueue line) ----
+  *
+- * i.e. a GETLLAR/PUTLLC lock-line atomic on the queue's own cache line. So the
+- * bytes in guest memory ARE the interface, and they have to be the real
+- * big-endian CellSyncLFQueue: one 128-byte, 128-aligned line.
 + * The consumer is recompiled SPU task code that works on the queue line in main
 + * memory with GETLLAR/PUTLLC, so the bytes ARE the interface. The layout and the
 + * protocol below were read out of inFamous' EDGE zlib task (SPU image 1, the
@@ -3227,9 +3396,8 @@ index 688ff04..702ea21 100644
 + *   waiter id          LS 0x9800  ((workload id << 8) | task id)
 + * The PPU push is that pop protocol mirrored (pop fields <-> push fields).
   *
-- * i.e. a GETLLAR/PUTLLC lock-line atomic on the queue's own cache line. So the
-- * bytes in guest memory ARE the interface, and they have to be the real
-- * big-endian CellSyncLFQueue: one 128-byte, 128-aligned line.
+- *   0x00 pop1     0x10 size     0x18 buffer(u64)  0x24 direction  0x2C init
+- *   0x08 push1    0x14 depth    0x20 bs[4]        0x28 v1         0x70 eaSignal
 + *   +0x00 u16 pop  done index      +0x08 u16 push done index
 + *   +0x02 u16 pop  done bitmap     +0x0A u16 push done bitmap
 + *   +0x04 u16 pop  waiters (dir 3) +0x0C u16 push waiters (dir 3)
@@ -3240,9 +3408,6 @@ index 688ff04..702ea21 100644
 + *   +0x50 u16 push waiters  +0x52 u16 push waiter ids[15]
 + *   +0x70 u64 owner (taskset, or SPURS|1)
   *
-- *   0x00 pop1     0x10 size     0x18 buffer(u64)  0x24 direction  0x2C init
-- *   0x08 push1    0x14 depth    0x20 bs[4]        0x28 v1         0x70 eaSignal
-- *
 - * The title's own call corroborates the size: it passes q=0x4059FD00 with
 - * buffer=0x4059FD80, exactly 128 bytes later.
 - *
@@ -3289,7 +3454,7 @@ index 688ff04..702ea21 100644
  s32 _cellSpursLFQueueInitialize(u64 owner_ea, u64 queue_ea, u64 buffer_ea,
                                  u32 size, u32 depth, u32 direction)
  {
-@@ -3213,30 +3500,17 @@ s32 _cellSpursLFQueueInitialize(u64 owner_ea, u64 queue_ea, u64 buffer_ea,
+@@ -3213,30 +3657,17 @@ s32 _cellSpursLFQueueInitialize(u64 owner_ea, u64 queue_ea, u64 buffer_ea,
  
      uint32_t q = (uint32_t)queue_ea;
      for (uint32_t o = 0; o < 128; o += 4) vm_write32(q + o, 0);
@@ -3327,7 +3492,7 @@ index 688ff04..702ea21 100644
                 (u32)owner_ea, (u32)queue_ea, (u32)buffer_ea, size, depth, direction);
      return CELL_OK;
  }
-@@ -3244,6 +3518,135 @@ s32 _cellSpursLFQueueInitialize(u64 owner_ea, u64 queue_ea, u64 buffer_ea,
+@@ -3244,6 +3675,135 @@ s32 _cellSpursLFQueueInitialize(u64 owner_ea, u64 queue_ea, u64 buffer_ea,
  s32 cellSpursLFQueueAttachLv2EventQueue(u64 queue_ea)
  {
      static int _n = 0;
@@ -29241,7 +29406,7 @@ index 0000000..71ae9b4
 +
 +#endif /* PS3_THREAD_NAME_H */
 diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
-index 0b235d0..1152b5b 100644
+index 0b235d0..98293bd 100644
 --- a/runtime/spu/spu_channels.c
 +++ b/runtime/spu/spu_channels.c
 @@ -12,18 +12,21 @@
@@ -30528,7 +30693,7 @@ index 0b235d0..1152b5b 100644
 + * a registered function that returns nonzero has done the guest function's
 + * work, and the caller returns as from `bi $r0`. Registration happens from
 + * constructors, before any SPU runs. */
-+#define SPU_NATIVE_MAX 16
++#define SPU_NATIVE_MAX 64
 +static struct { int image_id; uint32_t addr; int (*fn)(spu_context*); } s_native[SPU_NATIVE_MAX];
 +static int s_native_n;
 +int spu_native_register(int image_id, uint32_t addr, int (*fn)(spu_context*))
@@ -31929,7 +32094,7 @@ index 0000000..9dee71d
 +}
 +#endif
 diff --git a/runtime/spu/spu_coherency.c b/runtime/spu/spu_coherency.c
-index 7ac619f..6a6f20d 100644
+index 7ac619f..f97cb74 100644
 --- a/runtime/spu/spu_coherency.c
 +++ b/runtime/spu/spu_coherency.c
 @@ -12,6 +12,10 @@
@@ -31943,7 +32108,7 @@ index 7ac619f..6a6f20d 100644
  
  #include <stdint.h>
  #include <stdio.h>
-@@ -30,31 +34,158 @@ extern "C" {
+@@ -30,32 +34,205 @@ extern "C" {
   * intrinsic (no runtime library symbol needed); elsewhere use the C11
   * equivalent, which lowers to the same LL/SC or lock-xchg on every target.
   * ===========================================================================*/
@@ -32005,14 +32170,16 @@ index 7ac619f..6a6f20d 100644
 +    __asm__ __volatile__("yield");
 +#elif defined(__x86_64__) || defined(__i386__)
 +    __builtin_ia32_pause();
- #endif
++#endif
 +}
++static _Thread_local unsigned long long t_ll_spins;   /* SPU_LL_STATS */
 +static void ll_take(ll_stripe* s)
 +{
 +    unsigned spins = 0;
 +    while (atomic_exchange_explicit(&s->v, 1, memory_order_acquire)) {
 +        do {
 +            ll_pause();
++            t_ll_spins++;
 +            if (++spins >= 4096) { spins = 0; sched_yield(); }
 +        } while (atomic_load_explicit(&s->v, memory_order_relaxed));
 +    }
@@ -32039,8 +32206,8 @@ index 7ac619f..6a6f20d 100644
 +    atomic_thread_fence(memory_order_acquire);
 +    return atomic_load_explicit(&s->seq, memory_order_relaxed) == q;
 +}
-+#endif
-+
+ #endif
+ 
 +/* Which stripe guards a line: neighbouring lines and lines a power-of-two
 + * apart (job lists, per-SPU arrays) spread out. */
 +static inline unsigned ll_stripe_of(uint32_t ea)
@@ -32082,8 +32249,52 @@ index 7ac619f..6a6f20d 100644
 +static ll_stripe g_ll_single;     /* SPU_LL_GLOBAL: the one lock */
 +static int ll_global(void);
 +
++#ifndef _MSC_VER
++/* SPU_LL_STATS=1: per caller (return address of the lock call), how often it
++ * locks, how many stripes and how many pause turns it waited, every 10 s. */
++static int s_ll_stats = -1;
++#define LL_ST_N 64
++static struct { void* ra; unsigned long long n, stripes, spins; } s_ll_st[LL_ST_N];
++static __attribute__((noinline, cold)) void ll_stats_note(void* ra, uint64_t mask, unsigned long long spins)
++{
++    unsigned h = (unsigned)(((uintptr_t)ra >> 2) * 2654435761u) % LL_ST_N;
++    for (unsigned k = 0; k < LL_ST_N; k++, h = (h + 1) % LL_ST_N) {
++        void* cur = __atomic_load_n(&s_ll_st[h].ra, __ATOMIC_RELAXED);
++        if (!cur) { void* z = NULL; if (!__atomic_compare_exchange_n(&s_ll_st[h].ra, &z, ra, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED) && z != ra) continue; cur = ra; }
++        if (cur != ra) continue;
++        __atomic_add_fetch(&s_ll_st[h].n, 1, __ATOMIC_RELAXED);
++        __atomic_add_fetch(&s_ll_st[h].stripes, (unsigned long long)__builtin_popcountll(mask), __ATOMIC_RELAXED);
++        __atomic_add_fetch(&s_ll_st[h].spins, spins, __ATOMIC_RELAXED);
++        break;
++    }
++    static unsigned long long last; extern unsigned long long ps3_qpc_us(void);
++    const unsigned long long now = ps3_qpc_us(), l = __atomic_load_n(&last, __ATOMIC_RELAXED);
++    if (now - l > 10000000ull && __atomic_compare_exchange_n(&last, (unsigned long long*)&l, now, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
++        for (unsigned k = 0; k < LL_ST_N; k++)
++            if (s_ll_st[k].ra && s_ll_st[k].n)
++                fprintf(stderr, "[ll-stats] ra=%p locks=%llu stripes=%llu spins=%llu\n", s_ll_st[k].ra,
++                        __atomic_exchange_n(&s_ll_st[k].n, 0, __ATOMIC_RELAXED),
++                        __atomic_exchange_n(&s_ll_st[k].stripes, 0, __ATOMIC_RELAXED),
++                        __atomic_exchange_n(&s_ll_st[k].spins, 0, __ATOMIC_RELAXED));
++    }
++}
++#endif
++
 +void spu_lockline_lock_mask(uint64_t mask)
 +{
++#ifndef _MSC_VER
++    if (__builtin_expect(s_ll_stats != 0, 0)) {
++        if (s_ll_stats < 0) s_ll_stats = getenv("SPU_LL_STATS") ? 1 : 0;
++        if (s_ll_stats) {
++            const unsigned long long s0 = t_ll_spins;
++            void* ra = __builtin_return_address(0);
++            if (mask && ll_global()) ll_take(&g_ll_single);
++            else for (uint64_t m = mask; m; m &= m - 1u) ll_take(&g_ll[__builtin_ctzll(m)]);
++            ll_stats_note(ra, mask, t_ll_spins - s0);
++            return;
++        }
++    }
++#endif
 +    if (mask && ll_global()) { ll_take(&g_ll_single); return; }
 +    while (mask) {                       /* ascending: the deadlock-free order */
 +        const int i = __builtin_ctzll(mask);
@@ -32111,10 +32322,11 @@ index 7ac619f..6a6f20d 100644
 +
 +void spu_lockline_lock(void)   { spu_lockline_lock_mask(~0ull); }
 +void spu_lockline_unlock(void) { spu_lockline_unlock_mask(~0ull); }
- 
++
  /* ===========================================================================
   * The reserved-line bitmap
-@@ -68,18 +199,21 @@ void spu_lockline_unlock(void) { atomic_flag_clear_explicit(&g_lockline, memory_
+  *
+@@ -68,18 +245,21 @@ void spu_lockline_unlock(void) { atomic_flag_clear_explicit(&g_lockline, memory_
   * line outside a hardcoded window would be silently non-coherent, which is the
   * failure this whole file exists to remove.
   * ===========================================================================*/
@@ -32139,7 +32351,7 @@ index 7ac619f..6a6f20d 100644
  
  /* The SPU contexts that have reserved a line. Sized to match the MFC engine
   * registry in spu_channels.c, which is the ceiling on live SPU contexts. */
-@@ -88,16 +222,205 @@ static spu_context* s_coh_ctxs[SPU_COH_MAX_CTX];
+@@ -88,16 +268,205 @@ static spu_context* s_coh_ctxs[SPU_COH_MAX_CTX];
  
  unsigned long g_spu_lr_raise = 0;
  
@@ -32350,7 +32562,7 @@ index 7ac619f..6a6f20d 100644
      }
      /* More live SPU contexts than the registry holds. The ones already in it
       * still get their events; this one would silently never wake, so say so. */
-@@ -129,7 +452,8 @@ void spu_coh_unregister(spu_context* ctx)
+@@ -129,7 +498,8 @@ void spu_coh_unregister(spu_context* ctx)
       * spu_coh_notify_write, reading a freed thread stack. */
      spu_lockline_lock();
      for (int i = 0; i < SPU_COH_MAX_CTX; i++)
@@ -32360,7 +32572,7 @@ index 7ac619f..6a6f20d 100644
      spu_lockline_unlock();
  }
  
-@@ -143,13 +467,13 @@ void spu_coh_forget_range(uintptr_t lo, uintptr_t hi)
+@@ -143,13 +513,13 @@ void spu_coh_forget_range(uintptr_t lo, uintptr_t hi)
  {
      spu_lockline_lock();
      for (int i = 0; i < SPU_COH_MAX_CTX; i++) {
@@ -32378,7 +32590,7 @@ index 7ac619f..6a6f20d 100644
          }
      }
      spu_lockline_unlock();
-@@ -157,9 +481,9 @@ void spu_coh_forget_range(uintptr_t lo, uintptr_t hi)
+@@ -157,9 +527,9 @@ void spu_coh_forget_range(uintptr_t lo, uintptr_t hi)
  
  int spu_coh_is_reserved(uint32_t addr)
  {
@@ -32390,7 +32602,7 @@ index 7ac619f..6a6f20d 100644
  }
  
  /* A DMA PUT is issued BY an SPU, and hardware does not take that SPU's own
-@@ -175,37 +499,50 @@ int spu_coh_is_reserved(uint32_t addr)
+@@ -175,37 +545,50 @@ int spu_coh_is_reserved(uint32_t addr)
  void spu_coh_notify_write_except(uint32_t ea, const void* self)
  {
      uint32_t line = ea & ~127u;
@@ -44470,7 +44682,7 @@ index 0000000..5bdf0f7
 +    lv2_syscall_register(tbl, 497, sys_prx_load_module_on_memcontainer);
 +}
 diff --git a/runtime/syscalls/lv2_register.c b/runtime/syscalls/lv2_register.c
-index bcb1df4..41a32ca 100644
+index bcb1df4..a6839f9 100644
 --- a/runtime/syscalls/lv2_register.c
 +++ b/runtime/syscalls/lv2_register.c
 @@ -10,6 +10,7 @@
@@ -46144,7 +46356,7 @@ index bcb1df4..41a32ca 100644
          uint32_t data = spu_channel_read(&spu->ch_out_mbox);
          unsigned port = code & 63;
          uint32_t queue = 0;
-@@ -1643,6 +1973,13 @@ static int spu_deliver_user_event(spu_context* spu, uint32_t value)
+@@ -1643,12 +1973,24 @@ static int spu_deliver_user_event(spu_context* spu, uint32_t value)
              spu_group_t* group = spu_find_group(spu->spu_group_id);
              if (group) queue = group->user_event_ports[port];
              ReleaseSRWLockShared(&s_spu_port_lock);
@@ -46158,7 +46370,18 @@ index bcb1df4..41a32ca 100644
          }
          result = CELL_ENOTCONN;
          if (queue) {
-@@ -1659,7 +1996,7 @@ static int64_t sys_spu_thread_group_disconnect_event_handler(ppu_context* ctx)
+             int rc = sys_event_queue_push_by_id(queue, 0xFFFFFFFF53505501ull,
+                 spu->spu_id, ((uint64_t)port << 32) | (value & 0xFFFFFFu), data);
+             result = rc == 0 ? CELL_OK : CELL_EBUSY;
++            /* cellSpurs.c: a job-chain walker notes what its job sent. */
++            if (!spu->spu_group_id && rc == 0) {
++                extern void spurs_jc_event_pushed(uint32_t queue, uint32_t port, uint64_t data);
++                spurs_jc_event_pushed(queue, port, data);
++            }
+         }
+     }
+     if (code < 64) spu_channel_write(&spu->ch_in_mbox, result);
+@@ -1659,7 +2001,7 @@ static int64_t sys_spu_thread_group_disconnect_event_handler(ppu_context* ctx)
  {
      uint32_t group_id = (uint32_t)ctx->gpr[3];
      spu_group_t* g = spu_find_group(group_id);
@@ -46167,7 +46390,7 @@ index bcb1df4..41a32ca 100644
      fprintf(stderr, "[SPU] group_disconnect_event group=0x%X\n", group_id);
      fflush(stderr);
      ctx->gpr[3] = 0;
-@@ -1694,6 +2031,91 @@ static int64_t sys_spu_thread_connect_event_handler(ppu_context* ctx)
+@@ -1694,6 +2036,91 @@ static int64_t sys_spu_thread_connect_event_handler(ppu_context* ctx)
      return 0;
  }
  
@@ -46259,7 +46482,7 @@ index bcb1df4..41a32ca 100644
  /* SPU -> PPU outbound mailbox delivery. Installed into spu_channels.c's
   * g_spu_out_mbox_hook; called when a (kernel/policy/task) SPU thread writes
   * WrOutMbox/WrOutIntrMbox. Route the value to the event queue bound to the SPU
-@@ -1723,7 +2145,7 @@ static void ydkj_spu_out_mbox_deliver(uint32_t group_id, uint32_t spu_id,
+@@ -1723,7 +2150,7 @@ static void ydkj_spu_out_mbox_deliver(uint32_t group_id, uint32_t spu_id,
      }
      if (!q && t && t->connected_queue) q = t->connected_queue;
      if (!q) { spu_group_t* g = spu_find_group(group_id); if (g) q = g->event_queue_id; }
@@ -46268,7 +46491,7 @@ index bcb1df4..41a32ca 100644
          fprintf(stderr, "[SPU->PPU] deliver? spu=0x%X intr=%d val=0x%08X q=%u (thread %s)\n",
                  spu_id, is_intr, value, q, t ? "found" : "MISSING"); }
      if (!q) return;
-@@ -1732,7 +2154,7 @@ static void ydkj_spu_out_mbox_deliver(uint32_t group_id, uint32_t spu_id,
+@@ -1732,7 +2159,7 @@ static void ydkj_spu_out_mbox_deliver(uint32_t group_id, uint32_t spu_id,
      sys_event_queue_push_by_id(q,
          ((uint64_t)spu_id << 32) | (is_intr ? 0x2u : 0x1u),
          (uint64_t)value, 0, 0);
@@ -46277,7 +46500,7 @@ index bcb1df4..41a32ca 100644
          fprintf(stderr, "[SPU->PPU] mbox deliver spu=0x%X intr=%d val=0x%08X -> q=%u\n",
                  spu_id, is_intr, value, q); }
  }
-@@ -1807,9 +2229,9 @@ static int64_t sys_spu_thread_read_ls_handler(ppu_context* ctx)
+@@ -1807,9 +2234,9 @@ static int64_t sys_spu_thread_read_ls_handler(ppu_context* ctx)
      uint32_t ls_offset = (uint32_t)ctx->gpr[4];
      uint32_t value_ea  = (uint32_t)ctx->gpr[5];
      uint32_t type      = (uint32_t)ctx->gpr[6];
@@ -46289,7 +46512,7 @@ index bcb1df4..41a32ca 100644
            { extern void ppu_guest_caller(char*, size_t);
              char who[64]; ppu_guest_caller(who, sizeof who);
              fprintf(stderr, "[spu-readls] tid=0x%08X off=0x%05X size=%u from %s\n",
-@@ -1826,11 +2248,10 @@ static int64_t sys_spu_thread_read_ls_handler(ppu_context* ctx)
+@@ -1826,11 +2253,10 @@ static int64_t sys_spu_thread_read_ls_handler(ppu_context* ctx)
            uint64_t v = 0;
            for (uint32_t k = 0; k < type && k < 8; k++)
                v = (v << 8) | jls[ls_offset + k];
@@ -46304,7 +46527,7 @@ index bcb1df4..41a32ca 100644
                  fprintf(stderr, "[spu-readls] chain 0x%08X off=0x%05X -> 0x%llX\n",
                          tid, ls_offset, (unsigned long long)v); }
            ctx->gpr[3] = 0;
-@@ -1898,7 +2319,10 @@ uint32_t spu_thread_get_group_id(uint32_t tid)
+@@ -1898,7 +2324,10 @@ uint32_t spu_thread_get_group_id(uint32_t tid)
  void spu_thread_publish_ctx(uint32_t tid, void* c)
  {
      spu_thread_t* t = spu_find_thread(tid);
@@ -46316,7 +46539,7 @@ index bcb1df4..41a32ca 100644
  }
  
  /* Public: consume the pending inbound-mailbox command for a SPU thread, if any.
-@@ -1912,161 +2336,25 @@ uint32_t spu_thread_take_pending_inmbox(uint32_t tid)
+@@ -1912,161 +2341,25 @@ uint32_t spu_thread_take_pending_inmbox(uint32_t tid)
      return v;
  }
  
@@ -46492,7 +46715,7 @@ index bcb1df4..41a32ca 100644
  }
  
  /* sys_spu_image_open(*img, *path) — load an SPU ELF from the VFS, parse its
-@@ -2313,20 +2601,21 @@ static int64_t sys_spu_thread_write_snr_handler(ppu_context* ctx)
+@@ -2313,20 +2606,21 @@ static int64_t sys_spu_thread_write_snr_handler(ppu_context* ctx)
          ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)0x80010005;
          return -1;
      }
@@ -46522,7 +46745,7 @@ index bcb1df4..41a32ca 100644
      ctx->gpr[3] = 0;
      return 0;
  }
-@@ -2422,10 +2711,29 @@ static int64_t sys_usbd_receive_event_handler(ppu_context* ctx)
+@@ -2422,10 +2716,29 @@ static int64_t sys_usbd_receive_event_handler(ppu_context* ctx)
      return CELL_OK;
  }
  
@@ -46552,7 +46775,7 @@ index bcb1df4..41a32ca 100644
  
      /* Process control */
      lv2_syscall_register(tbl, SYS_PROCESS_GETPID, sys_process_getpid_handler);
-@@ -2500,7 +2808,8 @@ void lv2_register_all_syscalls(lv2_syscall_table* tbl)
+@@ -2500,7 +2813,8 @@ void lv2_register_all_syscalls(lv2_syscall_table* tbl)
      lv2_syscall_register(tbl, SYS_SPU_INITIALIZE,             sys_spu_initialize_handler);
      lv2_syscall_register(tbl, SYS_SPU_IMAGE_OPEN,             sys_spu_image_open_handler);
      lv2_syscall_register(tbl, SYS_SPU_IMAGE_IMPORT,           sys_spu_image_import_handler);
@@ -46562,7 +46785,7 @@ index bcb1df4..41a32ca 100644
      lv2_syscall_register(tbl, SYS_SPU_THREAD_GROUP_CREATE,    sys_spu_thread_group_create_handler);
      lv2_syscall_register(tbl, SYS_SPU_THREAD_GROUP_DESTROY,   sys_spu_thread_group_destroy_handler);
      lv2_syscall_register(tbl, SYS_SPU_THREAD_GROUP_START,     sys_spu_thread_group_start_handler);
-@@ -2516,7 +2825,8 @@ void lv2_register_all_syscalls(lv2_syscall_table* tbl)
+@@ -2516,7 +2830,8 @@ void lv2_register_all_syscalls(lv2_syscall_table* tbl)
      { extern void (*g_spu_out_mbox_hook)(uint32_t,uint32_t,int,uint32_t);
        g_spu_out_mbox_hook = ydkj_spu_out_mbox_deliver; }
      { extern int (*g_spu_user_event_hook)(spu_context*, uint32_t);
@@ -46572,7 +46795,7 @@ index bcb1df4..41a32ca 100644
      lv2_syscall_register(tbl, SYS_SPU_THREAD_DISCONNECT_EVENT,sys_spu_thread_stub);
      lv2_syscall_register(tbl, SYS_SPU_THREAD_GROUP_CONNECT_EVENT, sys_spu_thread_group_connect_event_handler);
      lv2_syscall_register(tbl, SYS_SPU_THREAD_GROUP_DISCONNECT_EVENT, sys_spu_thread_group_disconnect_event_handler);
-@@ -2526,8 +2836,9 @@ void lv2_register_all_syscalls(lv2_syscall_table* tbl)
+@@ -2526,8 +2841,9 @@ void lv2_register_all_syscalls(lv2_syscall_table* tbl)
      lv2_syscall_register(tbl, SYS_SPU_THREAD_SET_SPU_CFG,    sys_spu_thread_set_spu_cfg_handler);
      lv2_syscall_register(tbl, SYS_SPU_THREAD_GET_SPU_CFG,    sys_spu_thread_get_spu_cfg_handler);
      lv2_syscall_register(tbl, SYS_SPU_THREAD_WRITE_SPU_MB,  sys_spu_thread_write_spu_mb_handler);
@@ -46584,7 +46807,7 @@ index bcb1df4..41a32ca 100644
      lv2_syscall_register(tbl, SYS_SPU_THREAD_GROUP_CONNECT_EVENT_ALL_THREADS, sys_spu_thread_group_connect_event_all_threads_handler);
  }
  
-@@ -2589,18 +2900,21 @@ int lv2_try_syscall(ppu_context* ctx)
+@@ -2589,18 +2905,21 @@ int lv2_try_syscall(ppu_context* ctx)
      /* YDKJ diag: full event-syscall trace (#128..141) during SPURS init to find
       * why libsre asserts ESRCH in event_helper.c. Snapshot args BEFORE handler. */
      uint32_t _a3 = (uint32_t)ctx->gpr[3], _a4 = (uint32_t)ctx->gpr[4], _a5 = (uint32_t)ctx->gpr[5];

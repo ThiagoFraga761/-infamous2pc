@@ -526,3 +526,98 @@ All of these must match byte for byte:
   differ on the same input, which is a model gap, not a key problem. The
   likely candidates are graph programs with opcodes other than 3, or tail
   paths the frame checks do not see. Dumps are needed to say which.
+
+## 9. Kernels for character rigs (2026-10-18)
+
+The cache of section 8 never hits characters (per-instance times), so the
+hot leaf functions are replaced one by one instead: `work/port/
+job2025_kernels_native.c`, off by default (`PS3RECOMP_NATIVE_ANIM=0/1/2`).
+Each kernel leaves the local store and the registers a caller can see
+exactly as the SPU function does, whatever the rig or the buffers.
+
+### 9.1 How the kernels are made
+
+Both kinds are generated from the module (game code: generated at build
+time, `work/port/tools/gen_anim_kernels.sh`, never committed).
+
+- `tools/kgen.py`, instruction by instruction (all eight functions):
+  host registers instead of the context, float ops as one AVX-512 op with
+  embedded truncation (DAZ must be on, as on every SPU thread), a lane at or
+  above FLT_MAX (exponent-255 operand or overflow) recomputed by the
+  helpers' exact fix-up, shufb with a known control as fixed permutes,
+  frest/frsqest/cuflt/csflt/cflts as four-lane forms of the helpers, zeros
+  made +0 where a non-arithmetic use can see the sign. About 1.2-1.6x the
+  lifted code (clang); the lift already keeps registers in locals, so the
+  gain is in the float ops, the shuffles and the scalar estimate helpers
+  (their store-then-reload of four lanes stalls on store forwarding).
+- `tools/kwide.py`, four groups per AVX-512 register: the loop is run
+  symbolically on quads for a few groups, each group's stores are sliced out
+  and their leaves made group-relative; when every group is the same graph
+  (pipelined prologue/epilogue included), it is emitted for four groups at
+  once, one per 128-bit lane, each node the same SPU instruction. The kernel
+  checks before starting the layout the graph assumed (in-place arrays,
+  alignment, written ranges disjoint from everything else read or written,
+  stack included); otherwise the instruction-by-instruction kernel runs.
+  Used for 0x16320, 0x16A30, 0x17780.
+- Volatile registers: the wide kernels leave r2, r4-r79 untouched; no
+  caller reads them after these calls (`tools/kabi.py`; 0x16320's caller
+  then calls 0x17280, which takes r3-r11 only).
+
+### 9.2 Results (Rog Ally, Zen 5, harness, machine shared with a running game)
+
+| function | role | kernel | lifted | speed-up |
+|---|---|---:|---:|---:|
+| 0x16320 | pose blend (slerp), 268 bones | 2.9 us | 7.2 us | 2.5x (wide) |
+| 0x16A30 | pose blend, modes 1-6, 268 bones | 4.8 us | 10.9 us | 2.3x (wide) |
+| 0x17780 | pose to 3x4, 268 bones | 0.72 us | 2.2 us | 3.0x (wide) |
+| 0x179C0 | anim-graph op 3, 256 entries | 15.4 us | 22.7 us | 1.5x |
+| 0x1A570 | 48-bit rotation keys, 268 bones | 0.33 us | 0.51 us | 1.6x |
+| 0x19A20 | key decoder, 256 | 7.8 us | 10.1 us | 1.3x |
+| 0x1B5F0 | key decoder, 256 | 15.9 us | 20.9 us | 1.3x |
+| 0x1C510 | key decoder, 256 | 7.8 us | 10.4 us | 1.3x |
+
+Decoder and op-3 sizes come from captured states with the count raised and
+what they read zero-filled (`ktest SCALE= ZFILL=1`): their loops have no
+data-dependent branches, but the float fix-up paths run more on zeros.
+
+### 9.3 Validation
+
+- Replay of the 289 captured jobs with the kernels in place (`kharness`
+  KERN=1): 867/867 PUTs byte-exact; KERN=2 (kernel on a copy, compared with
+  the SPU code at the return): 4257 calls, 0 differences.
+- `ktest`: captured states, synthetic 268-bone states (`mkslerp.py`,
+  `mkdec.py`: random/equal/negated quaternions, weights or none, separate or
+  in-place arrays, repeated indices) and fuzzing of everything the function
+  reads (special floats, random bits, low-bit flips at scale): about 16k
+  runs, 0 differences against the interpreter. Runs where fuzzed indices
+  make the SPU code store into its own code are skipped (the interpreter
+  then runs other code; the static lift would not).
+- The fuzzer found one real bug during development (the exact fix-up kept
+  -0 from x86), since fixed.
+- Mutants (`oracle/mut.sh`): operand swap, wrong op, wrong lane step,
+  dropped +0, permute byte, frest table entry, skipped fix-up, cflts
+  saturation, dropped in-place check: all caught. Not caught: two of three
+  `fm`->`fa` mutants in 0x1C510, whose results the synthetic headers always
+  discard by selb: the decoders' data paths are covered only as far as the
+  synthetic inputs go (no character capture exists).
+
+### 9.4 What did not work, and what is left
+
+- Group-parallel decoders: their loops carry a bit position that each group
+  advances by widths decoded from the stream (popcounts), so group k needs
+  groups 0..k-1. A two-phase kernel (positions first, sequentially; then
+  the groups four at a time) fits: the recurrence is 4 of 165 nodes per
+  group in 0x1C510, 4 of 95 in 0x1D4D0, ~20% in 0x19A20/0x1B5F0.
+  `tools/kwide2.py` has the start of it (gathers, scatters, per-quad
+  ownership tags with the SPU's visibility distances); unfinished, unused.
+- Op 3 (0x179C0) four groups at a time: works in principle (gathers by bone
+  index, last group from the epilogue code), but on real lists parents sit
+  within the pipeline distance and the tag checks fall back nearly always.
+  Its SPU loop reads a parent's record before an entry less than 4 groups
+  back has stored it: whatever the data, a kernel must reproduce that.
+- 0x17280 (the float-channel blend) is already hooked by job2025_native.c,
+  and spu_native_entry serves the first registration only.
+- The runtime has 16 native-entry slots (SPU_NATIVE_MAX) and the other
+  native files use 8: this file registers 8 and fills the table. Raising
+  SPU_NATIVE_MAX would allow 0x1D4D0/0x1CBB0/0x1A870/0x1AF00 (generated the
+  same way, not measured).

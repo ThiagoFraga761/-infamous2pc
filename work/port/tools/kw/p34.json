@@ -1,0 +1,2 @@
+{"name": "w_17780", "lo": "17780", "hi": "179C0", "count": "r5",
+ "groups_c": "(N + 3) >> 2", "stride": {"r3": 192, "r4": 192}, "alias": [], "groups": 6, "stack": 512}

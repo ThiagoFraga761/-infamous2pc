@@ -25,6 +25,7 @@
 !/work/port/port_cpu_check.c
 !/work/port/native_passes.c
 !/work/port/re_trace.c
+!/work/port/job2025_kernels_native.c
 !/work/port/ec5f_native.c
 !/work/port/job2025_native.c
 !/work/port/edge_kernels_native.c
@@ -43,6 +44,11 @@
 /work/port/tools/*
 !/work/port/tools/spu_cc.sh
 !/work/port/tools/ppu_cxx.sh
+!/work/port/tools/gen_anim_kernels.sh
+!/work/port/tools/kgen.py
+!/work/port/tools/kwide.py
+!/work/port/tools/kabi.py
+!/work/port/tools/kw/
 
 /work/tools/*
 !/work/tools/lift_spu.py

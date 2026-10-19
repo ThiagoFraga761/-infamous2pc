@@ -1,0 +1,2 @@
+{"name": "w_18B80", "lo": "18B80", "hi": "18CA0", "count": "r6",
+ "groups_c": "N", "stride": {"r3": 48, "r4": 64}, "alias": [["r3", "r5"]], "groups": 6, "stack": 512}

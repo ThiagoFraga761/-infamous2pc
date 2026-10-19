@@ -162,6 +162,24 @@ if(PORT_ENABLE_SPU)
              "${CMAKE_CURRENT_SOURCE_DIR}/edge_kernels_native.c"
              "${CMAKE_CURRENT_SOURCE_DIR}/jobbc11_native.c"
              "${CMAKE_CURRENT_SOURCE_DIR}/job207_native.c")
+        # The animation kernels' bodies are generated from the lifted job
+        # module (game code, so not in the repository): tools/gen_anim_kernels.sh.
+        set(_anim_bin "${SPU_DIR}/jobmods/jobmod_2025343b09d0_eFE70.bin")
+        if(EXISTS "${_anim_bin}")
+            set(ANIM_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/anim_gen")
+            add_custom_command(
+                OUTPUT "${ANIM_GEN_DIR}/job2025_kernels_gen.h" "${ANIM_GEN_DIR}/job2025_kernels_wide.h"
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${ANIM_GEN_DIR}"
+                COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_anim_kernels.sh" "${_anim_bin}"
+                        "${PS3RECOMP_DIR}" "${ANIM_GEN_DIR}"
+                DEPENDS "${_anim_bin}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_anim_kernels.sh"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tools/kgen.py" "${CMAKE_CURRENT_SOURCE_DIR}/tools/kwide.py"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tools/kabi.py"
+                VERBATIM)
+            list(APPEND SPU_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/job2025_kernels_native.c")
+        else()
+            message(STATUS "  (no ${_anim_bin} -- animation kernels left out)")
+        endif()
         # Generated beside the lift; each is present only once its generator
         # has been run, so each is included only if it is actually here.
         foreach(gen IN ITEMS spu_workloads.c spu_elf_workloads.c jobmods_register.c taskset_policy_bytes.c)
@@ -250,6 +268,12 @@ if(SPU_SOURCES)
         endif()
         set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "${_spu_opts}")
     endif()
+endif()
+if(ANIM_GEN_DIR)
+    set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/job2025_kernels_native.c" APPEND PROPERTY
+                 INCLUDE_DIRECTORIES "${ANIM_GEN_DIR}")
+    set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/job2025_kernels_native.c" APPEND PROPERTY
+                 OBJECT_DEPENDS "${ANIM_GEN_DIR}/job2025_kernels_gen.h;${ANIM_GEN_DIR}/job2025_kernels_wide.h")
 endif()
 if(PORT_SPU_MARCH MATCHES "^x86-64-v[234]$" AND SPU_SOURCES)
     set_source_files_properties(port_cpu_check.c PROPERTIES
