@@ -136,11 +136,9 @@ cada frame estão em [docs/NOTES.md](docs/NOTES.md).
 
 Tudo vem do **seu** PS3. Nada disso está no repositório.
 
-| O quê | De onde | Para quê |
-|---|---|---|
-| Disco do inFAMOUS 2, **BCUS98125 (EUA), versão 01.00** | dump do seu disco | o jogo (`PS3_GAME/` inteiro) |
-| `PS3_GAME/USRDIR/EBOOT.elf` | o `EBOOT.BIN` do disco, descriptografado (por exemplo no RPCS3) | o código que é traduzido |
-| Firmware do PS3 instalado no RPCS3 (`dev_flash`) | o PUP oficial, instalado no RPCS3 | as leituras de `/dev_flash` do jogo |
+- **O jogo:** disco do inFAMOUS 2, **BCUS98125 (EUA), versão 01.00**, em dump do seu disco. Serve de `PS3_GAME/` inteiro.
+- **O código:** `PS3_GAME/USRDIR/EBOOT.elf`, que é o `EBOOT.BIN` do disco descriptografado (por exemplo no RPCS3). É o código que é traduzido.
+- **O firmware:** o PUP oficial do PS3, instalado no RPCS3 (`dev_flash`). Serve para as leituras de `/dev_flash` do jogo.
 
 O passo a passo está em [docs/ARQUIVOS_NECESSARIOS.md](docs/ARQUIVOS_NECESSARIOS.md).
 
