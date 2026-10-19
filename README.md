@@ -12,6 +12,8 @@
   <img src="https://img.shields.io/badge/c%C3%B3digo-MIT-blue" alt="Código MIT">
 </p>
 
+<p align="center"><b>inFAMOUS 2 PC port</b> · native on Linux · PS3 static recompilation · Vulkan · up to 4K · unlocked frame rate · Brazilian Portuguese dub</p>
+
 <p align="center">
   <a href="#english"><b>English below</b></a> ·
   <a href="docs/ARQUIVOS_NECESSARIOS.md">Arquivos necessários</a> ·
@@ -203,6 +205,16 @@ As opções ficam gravadas em `user/settings.ini`:
 - **Variáveis de ambiente:** continuam valendo e ganham do arquivo
   (`PS3RECOMP_RES_SCALE=2`, `PS3_VOICE_LANG=english`, `PS3RECOMP_VK_PRESENT=fifo`…).
   O `work/play.sh` documenta as outras.
+
+## Perguntas frequentes
+
+**Existe inFAMOUS 2 para PC?** Não oficialmente. Este projeto roda o jogo do PS3 nativo no Linux, sem emulador, por recompilação estática.
+
+**Dá para jogar inFAMOUS 2 no PC sem RPCS3?** Sim, é o que este port faz, com a sua própria cópia do jogo. Os arquivos necessários estão em [docs/ARQUIVOS_NECESSARIOS.md](docs/ARQUIVOS_NECESSARIOS.md).
+
+**Roda no Windows?** Há um pacote em teste. Veja o [Status](#status).
+
+**O jogo vem junto?** Não. Nenhum arquivo do jogo faz parte do projeto.
 
 ## Idioma
 
