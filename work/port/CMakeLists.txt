@@ -161,7 +161,8 @@ if(PORT_ENABLE_SPU)
              "${CMAKE_CURRENT_SOURCE_DIR}/job2025_native.c"
              "${CMAKE_CURRENT_SOURCE_DIR}/edge_kernels_native.c"
              "${CMAKE_CURRENT_SOURCE_DIR}/jobbc11_native.c"
-             "${CMAKE_CURRENT_SOURCE_DIR}/job207_native.c")
+             "${CMAKE_CURRENT_SOURCE_DIR}/job207_native.c"
+             "${CMAKE_CURRENT_SOURCE_DIR}/job220_native.c")
         # The animation kernels' bodies are generated from the lifted job
         # module (game code, so not in the repository): tools/gen_anim_kernels.sh.
         set(_anim_bin "${SPU_DIR}/jobmods/jobmod_2025343b09d0_eFE70.bin")
