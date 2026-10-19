@@ -140,7 +140,7 @@ Tudo vem do **seu** PS3. Nada disso está no repositório.
 - **O código:** `PS3_GAME/USRDIR/EBOOT.elf`, que é o `EBOOT.BIN` do disco descriptografado (por exemplo no RPCS3). É o código que é traduzido.
 - **O firmware:** o PUP oficial do PS3, instalado no RPCS3 (`dev_flash`). Serve para as leituras de `/dev_flash` do jogo.
 
-O passo a passo está em [docs/ARQUIVOS_NECESSARIOS.md](docs/ARQUIVOS_NECESSARIOS.md).
+O passo a passo está em [docs/ARQUIVOS_NECESSARIOS.md](docs/ARQUIVOS_NECESSARIOS.md). Para usar em um segundo PC, o `disc/` é copiado direto entre as máquinas (por exemplo com `rsync`): ele nunca vai para o git.
 
 **PC:**
 

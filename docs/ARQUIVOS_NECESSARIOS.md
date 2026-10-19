@@ -86,3 +86,15 @@ faria no console. Os saves ficam em
 
 Nothing built from these files may be shared: it is the game's code,
 translated.
+
+## Levar os arquivos para outro PC
+
+O repositório é público e não carrega nada do jogo, então o `disc/` (com o
+`EBOOT.elf`) não vai pelo git. Copie direto de uma máquina sua para a outra:
+
+```bash
+# na máquina que já tem o disc/, com o clone do repositório já feito na outra
+rsync -aP disc/ usuario@outro-pc:~/ps3infamou/disc/
+```
+
+Depois, na outra máquina: `git pull` e o `scripts/lift.sh` como de costume.
