@@ -1,0 +1,20 @@
+{
+  "_comment": "Hand-checked names (hypotheses from reading the code; see rpi/game-re/RESEARCH.md). gen_symbols.py applies them over everything else.",
+  "0x00094F48": "Collectibles_CountCategory",
+  "0x000954D4": "Collectibles_IsCollected",
+  "0x000982E8": "Collectibles_SetCollected",
+  "0x000985AC": "Collectibles_CollectShardAtPos",
+  "0x00095618": "CollectibleComp_IsCollected",
+  "0x00098704": "CollectibleComp_SetCollected",
+  "0x000962CC": "CollectibleComp_InitIdFromPos",
+  "0x000952AC": "ShardIdFromPos",
+  "0x00095548": "ShardEntry_IsCollected",
+  "0x00095234": "BlastShardManager_CountPing",
+  "0x00095724": "BlastShardManager_ShowDistantPing",
+  "0x0028A780": "SPingTarget_SetEnabled",
+  "0x0028A7BC": "SPingTarget_SPingTarget",
+  "0x0028A634": "PingSystem_Register",
+  "0x00463198": "MapIcons_Add",
+  "0x00461B84": "MapIcons_Remove",
+  "0x00122C44": "Persist_MarkDirty"
+}

@@ -497,6 +497,7 @@ static void harness_guest_caller(uint32_t opd, uint64_t a0, uint64_t a1,
 }
 
 extern "C" void port_native_passes_init(void);
+extern "C" void re_trace_init(void);   /* re_trace.c: PS3RECOMP_RE_TRACE / _WATCH */
 
 #ifndef _WIN32
 /* The log off the game's threads. stdout and stderr become a pipe that one
@@ -782,6 +783,7 @@ int main(int argc, char** argv)
     ppu_sysprx_register();   /* boot-critical CRT */
     ppu_fs_register();       /* cellFs over the game directory */
     lv2_init_syscalls();     /* the lv2 syscall table */
+    re_trace_init();         /* after every registration, so its hooks win */
 
     /* Install the guest-callback hook, then start the frame clock. It no-ops
      * until the title registers its vblank and flip handlers during init. */

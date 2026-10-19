@@ -97,7 +97,11 @@ watch_stall() {
     local tick=0 prev="" cur
     snap() { for t in /proc/"$gpid"/task/*; do
                  local st; st=$(sed 's/.*) //' "$t/stat" 2>/dev/null) || continue
-                 set -- $st; echo "$(tr ' ' _ < "$t/comm" 2>/dev/null) $(( ${12} + ${13} ))"
+                 set -- $st
+                 # The main PPU thread apart from the game's other PPU threads,
+                 # which share its name.
+                 if [ "${t##*/}" = "$gpid" ]; then echo "main $(( ${12} + ${13} ))"
+                 else echo "$(tr ' ' _ < "$t/comm" 2>/dev/null) $(( ${12} + ${13} ))"; fi
              done | awk '{a[$1] += $2} END {for (k in a) print k, a[k]}' | sort; }
     while kill -0 "$gpid" 2>/dev/null; do
         sleep 5

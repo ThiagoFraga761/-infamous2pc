@@ -199,6 +199,7 @@ add_executable(${PROJECT_NAME}
     stubs.cpp
     port_cpu_check.c
     native_passes.c
+    re_trace.c
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
     ${RECOMP_SOURCES}
